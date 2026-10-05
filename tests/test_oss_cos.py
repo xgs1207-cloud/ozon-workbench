@@ -264,6 +264,122 @@ class UploadTests(StorageFixture):
             self.storage.publish_product(self.root / "nope")
 
 
+class ProbeTests(unittest.TestCase):
+    """匿名可读性探测：不需要密钥就能判断"Ozon 能不能抓到"。"""
+
+    def test_public_image_passes(self):
+        from pipeline.oss_cos import probe_public_url
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self, size=None):
+                return b"\x89PNG\r\n\x1a\n" + b"rest"
+
+        report = probe_public_url(
+            "https://ozon-images-1486640018.cos.ap-hongkong.myqcloud.com/ozon-images/a.png",
+            urlopen=lambda request, timeout=None: Response(),
+        )
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["anonymous_get"], "HTTP 200")
+        self.assertTrue(report["looks_like_image"])
+
+    def test_private_bucket_reports_actionable_hint(self):
+        import urllib.error
+
+        from pipeline.oss_cos import probe_public_url
+
+        def denying(request, timeout=None):
+            raise urllib.error.HTTPError(request.full_url, 403, "Forbidden", {}, None)
+
+        report = probe_public_url("https://bucket.cos.region.myqcloud.com/a.png", urlopen=denying)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["anonymous_get"], "HTTP 403")
+        self.assertIn("阻止公共访问", report["hint"])
+        self.assertIn("公有读", report["hint"])
+
+    def test_missing_key_hint(self):
+        import urllib.error
+
+        from pipeline.oss_cos import probe_public_url
+
+        def missing(request, timeout=None):
+            raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, None)
+
+        report = probe_public_url("https://bucket.cos.region.myqcloud.com/a.png", urlopen=missing)
+        self.assertFalse(report["ok"])
+        self.assertIn("不存在", report["hint"])
+
+    def test_network_error_is_reported(self):
+        from pipeline.oss_cos import probe_public_url
+
+        def broken(request, timeout=None):
+            raise OSError("connection refused")
+
+        report = probe_public_url("https://nope.example.com/a.png", urlopen=broken)
+        self.assertFalse(report["ok"])
+        self.assertIn("连不上", report["hint"])
+
+    def test_cli_probe_builds_url_from_key(self):
+        import io
+        import os
+        from contextlib import redirect_stdout
+        from unittest import mock
+
+        from pipeline.oss_cos import main as cos_main
+
+        saved = {key: os.environ.get(key) for key in ("COS_BUCKET", "COS_REGION")}
+        os.environ["COS_BUCKET"] = "ozon-images-1486640018"
+        os.environ["COS_REGION"] = "ap-hongkong"
+        calls: list[str] = []
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self, size=None):
+                return b"\xff\xd8\xff\xe0jpeg"
+
+        def opener(request, timeout=None):
+            calls.append(request.full_url)
+            return Response()
+
+        try:
+            with mock.patch("urllib.request.urlopen", opener):
+                buffer = io.StringIO()
+                with redirect_stdout(buffer):
+                    code = cos_main(["--probe", "--key", "ozon-images/P000002/main-S1.png", "--json"])
+            self.assertEqual(code, 0, buffer.getvalue())
+            self.assertEqual(
+                calls[0],
+                "https://ozon-images-1486640018.cos.ap-hongkong.myqcloud.com/ozon-images/P000002/main-S1.png",
+            )
+            self.assertTrue(json.loads(buffer.getvalue())["ok"])
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    def test_cli_probe_without_target_errors(self):
+        from pipeline.oss_cos import main as cos_main
+
+        with self.assertRaises(SystemExit):
+            cos_main(["--probe"])
+
+
 class CheckTests(unittest.TestCase):
     def test_check_runs_put_get_delete_and_detects_public_read(self):
         client = FakeCosClient()

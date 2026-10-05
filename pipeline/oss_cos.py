@@ -341,16 +341,95 @@ def _storage_from_env(*, dry_run: bool = False) -> CosObjectStorage:
     )
 
 
+def probe_public_url(
+    url: str,
+    *,
+    urlopen: Any | None = None,
+    timeout: int = 20,
+) -> dict[str, Any]:
+    """匿名抓一个地址，判断"Ozon 能不能抓到"（**不需要任何密钥**）。
+
+    用来在填密钥之前就把桶的公开读权限调好：403 就是没放开，别等传完图才发现。
+    """
+    import urllib.error
+    import urllib.request
+
+    opener = urlopen or urllib.request.urlopen
+    report: dict[str, Any] = {"url": url, "anonymous_get": None, "ok": False}
+    request = urllib.request.Request(url, headers={"User-Agent": "ozon-workbench/1.0 (public-read probe)"})
+    try:
+        with opener(request, timeout=timeout) as response:
+            body = response.read(64)
+            report["anonymous_get"] = f"HTTP {getattr(response, 'status', 200)}"
+            report["content_prefix"] = body[:8].hex()
+            report["looks_like_image"] = body[:4] in (b"\x89PNG", b"\xff\xd8\xff", b"RIFF", b"GIF8")
+            report["ok"] = True
+    except urllib.error.HTTPError as error:
+        report["anonymous_get"] = f"HTTP {error.code}"
+        if error.code in (401, 403):
+            report["hint"] = (
+                "不是公有读，Ozon 抓不到。检查：① COS 桶「安全管理 → 阻止公共访问」是否关闭"
+                "（它会压过公开读策略）；② 存储桶策略里「所有用户 → 读操作」的资源前缀是否覆盖该对象键；"
+                "③ 或直接把桶访问权限设为「公有读私有写」。"
+            )
+        elif error.code == 404:
+            report["hint"] = "密钥/权限没问题，但这个对象键不存在（先上传，或键前缀写错了）"
+        else:
+            report["hint"] = f"HTTP {error.code}"
+    except Exception as error:  # noqa: BLE001
+        report["anonymous_get"] = f"error: {error}"
+        report["hint"] = "连不上：检查网络或域名拼写"
+    return report
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="把商品图片上传到腾讯云 COS 并写出公网地址")
     parser.add_argument("--product-dir", default=None, help="商品目录（--check 时可不给）")
-    parser.add_argument("--check", action="store_true", help="连通性自检：PUT + 匿名 GET + DELETE")
+    parser.add_argument("--check", action="store_true", help="连通性自检：PUT + 匿名 GET + DELETE（需要密钥）")
+    parser.add_argument(
+        "--probe",
+        action="store_true",
+        help="只做匿名可读性探测（**不需要密钥**）：给 --url 或 --key",
+    )
+    parser.add_argument("--url", default=None, help="--probe 用：完整 https 地址")
+    parser.add_argument("--key", default=None, help="--probe 用：对象键（自动拼成 https 地址）")
+    parser.add_argument("--bucket", default=None, help="--probe 用：桶名（默认取 COS_BUCKET）")
+    parser.add_argument("--region", default=None, help="--probe 用：地域（默认取 COS_REGION）")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--slot", action="append", dest="slots")
     parser.add_argument("--key-prefix", default=None, help="覆盖 COS_KEY_PREFIX")
     parser.add_argument("--public-base-url", default=None, help="覆盖 COS_PUBLIC_BASE_URL（CDN 域名）")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
+
+    if args.probe:
+        url = args.url
+        if not url:
+            if not args.key:
+                parser.error("--probe 需要 --url 或 --key")
+            bucket = args.bucket or os.environ.get("COS_BUCKET")
+            region = args.region or os.environ.get("COS_REGION")
+            if not (bucket and region):
+                print(
+                    json.dumps(
+                        {"ok": False, "error": "缺少桶名/地域：用 --bucket/--region，或设置 COS_BUCKET/COS_REGION"},
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+                return 1
+            url = f"https://{bucket}.cos.{region}.myqcloud.com/{quote(args.key.lstrip('/'))}"
+        report = probe_public_url(url)
+        if args.json:
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+        else:
+            print(f"{url}\n匿名访问：{report['anonymous_get']}")
+            if report.get("ok"):
+                print(f"  ✅ 可以被 Ozon 抓到（前 4 字节 {report.get('content_prefix')}，图片={report.get('looks_like_image')}）")
+            elif report.get("hint"):
+                print(f"  ⚠️ {report['hint']}")
+        return 0 if report.get("ok") else 1
+
 
     try:
         config = config_from_env()

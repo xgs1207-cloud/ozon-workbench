@@ -444,6 +444,26 @@ Ozon 的 import 只给任务号，最终结果要另查一次。所以提交之�
   **绝不估算**；包装 < 商品本体会被判 `hierarchy_ok=false` 并阻断上传；
 - 产物：`output/pricing-result.json`、`output/measurements.json`、`output/profit-analysis.json`（都过契约）。
 
+### 一条命令跑完一天（`pipeline.day`）
+
+把整条链串成一个入口：**选词入库 → 选品清单 → 采集清单 → 跑已采集商品 → 上线前预检**，最后给一份"今天干了什么 + 还需要你做什么 + 下一步敲什么命令"的报告。
+
+```powershell
+# 干跑（默认 fake 模型 + 占位生图；绝不碰 Ozon）
+python -m pipeline.day --xlsx data\Seerfar-20261005.xlsx --products products --store shop-a
+
+# 真链路（豆包生图 + COS + 真提交，要显式双重确认）
+python -m pipeline.day --library keyword-library --products products --store shop-a --store shop-b `
+    --provider ark --image-generator doubao --uploader ozon-api --oss cos `
+    --execute-upload --i-understand-this-hits-ozon
+```
+
+- 每一步都调**已有模块**（`collector.seerfar_xlsx` / `sourcing` / `collection_plan` / `pipeline.launch` / `doctor`），
+  所以门禁语义与单步执行完全一致；
+- **如实报告跳过**：没给 `--xlsx` 就用现有词库继续；没有已采集商品就只出清单；缺凭据/缺类目/缺尺寸都列进"需要人工处理"；
+- **有代办就不算"顺利"**（`ok=false`），避免报告给人"今天全好了"的错觉；
+- 报告里的"下一步命令"是可直接复制执行的（例：采集清单还有待采集 → 给出 `fetch_images` + `push_capture` 两行）。
+
 ### 选择上架 SKU（1688 一个链接十几种规格，只上你要的那几个）
 
 ```powershell

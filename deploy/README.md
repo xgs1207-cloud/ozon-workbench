@@ -127,7 +127,6 @@ sudo -u ubuntu /opt/ozon-workbench/.venv/bin/python -m pipeline.oss_local \
 ## 5. 日常怎么用（服务器上）
 
 **最常用的一条命令**（生图 → 发布图片 → 质检 → 载荷 → 提交，一条跑完）：
-
 ```bash
 cd /opt/ozon-workbench
 # 干跑（零写请求，先看载荷与阻断项）
@@ -143,6 +142,14 @@ APP_MODE=production .venv/bin/python -m pipeline.launch --product-dir products/P
 # 批量：所有 COLLECTED 商品
 .venv/bin/python -m pipeline.launch --products-root products --store default \
     --provider ark --image-generator doubao --oss cos
+```
+
+**一天一条命令**（选词 → 选品 → 采集清单 → 跑商品 → 预检）：
+
+```bash
+cd /opt/ozon-workbench
+.venv/bin/python -m pipeline.day --xlsx data/Seerfar-*.xlsx --products products \
+    --store default --oss cos --provider ark --image-generator doubao
 ```
 
 **手工分步**（想单步排查时）：

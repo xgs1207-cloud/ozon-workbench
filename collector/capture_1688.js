@@ -113,6 +113,16 @@
   });
   result.attributes_zh = attributes;
 
+  // ---- 详情页正文（洗涤说明 / 规格描述 / 款式说明）：真模型靠它判断款式并写文案
+  const descriptionParts = [];
+  document
+    .querySelectorAll("#description, .detail-desc, .content-detail, [class*=detailContent], [class*=desc-content]")
+    .forEach((node) => {
+      const text = (node.innerText || node.textContent || "").replace(/\s+\n/g, "\n").trim();
+      if (text && text.length > 20) descriptionParts.push(text);
+    });
+  result.description_zh = descriptionParts.join("\n").slice(0, 8000) || null;
+
   const missing = [];
   if (!result.title_zh) missing.push("title_zh");
   if (!result.skus.length) missing.push("skus");

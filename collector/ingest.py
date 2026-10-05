@@ -265,6 +265,8 @@ def normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         "keyword_source": payload.get("keyword_source"),
         # 1688 详情页的规格/属性：材质、包装数量、认证等（真模型曾因缺这些要求人工确认）
         "attributes_zh": _normalize_attributes(payload),
+        # 详情页正文（洗涤说明/规格描述等）：真模型据此判断款式并写文案
+        "description_zh": str(payload.get("description_zh") or payload.get("description") or "").strip() or None,
     }
 
 
@@ -464,6 +466,8 @@ def ingest_capture(
     attributes = normalized.get("attributes_zh") or {}
     if attributes.get("raw") or len(attributes) > 1:
         source_payload["attributes_zh"] = attributes
+    if normalized.get("description_zh"):
+        source_payload["description_zh"] = normalized["description_zh"]
     keywords = normalized.get("keywords") or []
     if keywords:
         source_payload["keywords"] = keywords

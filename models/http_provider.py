@@ -273,20 +273,68 @@ def enrich_facts_from_inputs(payload: dict[str, Any], request: Any) -> list[str]
 
     # 1688 详情页属性（材质/包装数量/认证）——真模型曾因缺这些而要求人工确认
     attributes = source.get("attributes_zh") if isinstance(source.get("attributes_zh"), Mapping) else {}
-    material = str(attributes.get("material") or source.get("material_zh") or "").strip()
+    # 人工确认入口：运营填一次 input/human-confirmations.json，**优先于**采集值（真商品总会缺信息）
+    confirmations = read_json("input/human-confirmations.json")
+    if confirmations:
+        notes.append("已应用 input/human-confirmations.json（人工确认值优先）")
+
+    material = str(
+        confirmations.get("material")
+        or confirmations.get("material_zh")
+        or attributes.get("material")
+        or source.get("material_zh")
+        or ""
+    ).strip()
+    quantity = (
+        confirmations.get("package_quantity")
+        if confirmations.get("package_quantity") not in (None, "")
+        else attributes.get("package_quantity") or source.get("package_quantity")
+    )
+    certifications = (
+        confirmations.get("certifications")
+        if confirmations.get("certifications") not in (None, "", [])
+        else attributes.get("certifications") or source.get("certifications_zh")
+    )
+    if confirmations.get("product_weight_g"):
+        product_block = {**product_block, "product_weight_g": confirmations["product_weight_g"]}
+    dims_confirmed = confirmations.get("product_dimensions_mm")
+    if isinstance(dims_confirmed, Mapping) and all(dims_confirmed.get(key) for key in ("length", "width", "height")):
+        product_block = {
+            **product_block,
+            "product_length_mm": dims_confirmed["length"],
+            "product_width_mm": dims_confirmed["width"],
+            "product_height_mm": dims_confirmed["height"],
+        }
+
     if material and not facts.get("materials"):
         facts["materials"] = [material]
-        notes.append(f"materials 由采集属性补全：{material}")
-    quantity = attributes.get("package_quantity") or source.get("package_quantity")
+        notes.append(f"materials 补全：{material}")
     if quantity not in (None, "", 0) and str(facts.get("package_quantity") or "") == "unknown":
-        facts["package_quantity"] = {"value": quantity, "source": "input/source.json（1688 详情页属性）"}
-        notes.append(f"package_quantity 由采集属性补全：{quantity}")
-    certifications = attributes.get("certifications") or source.get("certifications_zh")
+        facts["package_quantity"] = {"value": quantity, "source": "采集属性/人工确认"}
+        notes.append(f"package_quantity 补全：{quantity}")
     if isinstance(certifications, str):
         certifications = [item for item in (item.strip() for item in certifications.split("、")) if item]
     if certifications and not facts.get("certifications"):
         facts["certifications"] = list(certifications)
-        notes.append(f"certifications 由采集属性补全：{list(certifications)}")
+        notes.append(f"certifications 补全：{list(certifications)}")
+
+    # SKU 图片引用：图我们已经采集到了（input/sku-images/），不能让它空着
+    sku_images = sorted(
+        f"input/sku-images/{item.name}" for item in (Path(product_dir) / "input" / "sku-images").glob("*")
+        if item.is_file()
+    ) if product_dir else []
+    if sku_images:
+        filled = 0
+        for index, sku in enumerate(facts.get("skus") or []):
+            if not isinstance(sku, dict) or sku.get("image_refs"):
+                continue
+            if index < len(sku_images):
+                sku["image_refs"] = [sku_images[index]]
+            else:
+                sku["image_refs"] = list(sku_images[:1])  # 图不够时共用第一张（并如实记在说明里）
+            filled += 1
+        if filled:
+            notes.append(f"facts.skus[].image_refs 用采集到的 SKU 图补全（{len(sku_images)} 张，{filled} 个 SKU）")
     length, width, height = (
         product_block.get("product_length_mm"),
         product_block.get("product_width_mm"),

@@ -138,7 +138,99 @@ class FactsFromAttributesTests(unittest.TestCase):
         self.assertEqual(facts["materials"], ["100% 棉"])
         self.assertEqual(facts["package_quantity"]["value"], 1)
         self.assertEqual(facts["certifications"], ["OEKO-TEX"])
-        self.assertTrue(any("采集属性" in item for item in notes), notes)
+        self.assertTrue(any("补全" in item for item in notes), notes)
+
+    def _facts_payload(self):
+        return {
+            "facts": {
+                "title_cn": "纯棉床单", "category_cn": None, "brand": None, "materials": [],
+                "dimensions": "unknown", "weight": "unknown", "load_capacity": "unknown",
+                "certifications": [], "functions": [], "package_quantity": "unknown",
+                "accessories": [],
+                "skus": [
+                    {"sku_id": "S1", "name_cn": "S1", "properties": {}, "price_cny": 42.0, "image_refs": []},
+                    {"sku_id": "S2", "name_cn": "S2", "properties": {}, "price_cny": 45.0, "image_refs": []},
+                ],
+            }
+        }
+
+    def test_sku_image_refs_filled_from_captured_images(self):
+        """真模型抱怨"缺 SKU 展示图片"，而图我们其实已经采集到了（真机发现的缺口）。"""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            product_dir = pathlib.Path(tmp)
+            (product_dir / "input" / "sku-images").mkdir(parents=True)
+            (product_dir / "input" / "sku-images" / "001-001-01.png").write_bytes(b"png")
+            (product_dir / "input" / "sku-images" / "002-002-02.png").write_bytes(b"png")
+            payload = self._facts_payload()
+            request = AnalysisRequest(product_id="P1", product_dir=product_dir, source={}, selected_keywords=[])
+            notes = enrich_facts_from_inputs(payload, request)
+            refs = [sku["image_refs"] for sku in payload["facts"]["skus"]]
+            self.assertEqual(refs[0], ["input/sku-images/001-001-01.png"])
+            self.assertEqual(refs[1], ["input/sku-images/002-002-02.png"])
+            self.assertTrue(any("image_refs" in item for item in notes), notes)
+
+    def test_sku_image_refs_uses_first_image_when_not_enough(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            product_dir = pathlib.Path(tmp)
+            (product_dir / "input" / "sku-images").mkdir(parents=True)
+            (product_dir / "input" / "sku-images" / "only.png").write_bytes(b"png")
+            payload = self._facts_payload()
+            request = AnalysisRequest(product_id="P1", product_dir=product_dir, source={}, selected_keywords=[])
+            enrich_facts_from_inputs(payload, request)
+            for sku in payload["facts"]["skus"]:
+                self.assertEqual(sku["image_refs"], ["input/sku-images/only.png"])
+
+    def test_human_confirmations_win_over_capture(self):
+        """人工确认入口：真商品总会缺信息，运营填一次就该能续跑。"""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            product_dir = pathlib.Path(tmp)
+            (product_dir / "input").mkdir(parents=True)
+            (product_dir / "input" / "human-confirmations.json").write_text(
+                json.dumps(
+                    {
+                        "material": "100% 长绒棉",
+                        "package_quantity": 2,
+                        "certifications": ["EAC"],
+                        "product_weight_g": 950,
+                        "product_dimensions_mm": {"length": 210, "width": 200, "height": 45},
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            payload = self._facts_payload()
+            request = AnalysisRequest(
+                product_id="P1",
+                product_dir=product_dir,
+                source={"attributes_zh": {"material": "棉", "package_quantity": 1, "certifications": ["SGS"]}},
+                selected_keywords=[],
+            )
+            enrich_facts_from_inputs(payload, request)
+            facts = payload["facts"]
+            self.assertEqual(facts["materials"], ["100% 长绒棉"])
+            self.assertEqual(facts["package_quantity"]["value"], 2)
+            self.assertEqual(facts["certifications"], ["EAC"])
+            self.assertEqual(facts["weight"]["value_g"], 950)
+            self.assertEqual(facts["dimensions"]["length_mm"], 210)
+
+    def test_description_zh_is_stored(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            products = pathlib.Path(tmp) / "products"
+            payload = capture_payload()
+            payload["description_zh"] = "洗涤说明：30℃ 中性洗涤剂手洗；本款为平铺床单（非床笠）。"
+            summary = ingest_capture(products, payload)
+            source = json.loads(
+                (products / summary["product_id"] / "input" / "source.json").read_text(encoding="utf-8")
+            )
+            self.assertIn("洗涤说明", source["description_zh"])
 
 
 if __name__ == "__main__":

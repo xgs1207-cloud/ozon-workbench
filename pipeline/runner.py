@@ -316,6 +316,9 @@ def run_product(
     if until is not None and until not in PIPELINE_STEPS:
         raise ValueError(f"--until 必须是流水线步骤：{until}")
 
+    #: 本次运行开始时的累计写请求数（用于"本次干跑有没有写"的增量判断）
+    api_write_count_before = int(status.get("api_write_count") or 0)
+
     started_at = now_iso()
     executed: list[dict[str, Any]] = []
     stop_reason: str | None = None
@@ -388,9 +391,13 @@ def run_product(
 
     final = normalize(load_status(directory))
     api_write_count = int(final.get("api_write_count") or 0)
-    if dry_run and api_write_count != 0:
+    # 不变量：**本次**干跑不能产生 Ozon 写请求。
+    # 注意要比较"增量"而不是累计值 —— 商品可能在之前的 production 运行里真提交过，
+    # 那时累计值本来就 >0；拿累计值判断会让"对已提交商品再干跑一次"直接崩（真实踩过）。
+    writes_this_run = api_write_count - api_write_count_before
+    if dry_run and writes_this_run != 0:
         raise RuntimeError(
-            f"不变量被破坏：干跑期间出现 Ozon 写请求（api_write_count={api_write_count}）"
+            f"不变量被破坏：本次干跑出现 Ozon 写请求（+{writes_this_run}，累计 {api_write_count}）"
         )
 
     report = {

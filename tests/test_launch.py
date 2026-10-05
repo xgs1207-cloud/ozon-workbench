@@ -208,6 +208,24 @@ class LaunchProductTests(LaunchFixture):
         self.assertEqual(report["stopped_phase"], "upload")
         self.assertIn("uploader", report["reason"])
 
+    def test_dry_run_after_production_run_is_allowed(self):
+        """对已真提交过的商品再干跑一次：不能因为累计写请求 >0 就崩（真实踩过的 bug）。"""
+        launch_product(self.product_dir, **self.options())  # 先真跑（模拟提交，累计 +2）
+        status = json.loads((self.product_dir / "status.json").read_text(encoding="utf-8"))
+        self.assertGreater(status["api_write_count"], 0)
+
+        from pipeline.upload import DryRunUploader
+
+        report = launch_product(
+            self.product_dir,
+            **self.options(uploader=DryRunUploader(), execute_upload=False, app_mode="development"),
+        )
+        phases = {item["phase"]: item for item in report["phases"]}
+        self.assertEqual(phases["upload"]["mode"], "dry_run_receipt")
+        self.assertEqual(phases["upload"]["api_writes"], 0)
+        after = json.loads((self.product_dir / "status.json").read_text(encoding="utf-8"))
+        self.assertEqual(after["api_write_count"], status["api_write_count"])  # 干跑没有新增写请求
+
     def test_render_report_contains_phases(self):
         report = launch_product(self.product_dir, **self.options())
         text = render_report(report)

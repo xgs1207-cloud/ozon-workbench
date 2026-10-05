@@ -1,0 +1,27 @@
+{
+  "_说明": "复制成 config/pricing.json 后按自己的实际费率改。字段含义见 README「定价与尺寸重量」一节。",
+  "_重要": "Ozon 的物流/处理费多数是『每件 + 每公斤』的卢布固定费，不是价格的百分比；把它当百分比会让你在大件上亏钱。",
+
+  "rub_per_cny": 11.6,
+
+  "commission_rate": 0.15,
+  "logistics_commission_rate": 0.05,
+  "acquiring_fee_rate": 0.015,
+  "withdrawal_fee_rate": 0.01,
+
+  "logistics_fee_rub_per_item": 0,
+  "logistics_fee_rub_per_kg": 0,
+  "order_processing_fee_rub": 0,
+
+  "shipping_cost_cny_per_kg": 45.0,
+  "shipping_min_cny": 15.0,
+  "packing_fee_cny": 1.5,
+  "other_fixed_cost_cny": 0.0,
+  "volumetric_divisor": 6000,
+
+  "target_margin_rate": 0.25,
+  "min_margin_rate": 0.10,
+  "round_to_rub": 10,
+  "price_ends_with": 90,
+  "max_price_rub": 0
+}

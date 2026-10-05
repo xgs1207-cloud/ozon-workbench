@@ -123,7 +123,7 @@ class ConfigTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_example_config_is_valid_and_matches_defaults(self):
-        example = pathlib.Path(__file__).resolve().parents[1] / "config" / "pricing.example.json"
+        example = pathlib.Path(__file__).resolve().parents[1] / "deploy" / "pricing.example.json"
         loaded = json.loads(example.read_text(encoding="utf-8"))
         for key in loaded:
             if key.startswith("_"):
@@ -136,6 +136,23 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual([item for item in warnings if "解析失败" in item], [])
         self.assertEqual(resolved["rub_per_cny"], loaded["rub_per_cny"])
         self.assertEqual(resolved["config_file"], str(config_path))
+
+    def test_example_config_is_tracked_by_git(self):
+        """踩过的坑：config/ 被 .gitignore 排除 → git archive 部署时示例文件根本没进包，
+        本地测试却因为"文件就在磁盘上"而通过。所以示例文件必须放在被跟踪的目录，并锁一条测试。"""
+        import shutil
+        import subprocess
+
+        if not shutil.which("git"):
+            self.skipTest("本机没有 git")
+        root = pathlib.Path(__file__).resolve().parents[1]
+        result = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "--error-unmatch", "deploy/pricing.example.json"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, f"deploy/pricing.example.json 未被 git 跟踪：{result.stderr}")
+        self.assertFalse((root / "config" / "pricing.example.json").exists(), "示例文件不该放在被忽略的 config/ 里")
 
     def test_unknown_keys_are_ignored(self):
         path = self.root / "pricing.json"

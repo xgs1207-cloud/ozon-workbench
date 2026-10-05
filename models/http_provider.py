@@ -438,33 +438,67 @@ class HttpModelProvider:
     # ---------------------------------------------------------------- 五个方法
 
     def analyze_product(self, request: AnalysisRequest) -> dict[str, Any]:
+        """**事实由代码填，模型只写叙述**。
+
+        为什么这么设计（真机实测得出的结论）：契约要求 ``facts`` 把采集数据（SKU/价格/尺寸/图片引用）
+        结构化重述一遍，让语言模型逐字照抄结构化数据是最容易出错的事 —— 真模型连续 3 次都写不对
+        （数组写成字符串、dimensions 写成字符串、skus 缺必填子字段）。
+        而这些都是**我们本来就确切掌握的数据**，交给代码从 source.json 派生更准；模型只负责
+        卖点/推断/缺失项/风险/建议这些真正需要语言与判断的字段。
+        """
         from contracts import validate_contract
 
-        user = (
-            "请基于下面的采集数据与已选关键词，产出商品分析 JSON。\n"
-            f"{_schema_hint('product-analysis')}\n"
-            "要求：facts 只写采集里确实存在的字段；unknowns 列出缺失但影响上架的关键信息；"
-            "decision 取 continue 或 needs_review（有高风险缺失时取后者）。\n\n"
+        base = self._deterministic().analyze_product(request)
+        warnings: list[str] = ["facts 由代码从 input/source.json 派生；模型只写叙述字段"]
+
+        narrative_prompt = (
+            "请只输出下面这些键（JSON 对象，不要输出 facts / processing 等其它键）。\n"
+            "- `selling_points`：数组，每项 {text: 俄语或中文文案, evidence: [证据来源]}，3–6 条\n"
+            "- `inferences`：数组，每项 {area, statement, basis}\n"
+            "- `unknowns`：数组，每项 {field, reason, needed_from_human: true/false}\n"
+            "- `risks`：数组，每项 {area, level: low|medium|high, message, blocking: true/false}\n"
+            "- `recommendation`：{decision: \"continue\"|\"needs_review\", reason}\n"
+            "硬规则：只依据下面的采集数据与关键词，不要编造参数、认证、品牌或材质；"
+            "拿不准就写进 unknowns 或把 decision 设为 needs_review。只输出 JSON，不要解释文字。\n\n"
             + _context_block(
                 source=request.source,
                 selected_keywords=_keywords_of(request),
                 positioning=getattr(request, "positioning", None),
             )
         )
-        try:
-            payload, warnings = self._call_json(
-                task="product_analysis",
-                user=user,
-                validate=lambda data: validate_contract("product-analysis", data),
-                contract="product-analysis",
-            )
-        except ModelError:
-            if not self.fallback_to_deterministic:
-                raise
-            fallback = self._deterministic().analyze_product(request)
-            return fallback
-        # 契约是 additionalProperties:false，不能塞额外字段；修复提示只在 calls 轨迹里留痕
-        return payload
+
+        problems: list[str] = []
+        prompt = narrative_prompt
+        for attempt in range(1, self.max_attempts + 1):
+            text = self.transport.complete(system=SYSTEM_JSON, user=prompt, temperature=self.temperature)
+            narrative = extract_json(text)
+            if narrative is None:
+                problems = ["输出不是合法 JSON 对象（去掉解释文字或代码围栏）"]
+            else:
+                merged = dict(base)
+                for key in ("selling_points", "inferences", "unknowns", "risks", "recommendation"):
+                    if key in narrative and narrative[key] not in (None, [], {}):
+                        merged[key] = narrative[key]
+                problems = list(validate_contract("product-analysis", merged))
+                self.calls.append(
+                    {"task": "product_analysis", "attempt": attempt, "ok": not problems,
+                     "problems": problems[:6], "chars": len(text)}
+                )
+                if not problems:
+                    return merged
+            if attempt < self.max_attempts:
+                prompt = (
+                    f"{narrative_prompt}\n\n### 上一次输出不合法，请修正后重新只输出 JSON\n"
+                    + "\n".join(f"- {item}" for item in problems[:12])
+                )
+        if self.fallback_to_deterministic:
+            # 契约里没有可放"降级说明"的字段，出处只留在 provider 调用轨迹与 run-report 里
+            self.calls.append({"task": "product_analysis", "attempt": self.max_attempts + 1,
+                               "ok": True, "problems": [], "note": "模型叙述不可用，已退化为确定性基座"})
+            return base
+        raise ModelError(
+            f"product_analysis 连续 {self.max_attempts} 次未通过校验：" + "；".join(problems[:6])
+        )
 
     def write_copy_ru(self, request: CopyRequest) -> dict[str, Any]:
         from contracts import validate_contract

@@ -307,8 +307,10 @@ class ProviderBehaviourTests(unittest.TestCase):
         self.assertNotIn("sk-secret", json.dumps(provider.calls, ensure_ascii=False))
 
     def test_repair_retry_includes_problems(self):
-        broken = json.dumps({"schema_version": "1.0.0"})  # 缺大量必填
-        transport = ScriptedTransport([broken, json.dumps(self.analysis(), ensure_ascii=False)])
+        """新设计下：facts 由代码填，模型只写叙述；叙述里的推荐枚举写错仍会触发带错误清单的重试。"""
+        broken = json.dumps({"recommendation": {"decision": "maybe", "reason": "拿不准"}})  # 枚举非法
+        good = json.dumps({"recommendation": {"decision": "continue", "reason": "证据齐全"}})
+        transport = ScriptedTransport([broken, good])
         provider = HttpModelProvider(transport, max_attempts=2)
         payload = provider.analyze_product(
             AnalysisRequest(
@@ -319,12 +321,33 @@ class ProviderBehaviourTests(unittest.TestCase):
             )
         )
         self.assertEqual(validate_contract("product-analysis", payload), [])
+        self.assertEqual(payload["recommendation"]["decision"], "continue")
         self.assertEqual(len(transport.calls), 2)
         self.assertIn("上一次输出不合法", transport.calls[1]["user"])
-        self.assertIn("product-analysis", transport.calls[1]["user"])
+        self.assertIn("recommendation.decision", transport.calls[1]["user"])
         self.assertEqual(len(provider.calls), 2)
         self.assertFalse(provider.calls[0]["ok"])
         self.assertTrue(provider.calls[1]["ok"])
+
+    def test_facts_always_come_from_code_even_if_model_sends_its_own(self):
+        """模型就算硬塞一份 facts，也不能覆盖代码从 source 派生的事实。"""
+        model_reply = json.dumps(
+            {
+                "facts": {"title_cn": "模型瞎写的标题", "brand": "某品牌"},
+                "recommendation": {"decision": "continue", "reason": "ok"},
+            }
+        )
+        provider = HttpModelProvider(ScriptedTransport([model_reply]), max_attempts=1)
+        payload = provider.analyze_product(
+            AnalysisRequest(
+                product_id=self.product_dir.name,
+                product_dir=self.product_dir,
+                source=self.source,
+                selected_keywords=[],
+            )
+        )
+        self.assertEqual(payload["facts"]["title_cn"], self.source["title_zh"])
+        self.assertNotEqual(payload["facts"].get("brand"), "某品牌")
 
     def test_exhausted_retries_fail_loudly(self):
         transport = ScriptedTransport(["不是 JSON", "仍然不是 JSON"])
@@ -353,8 +376,8 @@ class ProviderBehaviourTests(unittest.TestCase):
         provider = HttpModelProvider(ScriptedTransport(["nope"]), max_attempts=1, fallback_to_deterministic=True)
         payload = provider.analyze_product(request)
         self.assertEqual(validate_contract("product-analysis", payload), [])
-        # 降级事实留在调用轨迹里（契约是 additionalProperties:false，不能塞额外字段）
-        self.assertFalse(provider.calls[-1]["ok"])
+        # 降级说明只留在调用轨迹里（契约是 additionalProperties:false，不能塞额外字段）
+        self.assertIn("退化为确定性基座", str(provider.calls[-1].get("note") or ""))
         self.assertEqual(provider.calls[-1]["task"], "product_analysis")
 
     def test_write_copy_validates_contracts_and_rules(self):

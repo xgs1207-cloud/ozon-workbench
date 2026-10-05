@@ -138,8 +138,19 @@ class PushErrorTests(unittest.TestCase):
         import urllib.error
 
         class Body:
+            """假的错误响应体：Python 3.14 回收 HTTPError 时会调 close()，所以必须实现。"""
+
             def read(self):
                 return b'{"detail":"duplicate"}'
+
+            def close(self):
+                return None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
 
         def failing(request, timeout=None):
             raise urllib.error.HTTPError(request.full_url, 409, "Conflict", {}, Body())

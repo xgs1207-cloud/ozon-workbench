@@ -186,3 +186,81 @@ def resolve_credentials(shop: Mapping[str, Any], env: Mapping[str, str] | None =
 
 def credential_report(registry: Mapping[str, Any], env: Mapping[str, str] | None = None) -> list[dict[str, Any]]:
     return [resolve_credentials(shop, env) for shop in list_shops(registry)]
+
+
+def shop_summary(registry: Mapping[str, Any], env: Mapping[str, str] | None = None) -> list[dict[str, Any]]:
+    """给人和界面看的一行式摘要（**绝不包含密钥本身**，只说"有没有配"）。"""
+    rows: list[dict[str, Any]] = []
+    for shop, credentials in zip(list_shops(registry), credential_report(registry, env)):
+        rows.append(
+            {
+                "id": shop.get("id"),
+                "display_name": shop.get("display_name") or shop.get("name") or shop.get("id"),
+                "enabled": bool(shop.get("enabled")),
+                "credentials_ready": credentials["ready"],
+                "missing_env": credentials["missing_env"],
+                "client_id_env": credentials["client_id_env"],
+                "api_key_env": credentials["api_key_env"],
+                "default_currency_code": shop.get("default_currency_code"),
+                "default_vat": shop.get("default_vat"),
+            }
+        )
+    return rows
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """店铺注册表命令行：看/改 enabled、体检凭据（不打印任何密钥）。
+
+    - ``--list``：列出店铺（含"凭据是否就绪"）
+    - ``--enable <id>`` / ``--disable <id>``：开/关店铺（决定它会不会参与提交）
+    - ``--check``：只体检；有任何"启用但缺凭据"或"一个都没启用"时退出码非 0
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(description="店铺注册表：列出/开关/体检（密钥只在环境变量里，不会打印）")
+    parser.add_argument("--registry", default=None, help="注册表路径（默认 config/shops.json）")
+    parser.add_argument("--list", action="store_true", help="列出店铺")
+    parser.add_argument("--enable", action="append", dest="enable", help="启用某个店铺 id（可重复）")
+    parser.add_argument("--disable", action="append", dest="disable", help="停用某个店铺 id（可重复）")
+    parser.add_argument("--check", action="store_true", help="体检：启用的店铺是否都有凭据")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+
+    registry = ensure_registry(args.registry)
+    changed = False
+    for shop_id in args.enable or []:
+        registry = set_enabled(registry, shop_id, True)
+        changed = True
+    for shop_id in args.disable or []:
+        registry = set_enabled(registry, shop_id, False)
+        changed = True
+    if changed:
+        save_registry(registry, args.registry)
+
+    rows = shop_summary(registry)
+    problems = validate_registry(registry)
+    enabled = [row for row in rows if row["enabled"]]
+    if not enabled:
+        problems.append("没有任何启用的店铺（enabled=true）—— 提交前必须至少启用一个")
+    for row in enabled:
+        if not row["credentials_ready"]:
+            problems.append(f"店铺 {row['id']} 已启用但缺凭据：{', '.join(row['missing_env'])}（去 /etc/ozon-workbench.env 配）")
+
+    if args.json:
+        print(json.dumps({"ok": not problems, "shops": rows, "problems": problems}, ensure_ascii=False, indent=2))
+    else:
+        print(f"店铺注册表：{args.registry or 'config/shops.json'}｜共 {len(rows)} 个")
+        for row in rows:
+            mark = "✅" if row["enabled"] and row["credentials_ready"] else ("⚠️" if row["enabled"] else "⏸")
+            credentials = "凭据就绪" if row["credentials_ready"] else "缺 " + "、".join(row["missing_env"] or ["(未配置 *_env)"])
+            print(f"  {mark} {row['id']}｜{row['display_name']}｜enabled={row['enabled']}｜{credentials}")
+        print("\n结论：" + ("可以提交" if not problems else "还不能提交"))
+        for item in problems:
+            print(f"  - {item}")
+        if not enabled:
+            print("\n启用示例：python -m pipeline.stores --enable default")
+    return 0 if not problems else 1
+
+
+if __name__ == "__main__":  # pragma: no cover - 命令行入口
+    raise SystemExit(main())

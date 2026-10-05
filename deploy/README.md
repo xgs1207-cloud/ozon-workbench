@@ -219,6 +219,56 @@ curl -s http://127.0.0.1:8766/health   # 在服务器上执行
 | 共享服务器上跑 `install.sh` | `apt-get install nginx` 可能升级/重启 nginx，影响别人站点 | 用 `--no-apt`，或按上面这份手工流程 |
 | 缺 `httpx` | `tests/test_api*.py` 整块导入失败（TestClient 依赖），服务器自检跑不全 | `requirements.txt` 里加 `httpx`，并有测试守着 |
 
+---
+
+## 9. 怎么访问工作台（推荐：SSH 隧道，零暴露）
+
+服务只在服务器上监听 `127.0.0.1:8766`（不给公网开口子）。你在自己电脑上开一条隧道即可：
+
+```powershell
+# Windows PowerShell（一次开着，别关；Ctrl+C 断开）
+ssh -N -i D:\AI作图\ozonfinancedeploy.pem -L 8766:127.0.0.1:8766 ubuntu@43.132.190.110
+```
+
+然后浏览器打开：
+
+| 地址 | 用途 |
+|---|---|
+| <http://127.0.0.1:8766/docs> | 交互式 API 文档（点开就能试） |
+| <http://127.0.0.1:8766/health> | 健康检查 |
+| <http://127.0.0.1:8766/api/keywords?only_qualified=true&limit=50&order=score> | 达标关键词（高热度低竞争） |
+| <http://127.0.0.1:8766/api/workbench/doctor> | 上线前预检（还差什么） |
+| <http://127.0.0.1:8766/api/workbench/keyword-products> | 关键词 → 商品 汇总 |
+
+要**公网访问**（例如手机上看）时，加一层 nginx 反代 + 密码，别直接把 8766 暴露到公网：
+
+```bash
+sudo apt-get install -y apache2-utils && sudo htpasswd -c /etc/nginx/.htpasswd yourname
+# 再在 nginx 加一个独立 server：location / { auth_basic "ozon"; auth_basic_user_file /etc/nginx/.htpasswd;
+#   proxy_pass http://127.0.0.1:8766; }
+```
+
+## 10. 真实数据流程（已在服务器上用你的 Seerfar 表跑通）
+
+```bash
+cd /opt/ozon-workbench
+mkdir -p data && cp /path/to/Seerfar-*.xlsx data/     # 表放服务器上（不进仓库）
+
+# ① 关键词入库 + 打分
+.venv/bin/python -m collector.seerfar_xlsx --xlsx data/Seerfar-*.xlsx --library keyword-library
+# ② 选品清单（Ozon 复核 + 1688 找货 + 品牌词提醒）→ output/sourcing-plan.md
+.venv/bin/python -m collector.sourcing --library keyword-library --top 20 --out-dir .
+# ③ 采集清单（哪些词还没采）→ output/collection-plan.md
+.venv/bin/python -m collector.collection_plan --plan output/sourcing-plan.json --products products --out-dir .
+# ④ 预检：环境/凭据/商品/关键词映射
+.venv/bin/python -m pipeline.doctor --products-root products
+```
+
+实测（你的表）：**773 行解析零跳过 → 121 条高热度低竞争达标 → 清单前 3 名 `yerrna` / `yerrna постельное белье` /
+`шуйские ситцы`**（前两个被标注"疑似品牌词：1688 按品类找货、不要照抄品牌"）；
+`doctor` 当时指出"缺 Ozon 凭据、还没有商品"——这正是你填完密钥后要看的报告。
+
+## 11. 排错
 
 | 现象 | 原因 / 处理 |
 |---|---|

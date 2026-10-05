@@ -205,7 +205,143 @@ def validate_copy_bundle(bundle: Mapping[str, Any]) -> list[str]:
     problems.extend(validate_description_ru(bundle.get("description_ru")))
     problems.extend(validate_description_sections(bundle.get("description_sections")))
     problems.extend(validate_hashtags(list(bundle.get("hashtags") or [])))
+    problems.extend(official_copy_checks(bundle)["blocking"])
     return problems
+
+
+# ------------------------------------------------- Ozon 官方硬规则（拒审高发区）
+
+#: Ozon 官方字段上限（硬约束）：名称（标题）255 字符，描述 6000 字符
+OFFICIAL_MAX_TITLE = 255
+OFFICIAL_MAX_DESCRIPTION = 6000
+#: 我们自己的推荐上限（超过移动端会被截断，但不违反 Ozon）——只提示，不阻断
+RECOMMENDED_TITLE = 120
+#: 描述接近上限时的提醒阈值
+DESCRIPTION_NEAR_LIMIT = 5500
+
+#: 联系方式/外链/社交账号：Ozon 明令禁止出现在商品名与描述里
+_CONTACT_PATTERN = re.compile(
+    r"(?:https?://|www\.|\bt\.me\b|@[A-Za-z0-9._-]+\.[A-Za-z]{2,}"
+    r"|(?:\+7|\b8)[\s\-()]?\d{3}[\s\-()]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}"
+    r"|whatsapp|telegram|instagram|wechat|вконтакте|\bvk\.com\b|微信号|微信|电话|почта\s*:|email\s*:)",
+    re.IGNORECASE,
+)
+#: 价格/促销词：Ozon 不允许在名称与描述里写价格、折扣、促销
+_PRICE_PATTERN = re.compile(
+    r"(?:\bцена\b|\bцены\b|\bскидк[а-я]*\b|\bакци[яию]\b|\bраспродаж[а-я]*\b|\bдешев[а-я]*\b|\bруб\.?\b|₽|\bпромокод\b)",
+    re.IGNORECASE,
+)
+#: 最高级/绝对化用语（俄罗斯广告法要求可举证，Ozon 也会拦）
+_SUPERLATIVE_PATTERN = re.compile(
+    r"(?:лучш[а-я]+|сам[а-я]+\s+лучш[а-я]+|№\s?1|номер\s?1|перв[а-я]+\s+в\s+мире|идеальн[а-я]+\s+выбор|единственн[а-я]+)",
+    re.IGNORECASE,
+)
+_EMOJI_PATTERN = re.compile("[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF]")
+_CAPS_WORD_PATTERN = re.compile(r"\b[А-ЯЁA-Z]{4,}\b")
+_PUNCT_RUN_PATTERN = re.compile(r"[!?]{2,}|\.{4,}")
+
+
+def _official_text_checks(text: str, *, where: str) -> tuple[list[str], list[str]]:
+    """返回 (blocking, advisory)。两个字段的公共部分：联系方式、价格、大写、标点、emoji。"""
+    blocking: list[str] = []
+    advisory: list[str] = []
+    if not text:
+        return blocking, advisory
+    contact = _CONTACT_PATTERN.search(text)
+    if contact:
+        blocking.append(f"{where}含联系方式/外链（Ozon 禁止）：{contact.group(0)!r}")
+    price = _PRICE_PATTERN.search(text)
+    if price:
+        blocking.append(f"{where}含价格/促销词（Ozon 禁止）：{price.group(0)!r}")
+    caps = _CAPS_WORD_PATTERN.findall(text)
+    if caps:
+        advisory.append(f"{where}有全大写单词（Ozon 不鼓励 CAPS LOCK）：{', '.join(sorted(set(caps))[:5])}")
+    if _EMOJI_PATTERN.search(text):
+        advisory.append(f"{where}含 emoji（Ozon 多数类目不接受）")
+    if _PUNCT_RUN_PATTERN.search(text):
+        advisory.append(f"{where}有连续标点（!!! / ?? / ....）")
+    return blocking, advisory
+
+
+def official_copy_checks(bundle: Mapping[str, Any]) -> dict[str, list[str]]:
+    """对照 Ozon 官方硬规则给出 ``blocking``（必须改）与 ``advisory``（建议改）。
+
+    区分严重度很重要：把"标题 130 字符"当阻断会误伤（Ozon 上限其实是 255），
+    而"标题里写电话"必须阻断（必拒审）。
+    """
+    blocking: list[str] = []
+    advisory: list[str] = []
+    title = str(bundle.get("title_ru") or "")
+    description = str(bundle.get("description_ru") or "")
+
+    title_blocking, title_advisory = _official_text_checks(title, where="标题")
+    desc_blocking, desc_advisory = _official_text_checks(description, where="描述")
+    blocking.extend(title_blocking)
+    blocking.extend(desc_blocking)
+    advisory.extend(title_advisory)
+    advisory.extend(desc_advisory)
+
+    if len(title) > OFFICIAL_MAX_TITLE:
+        blocking.append(f"标题长度 {len(title)} 超过 Ozon 上限 {OFFICIAL_MAX_TITLE}")
+    elif len(title) > RECOMMENDED_TITLE:
+        advisory.append(f"标题长度 {len(title)} 超过推荐 {RECOMMENDED_TITLE}（移动端会截断，Ozon 上限是 {OFFICIAL_MAX_TITLE}）")
+
+    if len(description) > OFFICIAL_MAX_DESCRIPTION:
+        blocking.append(f"描述长度 {len(description)} 超过 Ozon 上限 {OFFICIAL_MAX_DESCRIPTION}")
+    elif len(description) > DESCRIPTION_NEAR_LIMIT:
+        advisory.append(f"描述长度 {len(description)} 已接近上限 {OFFICIAL_MAX_DESCRIPTION}")
+
+    superlative = _SUPERLATIVE_PATTERN.search(f"{title} {description}")
+    if superlative:
+        advisory.append(f"含绝对化用语（俄罗斯广告法需可举证）：{superlative.group(0)!r}")
+
+    return {"blocking": sorted(set(blocking)), "advisory": sorted(set(advisory))}
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """快速自检：把一段标题/描述丢进来，看会不会被 Ozon 规则拦。"""
+    import argparse
+    import json as _json
+
+    parser = argparse.ArgumentParser(description="对照 Ozon 官方规则检查标题/描述/标签")
+    parser.add_argument("--title", default="")
+    parser.add_argument("--description", default="")
+    parser.add_argument("--hashtag", action="append", dest="hashtags")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+
+    bundle = {
+        "title_ru": args.title,
+        "description_ru": args.description,
+        "hashtags": args.hashtags or [],
+    }
+    official = official_copy_checks(bundle)
+    # CLI 只做标题/描述层面的检查（sections 与标签是流水线步骤的必填项，不在这里报）
+    internal = validate_title_ru(args.title) + validate_description_ru(args.description)
+    report = {
+        "ok": not official["blocking"] and not internal,
+        "blocking": official["blocking"],
+        "advisory": official["advisory"],
+        "internal": internal,
+    }
+    if args.json:
+        print(_json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print("阻断项：" + ("无" if not report["blocking"] else ""))
+        for item in report["blocking"]:
+            print(f"  ⛔ {item}")
+        for item in internal:
+            print(f"  ⛔ {item}")
+        print("建议项：")
+        for item in report["advisory"]:
+            print(f"  ⚠️ {item}")
+    return 0 if report["ok"] else 1
+
+
+if __name__ == "__main__":
+    import sys as _sys
+
+    _sys.exit(main())
 
 
 def iter_problem_paths(problems: Iterable[str]) -> list[str]:

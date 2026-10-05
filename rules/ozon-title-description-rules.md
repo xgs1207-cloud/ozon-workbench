@@ -88,6 +88,32 @@ widget ∈ `raShowcase / billboard`、block ∈ `{img, title, text}`；`textBloc
 5. 富文本必须是 `ozon_rich_content_json` v0.3 结构，图片须 `https://`。
 6. 产品/包装重量与尺寸、品牌**不得虚构**（`AGENTS.md`）。
 
+### 5.1 落地实现与严重度分级（`rules/validate.py`）
+
+上面是"文档约定"，下面是**代码里真正会拦的东西**。关键设计：**区分阻断与建议**——
+把"标题 130 字符"当阻断会误伤（Ozon 上限其实是 255），而"标题里写电话"必须阻断（必拒审）。
+
+| 检查 | 严重度 | 依据 |
+|---|---|---|
+| 标题 > `OFFICIAL_MAX_TITLE`(255) 字符 | ⛔ 阻断 | Ozon 字段硬上限 |
+| 描述 > `OFFICIAL_MAX_DESCRIPTION`(6000) 字符 | ⛔ 阻断 | Ozon 字段硬上限 |
+| 含电话 / 邮箱 / URL（`http(s)://`、`www.`、`t.me`）/ 社交与即时通讯词 | ⛔ 阻断 | Ozon 禁止联系方式与外链 |
+| 含价格与促销词（`цена` `скидка` `акция` `распродажа` `промокод` `руб` `₽` `дешево`） | ⛔ 阻断 | Ozon 禁止在名称/描述写价格促销 |
+| 含中文字符、核心词重复、标题 < 10 字符、描述 < 80 字符、五个描述段落缺项 | ⛔ 阻断 | 本项目内部规则（更严，利于转化） |
+| 标题 > `RECOMMENDED_TITLE`(120) 字符但 ≤255 | ⚠️ 建议 | 移动端会截断 |
+| 描述 > `DESCRIPTION_NEAR_LIMIT`(5500) 字符 | ⚠️ 建议 | 接近上限 |
+| 全大写单词（≥4 个字母）、emoji、连续标点（`!!!`/`??`/`....`） | ⚠️ 建议 | Ozon 不鼓励 CAPS/表情/标点滥用 |
+| 绝对化用语（`лучший` `№1` `самый лучший` `первый в мире` `идеальный выбор`） | ⚠️ 建议 | 俄罗斯广告法要求可举证 |
+
+实现入口：`validate_copy_bundle()`（阻断项，接在 russian_copy 的门禁上）；
+`official_copy_checks()`（返回 `blocking` + `advisory`，其中 advisory 由 russian_copy 写进步骤 warnings，让人看得到但不拦）。
+
+快速自检任意一段文案会不会被拒：
+
+```bash
+python -m rules.validate --title "Термос 500 мл ТЕРМОС" --description "Цена 1500 руб" --json
+```
+
 ## 六、数据流约束（M2 实现时别踩）
 
 `output/copy-ru.json` 是设计师原始文案（`title_ru / short_title / bullets_ru / description_ru / keywords_ru / hashtags_ru` …）；

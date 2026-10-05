@@ -444,8 +444,20 @@ Ozon 的 import 只给任务号，最终结果要另查一次。所以提交之�
   **绝不估算**；包装 < 商品本体会被判 `hierarchy_ok=false` 并阻断上传；
 - 产物：`output/pricing-result.json`、`output/measurements.json`、`output/profit-analysis.json`（都过契约）。
 
-### 一条命令跑完一天（`pipeline.day`）
+### Ozon 官方规则自检（文案被拒审的高发点）
 
+```powershell
+python -m rules.validate --title "Термос 500 мл ТЕРМОС" --description "Цена 1500 руб" --json
+```
+
+- **阻断项**（必拒审）：标题 >255 / 描述 >6000 字符、含电话/邮箱/URL/社交账号、含价格与促销词（`цена` `скидка` `промокод` `₽` …）；
+  另有本项目内部更严的规则（标题 <10、描述 <80、五个描述段落、中文残留、核心词重复）；
+- **建议项**（不拦但会写进 `russian_copy` 的 warnings）：标题 >120（移动端截断）、描述 >5500、全大写词、emoji、
+  连续标点（`!!!`）、绝对化用语（`лучший`/`№1` —— 俄罗斯广告法要求可举证）；
+- 严重度分级是刻意的：把"标题 130 字符"当阻断会误伤（Ozon 上限 255），而"标题里写电话"必须阻断。
+  详见 [rules/ozon-title-description-rules.md](rules/ozon-title-description-rules.md) §5.1。
+
+### 一条命令跑完一天（`pipeline.day`）
 把整条链串成一个入口：**选词入库 → 选品清单 → 采集清单 → 跑已采集商品 → 上线前预检**，最后给一份"今天干了什么 + 还需要你做什么 + 下一步敲什么命令"的报告。
 
 ```powershell

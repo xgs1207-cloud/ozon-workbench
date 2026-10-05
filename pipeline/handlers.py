@@ -16,7 +16,7 @@ from typing import Any, Mapping, Sequence
 
 from contracts import format_problems, validate_contract
 from models import AnalysisRequest, CopyRequest, ModelError, existing_source_refs, load_provider
-from rules.validate import validate_copy_bundle
+from rules.validate import official_copy_checks, validate_copy_bundle
 
 from .context import PipelineGateError, StepContext
 from .selection import load_selected_keywords
@@ -173,6 +173,10 @@ def handle_russian_copy(ctx: StepContext) -> dict[str, Any]:
             "文案未通过契约/规则校验",
             {"problems": problems[:12]},
         )
+
+    # Ozon 官方规则的"建议项"：不阻断，但要让人看到（例如标题超推荐长度、绝对化用语）
+    if isinstance(copy_bundle, Mapping):
+        warnings.extend(official_copy_checks(copy_bundle)["advisory"])
 
     artifacts: list[str] = []
     for contract_name, _, relative in CONTRACT_FILES:

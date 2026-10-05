@@ -232,6 +232,38 @@ def _keywords_of(request: Any) -> list[Any]:
     return []
 
 
+NARRATIVE_FIELDS = ("selling_points", "inferences", "unknowns", "risks", "recommendation")
+
+
+def build_narrative_prompt(request: Any) -> str:
+    """只让模型写"叙述字段"的提示词。
+
+    形状必须与 ``product-analysis`` 契约逐字一致（这里踩过坑：自己编的
+    ``inferences={area,statement,basis}`` 与契约的 ``{field,value,confidence,basis}`` 不符，
+    导致真模型连续 3 次过不了校验）。``tests/test_http_provider.py`` 有一条防漂移测试，
+    会拿契约里的必填字段名来核对这段提示词。
+    """
+    return (
+        "请只输出下面这 5 个键（JSON 对象，**不要输出 facts / processing / schema_version 等**，"
+        "那部分由系统按采集数据填写）：\n"
+        "- `selling_points`：数组，每项 {\"text\": 字符串, \"evidence\": [证据来源字符串]}，3–6 条\n"
+        "- `inferences`：数组，每项 {\"field\": 字符串, \"value\": 任意, "
+        "\"confidence\": \"low\"|\"medium\"|\"high\", \"basis\": [依据字符串]}\n"
+        "- `unknowns`：数组，每项 {\"field\": 字符串, \"reason\": 字符串, \"needed_from_human\": true|false}\n"
+        "- `risks`：数组，每项 {\"area\": 字符串, \"level\": \"low\"|\"medium\"|\"high\"|\"critical\", "
+        "\"message\": 字符串, \"blocking\": true|false}\n"
+        "- `recommendation`：{\"decision\": \"continue\"|\"needs_human_input\"|\"reject\"|\"unknown\", \"reason\": 字符串}\n"
+        "硬规则：只依据下面的采集数据与关键词；不要编造参数、认证、品牌或材质；"
+        "拿不准就写进 unknowns，或把 decision 设为 needs_human_input。"
+        "数组字段不能是 null；只输出 JSON，不要解释文字。\n\n"
+        + _context_block(
+            source=request.source,
+            selected_keywords=_keywords_of(request),
+            positioning=getattr(request, "positioning", None),
+        )
+    )
+
+
 def _schema_hint(contract: str) -> str:
     """给模型一份**够精确**的字段表：真实模型光看"必填顶层字段"仍会加字段、给 null。"""
     try:
@@ -451,21 +483,7 @@ class HttpModelProvider:
         base = self._deterministic().analyze_product(request)
         warnings: list[str] = ["facts 由代码从 input/source.json 派生；模型只写叙述字段"]
 
-        narrative_prompt = (
-            "请只输出下面这些键（JSON 对象，不要输出 facts / processing 等其它键）。\n"
-            "- `selling_points`：数组，每项 {text: 俄语或中文文案, evidence: [证据来源]}，3–6 条\n"
-            "- `inferences`：数组，每项 {area, statement, basis}\n"
-            "- `unknowns`：数组，每项 {field, reason, needed_from_human: true/false}\n"
-            "- `risks`：数组，每项 {area, level: low|medium|high, message, blocking: true/false}\n"
-            "- `recommendation`：{decision: \"continue\"|\"needs_review\", reason}\n"
-            "硬规则：只依据下面的采集数据与关键词，不要编造参数、认证、品牌或材质；"
-            "拿不准就写进 unknowns 或把 decision 设为 needs_review。只输出 JSON，不要解释文字。\n\n"
-            + _context_block(
-                source=request.source,
-                selected_keywords=_keywords_of(request),
-                positioning=getattr(request, "positioning", None),
-            )
-        )
+        narrative_prompt = build_narrative_prompt(request)
 
         problems: list[str] = []
         prompt = narrative_prompt

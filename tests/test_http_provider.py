@@ -329,6 +329,42 @@ class ProviderBehaviourTests(unittest.TestCase):
         self.assertFalse(provider.calls[0]["ok"])
         self.assertTrue(provider.calls[1]["ok"])
 
+    def test_narrative_prompt_covers_contract_required_fields(self):
+        """防漂移：叙述字段的形状必须与 product-analysis 契约一致。
+
+        踩过的坑：提示词里自己编了 inferences={area,statement,basis}，而契约要
+        {field,value,confidence,basis} → 真模型连试 3 次都过不了校验。
+        """
+        import json as _json
+        import pathlib as _pathlib
+
+        from models.http_provider import build_narrative_prompt
+
+        request = AnalysisRequest(
+            product_id=self.product_dir.name,
+            product_dir=self.product_dir,
+            source=self.source,
+            selected_keywords=[{"keyword": "термос 500 мл"}],
+        )
+        prompt = build_narrative_prompt(request)
+
+        schema = _json.loads(
+            (_pathlib.Path(__file__).resolve().parents[1] / "contracts" / "original"
+             / "product-analysis.schema.json").read_text(encoding="utf-8")
+        )
+        props = schema.get("properties") or {}
+        defs = schema.get("$defs") or {}
+        for key in ("selling_points", "inferences", "unknowns", "risks"):
+            items = (props.get(key) or {}).get("items") or {}
+            ref = items.get("$ref")
+            target = defs.get(ref.split("/")[-1]) if ref else items
+            for field in (target or {}).get("required") or []:
+                self.assertIn(field, prompt, f"{key} 的必填字段 {field} 没写进提示词")
+        for decision in ("continue", "needs_human_input", "reject", "unknown"):
+            self.assertIn(decision, prompt, f"decision 枚举 {decision} 没写进提示词")
+        # 系统字段不该让模型输出
+        self.assertIn("不要输出", prompt)
+
     def test_facts_always_come_from_code_even_if_model_sends_its_own(self):
         """模型就算硬塞一份 facts，也不能覆盖代码从 source 派生的事实。"""
         model_reply = json.dumps(

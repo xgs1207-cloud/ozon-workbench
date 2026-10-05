@@ -232,6 +232,20 @@ field_completion ──编译──> ozon-attributes-final.json ──被引用�
 
 ---
 
+### 5.5 选品闭环（关键词库 → 找货 → 采集）
+
+用户流程的前两段由两个工具承接（都是**只读/离线**的，不发业务请求）：
+
+1. `python -m collector.sourcing --library keyword-library --top 20`
+   → `output/sourcing-plan.{json,md}`：每个达标词给出 **Ozon 复核链接**（俄文词）、
+   **1688 找货链接**（中文词；默认取 Seerfar 中文类目名，`--translate --provider ark` 时让模型翻）、
+   打分依据，并把**疑似品牌词**（含拉丁字母/®™）单列提醒"按品类找货、不要照抄品牌"；
+2. `python -m pipeline.category --name "Простыня" [--fixture-dir contracts/fixtures]`
+   → `config/category-bindings.json`：类目名 → 真实 `category_id/type_id`（只读匹配，找不到就报 unmatched）；
+   `python -m collector.seerfar_xlsx ... --bindings config/category-bindings.json` 会把真实 id 套进关键词库。
+
+---
+
 ## 6. 排查手册
 
 | 现象 | 先看什么 |

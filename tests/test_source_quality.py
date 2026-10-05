@@ -228,6 +228,41 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertFalse(json.loads(buffer.getvalue())["ok"])
 
+    def test_runner_gate_stops_on_bad_capture(self):
+        """体检阻断项必须真的拦住流水线（在 validate_source 就停，不用等到提交）。"""
+        from pipeline.batch import create_batch
+        from pipeline.runner import run_product
+
+        summary = ingest_capture(
+            self.products,
+            {
+                "source_url": "https://detail.1688.com/offer/141414141.html",
+                "title_zh": "316 不锈钢保温杯",
+                "category": {"category_id": "1001", "type_id": "2001"},
+                "skus": [
+                    {"sku_id": "S1", "color_ru": "красный", "purchase_price_cny": 18.5},
+                    {"sku_id": "S1", "color_ru": "синий", "purchase_price_cny": 19.0},
+                ],
+            },
+        )
+        directory = self.products / summary["product_id"]
+        target = directory / "input" / "main-images"
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "01.png").write_bytes(b"\x89PNG\r\n\x1a\n a")
+        create_batch(
+            self.products,
+            batches_root=self.root / "batches",
+            product_ids=[directory.name],
+            target_store_ids=["shop-a"],
+        )
+
+        report = run_product(directory, until="product_analysis", dry_run=True)
+        self.assertEqual(report["stop_reason"], "gate_failed", report)
+        self.assertEqual(report["stopped_at"], "validate_source")
+        executed = {item["step"]: item for item in report["executed"]}
+        self.assertEqual(executed["validate_source"]["status"], "gate_failed")
+        self.assertIn("重复 sku_id", str(executed["validate_source"].get("reason")))
+
 
 if __name__ == "__main__":
     unittest.main()

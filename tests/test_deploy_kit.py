@@ -145,8 +145,47 @@ class ShellSyntaxTests(unittest.TestCase):
     def test_install_script_syntax(self):
         self.check("deploy/install.sh")
 
+    def test_with_env_helper_syntax(self):
+        self.check("deploy/with-env.sh")
+
+    def test_push_to_github_syntax(self):
+        self.check("deploy/push-to-github.sh")
+
     def test_contract_fetcher_syntax(self):
         self.check("contracts/fetch_contracts.sh")
+
+
+class WithEnvHelperTests(unittest.TestCase):
+    """手动敲 CLI 时看不到 systemd 的 env 文件 —— 这个坑要有测试守着。"""
+
+    def test_helper_exists_and_sources_env_file(self):
+        text = (DEPLOY / "with-env.sh").read_text(encoding="utf-8")
+        self.assertIn("OZON_ENV_FILE", text)
+        self.assertIn("set -a", text)
+        self.assertIn("exec \"$@\"", text)
+        self.assertIn("已设置", text)  # 打印哪些变量已设置（不打印值）
+
+    def test_helper_never_prints_secret_values(self):
+        text = (DEPLOY / "with-env.sh").read_text(encoding="utf-8")
+        self.assertIn("$name=<已设置>", text)
+        marker = "for name in COS_SECRET_ID"
+        self.assertIn(marker, text)
+        secret_loop = marker + text.split(marker, 1)[1].split("done", 1)[0]
+        for name in ("COS_SECRET_KEY", "COS_SECRET_ID", "ARK_API_KEY", "OZON_DEFAULT_API_KEY"):
+            self.assertIn(name, secret_loop)
+        # 只要没有把值拼进输出就行（`-n "$value"` 这种判断是允许的）
+        self.assertNotIn("$name=$value", secret_loop, "这会把密钥值打印出来")
+        self.assertIn("$name=<已设置>", secret_loop)
+        self.assertIn("$name=<空>", secret_loop)
+
+    def test_install_script_relaxes_env_permissions_for_manual_runs(self):
+        text = (DEPLOY / "install.sh").read_text(encoding="utf-8")
+        self.assertIn('chown root:"$APP_USER" "$ENV_FILE"', text)
+        self.assertIn("chmod 640", text)
+
+    def test_oss_cos_error_points_to_helper(self):
+        text = (ROOT / "pipeline" / "oss_cos.py").read_text(encoding="utf-8")
+        self.assertIn("with-env.sh", text)
 
 
 class DeploymentGotchaTests(unittest.TestCase):

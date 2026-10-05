@@ -99,6 +99,11 @@ if [ ! -f "$ENV_FILE" ]; then
   install -m 600 -o root -g root "$APP_DIR/deploy/ozon-workbench.env.example" "$ENV_FILE"
   echo "    已生成 $ENV_FILE（请填密钥后 systemctl restart ozon-workbench-api）"
 fi
+# 让运行用户也能读（否则手动敲 CLI 时 `bash deploy/with-env.sh ...` 读不到密钥；
+# systemd 用 root 读没问题，这里只是给手工命令用；改动后仍是组内可读、非全局可读）
+if id "$APP_USER" >/dev/null 2>&1; then
+  chown root:"$APP_USER" "$ENV_FILE" && chmod 640 "$ENV_FILE"
+fi
 install -m 644 "$APP_DIR/deploy/ozon-workbench-api.service" /etc/systemd/system/ozon-workbench-api.service
 systemctl daemon-reload
 systemctl enable ozon-workbench-api.service

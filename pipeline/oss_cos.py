@@ -412,7 +412,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not (bucket and region):
                 print(
                     json.dumps(
-                        {"ok": False, "error": "缺少桶名/地域：用 --bucket/--region，或设置 COS_BUCKET/COS_REGION"},
+                        {
+                            "ok": False,
+                            "error": (
+                                "缺少桶名/地域：用 --bucket/--region，或设置 COS_BUCKET/COS_REGION。"
+                                "注意：手动敲命令不会自动读 /etc/ozon-workbench.env（那是 systemd 专用的），"
+                                "用 `bash deploy/with-env.sh .venv/bin/python -m pipeline.oss_cos --probe --key ...`"
+                            ),
+                        },
                         ensure_ascii=False,
                         indent=2,
                     )

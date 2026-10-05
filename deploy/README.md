@@ -62,9 +62,8 @@ sudo bash deploy/install.sh
 ---
 
 ## 3. 填密钥与店铺（**密钥只在这里**）
-
 ```bash
-sudo nano /etc/ozon-workbench.env       # 已经由安装脚本生成（chmod 600）
+sudo nano /etc/ozon-workbench.env       # 安装脚本已生成；共享服务器上权限为 root:ubuntu 640
 #   ARK_API_KEY=...
 #   ARK_TEXT_MODEL=ep-2026xxxx
 #   OZON_DEFAULT_CLIENT_ID=... / OZON_DEFAULT_API_KEY=...
@@ -74,6 +73,12 @@ sudo -u ozon nano /opt/ozon-workbench/config/shops.json   # 只写环境变量�
 sudo systemctl restart ozon-workbench-api
 curl -s http://127.0.0.1:8766/health
 ```
+
+> ⚠️ **手动敲命令看不到 env 文件**（systemd 会自己读，你的 shell 不会）。所以要这样跑 CLI：
+> ```bash
+> bash deploy/with-env.sh .venv/bin/python -m pipeline.oss_cos --check
+> ```
+> 它会先载入 `/etc/ozon-workbench.env`，并只打印"哪些变量已设置 / 为空"（**不回显密钥值**）。
 
 ---
 

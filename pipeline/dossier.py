@@ -195,6 +195,10 @@ def collect_dossier(product_dir: Path | str) -> dict[str, Any]:
             "missing_ids": required.get("missing_attribute_ids") or [],
         },
         "feasibility": {
+            # 真实字段是 status/blocking_checks/warnings（老字段保留兼容）
+            "status": feasibility.get("status"),
+            "blocking_checks": feasibility.get("blocking_checks") or [],
+            "warnings": feasibility.get("warnings") or [],
             "upload_allowed": feasibility.get("upload_allowed"),
             "blockers": feasibility.get("production_blockers")
             or feasibility.get("blockers")
@@ -340,16 +344,29 @@ def render_dossier(dossier: Mapping[str, Any]) -> str:
 
     feasibility = dossier.get("feasibility") or {}
     add("## 七、上传载荷与阻断项")
+    status = feasibility.get("status")
     allowed = feasibility.get("upload_allowed")
-    add(f"- 上传可行性：upload_allowed = {_fmt(allowed)}")
+    blocked = status == "FAIL" or allowed is False
+    add(
+        f"- 上传可行性：status = {_fmt(status)}"
+        + (f"（upload_allowed = {_fmt(allowed)}）" if allowed is not None else "")
+    )
+    checks = feasibility.get("blocking_checks") or []
     blockers = feasibility.get("blockers") or []
+    if checks:
+        add("  - ⛔ 未过的检查：" + "、".join(str(item) for item in checks))
     if blockers:
         for item in blockers[:10]:
             add(f"  - ⛔ {_fmt(item)}")
-    elif allowed is None:
-        add("  - ⚠️ 还没跑 upload_feasibility：**无法判断**能不能提交（别当成通过）")
-    else:
-        add("  - ✅ 没有阻断项")
+    if not checks and not blockers:
+        if blocked:
+            add("  - ⛔ 判定为不可提交（但没记录具体检查项，看 output/upload-feasibility.json）")
+        elif status == "PASS":
+            add("  - ✅ 没有阻断项")
+        else:
+            add("  - ⚠️ 还没跑 upload_feasibility：**无法判断**能不能提交（别当成通过）")
+    for item in (feasibility.get("warnings") or [])[:5]:
+        add(f"  - ⚠️ {_fmt(item)}")
     receipts = dossier.get("receipts") or {}
     if receipts:
         add("- 店铺回执：")
@@ -371,7 +388,7 @@ def render_dossier(dossier: Mapping[str, Any]) -> str:
         add("- 发布图片：`pipeline.oss_cos --product-dir <目录>`（或 `pipeline.oss_local`）")
     if (attributes.get("missing") or 0) > 0:
         add("- 补必填属性：跑 `field_completion`，或按 `output/attribute-fill-input.json` 人工补值")
-    if not feasibility.get("upload_allowed"):
+    if (feasibility.get("status") not in (None, "PASS")) or feasibility.get("blockers"):
         add("- 先跑 `pipeline.doctor --products-root products` 看每个商品的阻断项")
     add(f"- 当前已完成：{', '.join(steps) if steps else '（还没跑）'}")
     return "\n".join(lines) + "\n"

@@ -321,6 +321,25 @@ def _dictionary_match(allowed_values: Sequence[Mapping[str, Any]], wanted: str) 
     return None
 
 
+def forced_dictionary_value(attribute: Mapping[str, Any]) -> dict[str, Any] | None:
+    """字典里**只有一个合法值**时，那就是强制值（没有选择余地，不算编造）。
+
+    真实案例：类目 17028731/92612 的「类型」(attr 8229) 字典只有 ``床单`` 一个值 —— 如实填它，
+    比留空等人工强。但**值被截断时不能用**（`values_truncated`：快照只存了前 N 个，
+    看起来只剩一个不代表真的只有一个）。
+    """
+    if attribute.get("values_truncated"):
+        return None
+    allowed_values = [item for item in (attribute.get("allowed_values") or []) if isinstance(item, Mapping)]
+    if len(allowed_values) != 1:
+        return None
+    item = allowed_values[0]
+    value = str(item.get("value") or "").strip()
+    if not value:
+        return None
+    return {"value": value, "dictionary_value_id": item.get("id")}
+
+
 def compile_attributes(
     *,
     product_id: str,
@@ -422,9 +441,27 @@ def compile_attributes(
             continue
 
         if entry is None:
-            if required:
-                missing_ids.append(attribute_id)
-            continue
+            forced = forced_dictionary_value(attribute)
+            if forced:
+                entry = _attribute_entry(
+                    attribute_id=attribute_id,
+                    attribute_name=name,
+                    required=required,
+                    value=forced["value"],
+                    dictionary_value_id=forced["dictionary_value_id"],
+                    source="category_dictionary",
+                    scope="common",
+                    confidence=0.95,
+                    evidence=["output/ozon-category-attributes.json"],
+                    mapping_method="single_dictionary_value_forced",
+                )
+                warnings.append(
+                    f"属性 {attribute_id}「{name}」字典只有一个合法值，按强制值填入：{forced['value']}"
+                )
+            else:
+                if required:
+                    missing_ids.append(attribute_id)
+                continue
 
         common.append(entry)
 

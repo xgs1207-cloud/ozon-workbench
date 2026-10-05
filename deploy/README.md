@@ -126,9 +126,28 @@ sudo -u ubuntu /opt/ozon-workbench/.venv/bin/python -m pipeline.oss_local \
 
 ## 5. 日常怎么用（服务器上）
 
+**最常用的一条命令**（生图 → 发布图片 → 质检 → 载荷 → 提交，一条跑完）：
+
 ```bash
 cd /opt/ozon-workbench
+# 干跑（零写请求，先看载荷与阻断项）
+.venv/bin/python -m pipeline.launch --product-dir products/P000002 --store default \
+    --provider ark --image-generator doubao --uploader dry-run \
+    --ozon-fixture contracts/fixtures --oss cos
 
+# 真提交（需要 /etc/ozon-workbench.env 里的凭据 + config/shops.json 里 enabled=true）
+APP_MODE=production .venv/bin/python -m pipeline.launch --product-dir products/P000002 --store default \
+    --provider ark --image-generator doubao --uploader ozon-api \
+    --execute-upload --i-understand-this-hits-ozon --oss cos
+
+# 批量：所有 COLLECTED 商品
+.venv/bin/python -m pipeline.launch --products-root products --store default \
+    --provider ark --image-generator doubao --oss cos
+```
+
+**手工分步**（想单步排查时）：
+
+```bash
 # 采集：把 1688 素材放进服务器某个目录（或用浏览器插件/API 导入）
 .venv/bin/python -m collector.ingest --folder /data/capture/p1 \
     --keyword "простынь на резинке 160х200"
@@ -140,8 +159,7 @@ cd /opt/ozon-workbench
 # 真实模型 + 豆包生图 + 图片同步
 .venv/bin/python -m pipeline.runner --product-dir products/P000001 \
     --provider ark --image-generator doubao --ozon-real
-.venv/bin/python -m pipeline.oss_local --product-dir products/P000001 \
-    --root /var/www/ozon-images --base-url https://img.example.com
+.venv/bin/python -m pipeline.oss_cos --product-dir products/P000001     # 或 pipeline.oss_local
 
 # 上线前预检 / 提交后确认
 .venv/bin/python -m pipeline.doctor --products-root products

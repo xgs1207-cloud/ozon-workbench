@@ -444,6 +444,39 @@ Ozon 的 import 只给任务号，最终结果要另查一次。所以提交之�
   **绝不估算**；包装 < 商品本体会被判 `hierarchy_ok=false` 并阻断上传；
 - 产物：`output/pricing-result.json`、`output/measurements.json`、`output/profit-analysis.json`（都过契约）。
 
+### 一键跑一个商品 / 一批商品（`pipeline.launch`）
+
+后半条链原本要手工敲两条命令（先 `runner` 跑到质检、再发布图片、再 `runner` 提交），容易漏、也容易顺序搞错。
+现在一条命令按**三个阶段**跑完，并且**图片没发布成功就绝不提交**：
+
+```powershell
+# 单个商品（干跑：生图→发布→质检→载荷→干跑回执，零写请求、不产生 task_id）
+python -m pipeline.launch --product-dir products\P000001 --store shop-a `
+    --provider fake --image-generator placeholder --uploader dry-run `
+    --ozon-fixture contracts\fixtures --oss local `
+    --oss-root /var/www/ozon-images --oss-base-url https://img.example.com
+
+# 真提交（走 azon-api 上传器；需要显式确认）
+python -m pipeline.launch --product-dir products\P000001 --store shop-a `
+    --provider ark --image-generator doubao --uploader ozon-api `
+    --execute-upload --i-understand-this-hits-ozon --oss cos
+
+# 批量：给所有 COLLECTED 商品建批次并逐个跑（单个失败不影响其它）
+python -m pipeline.launch --products-root products --store shop-a `
+    --provider ark --image-generator doubao --oss cos
+```
+
+- **阶段**：`authorize`（没授权就自动建批次，runner 会拒绝未授权商品）→ `content_and_images`（跑到质检）→
+  `publish_images`（COS 或自建目录，写出 `image-public-urls.json`）→ `upload`（干跑给回执 / 真提交走 runner）；
+- **失败就停在那一阶段**并给出**可操作提示**（例如"采集时没有选 Ozon 类目：补 input/category-selection.json"
+  "没有配置生图后端：加 --image-generator" "缺人工确认的尺寸重量"）；
+- `--oss none` 表示跳过发布（已有公网地址时用）；`--ozon-fixture contracts/fixtures` 可离线演练；
+- 批量模式默认只挑 `COLLECTED`，可用 `--keyword` 只跑挂了某些词的商品、`--batch-from-collection-plan`
+  自动用采集清单里"已采集"的词。
+
+> **采集时漏选类目也能救**：`python -m pipeline.category --set-product products\P000002 --category-id 17028922 --type-id 91875`
+> 会写 `input/category-selection.json` 并回填 `source.json`，之后分析/类目步骤就能继续（实测踩过：不补就只能重采）。
+
 ### 远程采集（Windows 采 1688 → 服务器入库）
 
 工作台跑在服务器上、素材在你本机，所以提供两条路把 1688 素材送进服务器：

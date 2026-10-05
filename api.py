@@ -445,6 +445,9 @@ class LaunchRequest(BaseModel):
     oss: str = Field("none", description="图片发布：cos / local / none")
     oss_root: str | None = None
     oss_base_url: str | None = None
+    ozon_fixture: bool = Field(
+        False, description="用 contracts/fixtures 做 Ozon 只读调用（离线演练）；否则尝试用配置的凭据"
+    )
     execute_upload: bool = False
     step_budget: int = Field(30, ge=1, le=60)
 
@@ -504,11 +507,33 @@ def workbench_launch(product_id: str, request: LaunchRequest) -> dict[str, Any]:
         image_generator=image_generator,
         uploader=uploader,
         publisher=publisher,
+        ozon_client=_ozon_client_for_launch(use_fixture=request.ozon_fixture),
         store_ids=request.stores,
         execute_upload=bool(request.execute_upload),
         step_budget=request.step_budget,
     )
     return {"ok": bool(report.get("ok")), "report": report}
+
+
+def _ozon_client_for_launch(*, use_fixture: bool) -> Any | None:
+    """给一键跑准备 Ozon 只读客户端：夹具优先，否则用已启用店铺的凭据；都没有就返回 None（门禁会提示）。"""
+    if use_fixture:
+        from pipeline.ozon_http import FixtureTransport, OzonClient
+
+        return OzonClient(FixtureTransport(directory=Path(__file__).resolve().parent / "contracts" / "fixtures"))
+    try:
+        from pipeline.ozon_http import OzonClient, OzonCredentials, UrllibTransport
+        from pipeline.stores import enabled_shop_ids, list_shops, load_registry
+
+        registry = load_registry()
+        shops = list_shops(registry)
+        if not shops:
+            return None
+        enabled = set(enabled_shop_ids(registry))
+        shop = next((item for item in shops if str(item.get("id")) in enabled), shops[0])
+        return OzonClient(UrllibTransport(OzonCredentials.from_shop(shop)))
+    except Exception:  # noqa: BLE001 - 缺凭据不在这里报错，让流水线给出可操作提示
+        return None
 
 
 @app.get("/api/collector/products")

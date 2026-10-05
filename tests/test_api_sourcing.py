@@ -235,12 +235,52 @@ class SourcingApiTests(unittest.TestCase):
 
         response = self.client.post(
             f"/api/workbench/products/{product_id}/launch",
-            json={"image_generator": "placeholder", "oss": "none", "step_budget": 6},
+            json={"image_generator": "placeholder", "oss": "none", "step_budget": 6, "ozon_fixture": True},
         )
         self.assertEqual(response.status_code, 200, response.text)
         report = response.json()["report"]
         self.assertFalse(report["ok"])  # 没发布图片 / 没跑完，如实报有阻断
         self.assertEqual(report["product_id"], product_id)
+
+    def test_launch_endpoint_with_ozon_fixture_reaches_images(self):
+        """带 ozon_fixture 时，category_match 能跑过（离线演练整条链）。"""
+        import json as _json
+
+        folder = self.root / "capture-launch-fixture"
+        for role in ("main-images", "sku-images", "detail-images"):
+            (folder / role).mkdir(parents=True, exist_ok=True)
+            (folder / role / "01.png").write_bytes(b"\x89PNG\r\n\x1a\n" + role.encode())
+        (folder / "product.json").write_text(
+            _json.dumps(
+                {
+                    "source_url": "https://detail.1688.com/offer/525252525.html",
+                    "title_zh": "纯棉床单",
+                    "category": {"category_id": "1001", "type_id": "2001"},
+                    "skus": [{"sku_id": "S1", "purchase_price_cny": 18.0}],
+                    "keywords": ["простынь 200х200"],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        ingest = self.client.post("/api/collector/products/import-folder", json={"folder": str(folder)})
+        product_id = ingest.json()["product_id"]
+
+        response = self.client.post(
+            f"/api/workbench/products/{product_id}/launch",
+            json={
+                "image_generator": "placeholder",
+                "oss": "none",
+                "step_budget": 14,
+                "ozon_fixture": True,
+                "stores": ["shop-a"],  # 没目标店铺会停在 authorize（也是门禁之一）
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        phases = response.json()["report"]["phases"]
+        content = next(item for item in phases if item["phase"] == "content_and_images")
+        self.assertIn("category_match", content["completed_steps"])
+        self.assertIn("image_generation", content["completed_steps"])
 
     def test_launch_endpoint_refuses_real_upload(self):
         response = self.client.post(

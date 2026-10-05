@@ -264,6 +264,20 @@ mkdir -p data && cp /path/to/Seerfar-*.xlsx data/     # 表放服务器上（不
 .venv/bin/python -m pipeline.doctor --products-root products
 ```
 
+**采集（素材在你 Windows 本机时）**：开隧道后在你本机推：
+
+```powershell
+ssh -N -i D:\AI作图\ozonfinancedeploy.pem -L 8766:127.0.0.1:8766 ubuntu@43.132.190.110
+python -m collector.push_capture --folder D:\capture\p1 --keyword "простынь на резинке 160х200"
+```
+
+服务端接口 `POST /api/collector/products/capture` 收 base64 图片 → 解包入库（sha256 去重、带上关键词）。
+实测：Windows → 隧道 → 服务器入库成功（`P000002`，7 张图全部落盘，关键词直接写进 `selected-keywords.json`）。
+
+> 服务器上现在有两个**演示商品**（`products/P000001`、`P000002`，用的是占位图）：
+> 想清掉就 `rm -rf /opt/ozon-workbench/products/P00000{1,2}`（连带台账一起删）。
+
+
 实测（你的表）：**773 行解析零跳过 → 121 条高热度低竞争达标 → 清单前 3 名 `yerrna` / `yerrna постельное белье` /
 `шуйские ситцы`**（前两个被标注"疑似品牌词：1688 按品类找货、不要照抄品牌"）；
 `doctor` 当时指出"缺 Ozon 凭据、还没有商品"——这正是你填完密钥后要看的报告。

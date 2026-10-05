@@ -444,6 +444,26 @@ Ozon 的 import 只给任务号，最终结果要另查一次。所以提交之�
   **绝不估算**；包装 < 商品本体会被判 `hierarchy_ok=false` 并阻断上传；
 - 产物：`output/pricing-result.json`、`output/measurements.json`、`output/profit-analysis.json`（都过契约）。
 
+### 远程采集（Windows 采 1688 → 服务器入库）
+
+工作台跑在服务器上、素材在你本机，所以提供两条路把 1688 素材送进服务器：
+
+```powershell
+# 先开隧道（API 就"像"在本机 8766）
+ssh -N -i D:\AI作图\ozonfinancedeploy.pem -L 8766:127.0.0.1:8766 ubuntu@43.132.190.110
+
+# 素材文件夹（product.json 可选 + 三个图片目录）→ 推到服务器入库
+python -m collector.push_capture --folder D:\capture\p1 --dry-run        # 先看打包统计
+python -m collector.push_capture --folder D:\capture\p1 `
+    --keyword "простынь на резинке 160х200" --category-id 17028922 --type-id 91875
+```
+
+- 服务端接口：`POST /api/collector/products/capture`（图片以 base64 随 JSON 传，不要求服务器能读你的磁盘）；
+- 入库后与本地采集完全一致：`P######`、`source.json`、图片落盘（**按 sha256 去重**，重复图会跳过并告警）、
+  带上 `keywords` 与 `selected-keywords.json`（**可直接跳过手工选词**）；
+- 同一 offer 再推 → HTTP 409 并给出 `create_new_version` 选项（加 `--new-version` 建新版本）；
+- 单张 ≤12MB、单次总量 ≤40MB（`WORKBENCH_MAX_CAPTURE_BYTES` 可调）；文件名会被清洗（去路径分隔符、折叠 `..`）。
+
 ### 对象存储（腾讯云 COS ／ 自建 nginx，二选一）
 
 **你选定的是腾讯云 COS**（自带 https 域名，Ozon 能直接抓）：

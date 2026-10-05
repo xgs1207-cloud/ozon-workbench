@@ -29,6 +29,8 @@ from .ozon_http import (
 
 CATEGORY_FILE = "output/ozon-category.json"
 SNAPSHOT_FILE = "output/ozon-category-attributes.json"
+#: 旁挂的变体属性文件（上游契约里没有 is_aspect，见下方 handle_category_match 注释）
+ASPECT_FILE = "output/ozon-aspect-attributes.json"
 SELECTION_FILE = "input/category-selection.json"
 
 
@@ -98,6 +100,40 @@ def handle_category_match(ctx: StepContext) -> dict[str, Any]:
             {"problems": problems[:8], "summary": format_problems(problems)},
         )
     ctx.write_json(SNAPSHOT_FILE, snapshot)
+
+    # 旁挂文件：上游契约 ozon-category-attributes 里没有 is_aspect，而 Ozon 真实接口会返回它。
+    # 变体合并必须靠这个权威标记（名字会随拉取语言变化，中文名匹配不上俄文模式表）。
+    raw_attributes = [
+        item for item in (attributes_response.get("result") or []) if isinstance(item, Mapping)
+    ]
+    aspect_attributes = [
+        {
+            "attribute_id": item.get("id") or item.get("attribute_id"),
+            "attribute_name": item.get("name") or item.get("attribute_name"),
+            "dictionary_id": item.get("dictionary_id"),
+            "is_collection": bool(item.get("is_collection")),
+            "allowed_values_count": len(item.get("attribute_values") or item.get("values") or []),
+        }
+        for item in raw_attributes
+        if item.get("is_aspect") is True
+    ]
+    ctx.write_json(
+        ASPECT_FILE,
+        {
+            "schema_version": "1.0.0",
+            "product_id": ctx.product_dir.name,
+            "category_id": category_id,
+            "type_id": type_id,
+            "source": "ozon_seller_api",
+            "api_endpoint": "/v1/description-category/attribute",
+            "fetched_at": now_iso(),
+            "note": "上游契约没有 is_aspect，这里旁挂保存；变体合并以本文件为准",
+            "aspect_attribute_ids": [item["attribute_id"] for item in aspect_attributes],
+            "aspect_attributes": aspect_attributes,
+        },
+    )
+    if not aspect_attributes:
+        warnings.append("这个类目没有 is_aspect 变体属性：多规格会按独立商品卡处理（不合并）")
     ctx.write_json(
         CATEGORY_FILE,
         {

@@ -32,16 +32,48 @@ BRAND_PATTERNS: tuple[str, ...] = ("бренд",)
 #: 无品牌时的默认字典值（原项目 AGENTS.md 的"无品牌"规则）
 UNBRANDED_TEXT = "Нет бренда"
 
-#: 变体维度候选（按名称匹配；命中且类目快照里存在才可能合并）
+#: **已知的 Ozon 变体属性 id**（比名字可靠：中文/俄文/英文命名都可能变）
+KNOWN_ASPECT_IDS: dict[int, str] = {
+    10096: "color",   # 商品颜色
+    10097: "color",   # 颜色名称（合并变体时通常用这个）
+    6771: "size_or_measurement",   # 纸张尺寸
+    6781: "configuration",         # 板材类型
+}
+
+#: 变体维度候选（按名称匹配；中文与俄文都要认，因为属性名语言取决于拉取时的 language）
 ASPECT_HINT_PATTERNS: tuple[tuple[str, str], ...] = (
     ("color", "название цвета"),
     ("color", "цвет"),
+    ("color", "颜色"),
+    ("color", "color"),
     ("size_or_measurement", "объём"),
     ("size_or_measurement", "объем"),
     ("size_or_measurement", "размер"),
+    ("size_or_measurement", "尺寸"),
+    ("size_or_measurement", "规格"),
+    ("size_or_measurement", "size"),
     ("configuration", "комплектация"),
+    ("configuration", "配置"),
+    ("configuration", "套装"),
     ("seller_specification", "исполнение"),
+    ("seller_specification", "样式"),
 )
+
+
+def aspect_kind_for(attribute: Mapping[str, Any]) -> str | None:
+    """判断一个属性是不是变体维度、属于哪一类（先认 id，再认中俄文名）。"""
+    attribute_id = attribute.get("attribute_id") or attribute.get("id")
+    try:
+        known = KNOWN_ASPECT_IDS.get(int(attribute_id))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        known = None
+    if known:
+        return known
+    name = str(attribute.get("attribute_name") or attribute.get("name") or "").casefold()
+    for kind, hint in ASPECT_HINT_PATTERNS:
+        if hint in name:
+            return kind
+    return None
 
 
 def now_iso() -> str:
@@ -98,31 +130,57 @@ def evaluate_variant_rules(
     *,
     skus: Sequence[Mapping[str, Any]],
     category_attributes: Sequence[Mapping[str, Any]],
+    aspect_attributes: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """产出 ``platform-grouping-result`` 契约形状的判定结果。"""
+    """产出 ``platform-grouping-result`` 契约形状的判定结果。
+
+    ``aspect_attributes``（来自 ``output/ozon-aspect-attributes.json``，是 Ozon 用 ``is_aspect``
+    亲自标记的变体属性）比"按名字猜"可靠得多：名字会随拉取语言变化（中文/俄文），
+    而 ``is_aspect`` 是权威标记。给了就用它，没给再退回按名字匹配（老行为）。
+    """
     differences = detect_sku_differences(skus)
+
+    candidates: list[Mapping[str, Any]] = []
+    aspect_source = "name_hint"
+    if aspect_attributes:
+        candidates = list(aspect_attributes)
+        aspect_source = "ozon_is_aspect"
+    else:
+        candidates = list(category_attributes)
+
     allowed: list[dict[str, Any]] = []
-    for attribute in category_attributes:
-        name = str(attribute.get("attribute_name") or "")
-        for kind, hint in ASPECT_HINT_PATTERNS:
-            if hint in name.casefold():
+    for attribute in candidates:
+        name = str(attribute.get("attribute_name") or attribute.get("name") or "")
+        kind = aspect_kind_for(attribute)
+        if not kind:
+            if aspect_attributes:
+                # 是变体属性但认不出属于哪一类 → 仍然列出来（人工可见），但不参与自动映射
                 allowed.append(
                     {
-                        "attribute_id": attribute.get("attribute_id"),
+                        "attribute_id": attribute.get("attribute_id") or attribute.get("id"),
                         "attribute_name": name,
-                        "kind": kind,
+                        "kind": "unknown_aspect",
                         "dictionary_id": attribute.get("dictionary_id"),
                         "has_dictionary_values": bool(attribute.get("allowed_values")),
                     }
                 )
-                break
+            continue
+        allowed.append(
+            {
+                "attribute_id": attribute.get("attribute_id") or attribute.get("id"),
+                "attribute_name": name,
+                "kind": kind,
+                "dictionary_id": attribute.get("dictionary_id"),
+                "has_dictionary_values": bool(attribute.get("allowed_values")),
+            }
+        )
 
     mapped: list[dict[str, Any]] = []
     unmapped: list[dict[str, Any]] = []
     for difference in differences:
-        candidates = [item for item in allowed if item["kind"] == difference["kind"]]
-        if candidates:
-            mapped.append({**difference, "attribute_id": candidates[0]["attribute_id"], "attribute_name": candidates[0]["attribute_name"]})
+        matches = [item for item in allowed if item["kind"] == difference["kind"]]
+        if matches:
+            mapped.append({**difference, "attribute_id": matches[0]["attribute_id"], "attribute_name": matches[0]["attribute_name"]})
         else:
             unmapped.append(difference)
 
@@ -140,12 +198,12 @@ def evaluate_variant_rules(
         reason = (
             "存在无法映射到类目变体属性的差异："
             + "、".join(f"{item['kind']}={'/'.join(item['values'])}" for item in unmapped)
-            + "；需要人工确认后再决定是否合并（缺 is_aspect 信息，不冒险合并）"
+            + f"；需要人工确认后再决定是否合并（变体属性来源：{aspect_source}）"
         )
     else:
         strategy = "merged_variants"
         can_merge = True
-        reason = "所有已选 SKU 的差异都能映射到类目允许的变体属性"
+        reason = f"所有已选 SKU 的差异都能映射到类目变体属性（来源：{aspect_source}）"
 
     return {
         "internal_group_count": 1,

@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from contracts import format_problems, validate_contract
 
@@ -14,6 +14,8 @@ from .attributes import build_attribute_fill_input, compile_attributes, evaluate
 from .context import PipelineGateError, StepContext
 
 CATEGORY_SNAPSHOT = "output/ozon-category-attributes.json"
+#: 旁挂的变体属性文件（Ozon 的 is_aspect；上游快照契约里没有这个字段）
+ASPECT_FILE = "output/ozon-aspect-attributes.json"
 CATEGORY_FILE = "output/ozon-category.json"
 FILL_INPUT = "output/attribute-fill-input.json"
 ATTRIBUTES_FINAL = "output/ozon-attributes-final.json"
@@ -30,7 +32,14 @@ def handle_variant_rules(ctx: StepContext) -> dict[str, Any]:
     if not skus:
         raise PipelineGateError(ctx.step, "没有已选 SKU，无法判定变体规则")
 
-    result = evaluate_variant_rules(skus=skus, category_attributes=snapshot.get("attributes") or [])
+    # 变体属性以旁挂文件（Ozon 的 is_aspect）为准；没有就退回按名字匹配（老行为）
+    aspect_file = ctx.read_json(ASPECT_FILE) if ctx.path(ASPECT_FILE).is_file() else {}
+    aspect_attributes = aspect_file.get("aspect_attributes") if isinstance(aspect_file, Mapping) else None
+    result = evaluate_variant_rules(
+        skus=skus,
+        category_attributes=snapshot.get("attributes") or [],
+        aspect_attributes=aspect_attributes or None,
+    )
     problems = validate_contract("platform-grouping-result", result)
     if problems:
         raise PipelineGateError(

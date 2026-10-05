@@ -9,7 +9,7 @@ User=ozon
 Group=ozon
 WorkingDirectory=/opt/ozon-workbench
 # 凭据只放在这里（chmod 600，root 拥有）；注册表里只写环境变量名
-EnvironmentFile=/etc/ozon-workbench.env
+EnvironmentFile=-/etc/ozon-workbench.env
 ExecStart=/opt/ozon-workbench/.venv/bin/uvicorn api:app --host 127.0.0.1 --port 8766
 Restart=on-failure
 RestartSec=5
@@ -17,7 +17,10 @@ RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
-ReadWritePaths=/opt/ozon-workbench /var/www/ozon-images
+# 路径前加 "-"：目录不存在时**不要**让整个 unit 起不来
+# （踩过：/var/www/ozon-images 未创建时服务以 226/NAMESPACE 崩溃重启）
+ReadWritePaths=-/opt/ozon-workbench
+ReadWritePaths=-/var/www/ozon-images
 
 [Install]
 WantedBy=multi-user.target

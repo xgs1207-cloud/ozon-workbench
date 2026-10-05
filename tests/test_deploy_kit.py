@@ -57,10 +57,25 @@ class DeployKitTests(unittest.TestCase):
 
     def test_systemd_unit_points_at_venv_and_env_file(self):
         text = (DEPLOY / "ozon-workbench-api.service").read_text(encoding="utf-8")
-        self.assertIn("EnvironmentFile=/etc/ozon-workbench.env", text)
+        self.assertIn("EnvironmentFile=-/etc/ozon-workbench.env", text)
         self.assertIn(".venv/bin/uvicorn", text)
         self.assertIn("WorkingDirectory=/opt/ozon-workbench", text)
         self.assertIn("ReadWritePaths=", text)
+
+    def test_read_write_paths_are_optional(self):
+        """目录不存在不能让 unit 崩：ReadWritePaths 必须带 "-" 前缀（踩过 226/NAMESPACE）。"""
+        text = (DEPLOY / "ozon-workbench-api.service").read_text(encoding="utf-8")
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("ReadWritePaths="):
+                self.assertTrue(
+                    stripped.startswith("ReadWritePaths=-"),
+                    f"ReadWritePaths 缺少 '-' 前缀（目录不存在时服务会崩溃重启）：{stripped}",
+                )
+
+    def test_install_creates_config_and_image_dirs(self):
+        text = (DEPLOY / "install.sh").read_text(encoding="utf-8")
+        self.assertIn('mkdir -p "$APP_DIR" "$IMAGE_ROOT" "$APP_DIR/config"', text)
 
     def test_nginx_config_forces_https_and_blocks_scripts(self):
         text = (DEPLOY / "nginx-ozon-images.conf").read_text(encoding="utf-8")

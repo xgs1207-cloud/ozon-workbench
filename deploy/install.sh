@@ -57,9 +57,13 @@ echo "==> 2/5 建用户与目录"
 if ! id -u "$APP_USER" >/dev/null 2>&1; then
   useradd --system --create-home --shell /usr/sbin/nologin "$APP_USER"
 fi
-mkdir -p "$APP_DIR" "$IMAGE_ROOT"
+mkdir -p "$APP_DIR" "$IMAGE_ROOT" "$APP_DIR/config"
 chown -R "$APP_USER:$APP_USER" "$APP_DIR" "$IMAGE_ROOT"
 chmod 755 "$IMAGE_ROOT"
+# 共享服务器（--no-apt）常用 ubuntu 用户跑服务，把目录交给它，避免权限问题
+if id -u ubuntu >/dev/null 2>&1; then
+  chown -R ubuntu:ubuntu "$APP_DIR" "$IMAGE_ROOT" 2>/dev/null || true
+fi
 
 echo "==> 3/5 同步代码到 $APP_DIR"
 if [ "$SOURCE_DIR" != "$APP_DIR" ]; then

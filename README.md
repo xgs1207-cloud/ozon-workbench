@@ -116,6 +116,28 @@ python -m pipeline.ozon_write --payload <同上> --send --store shop-a --i-under
 python -m pipeline.ozon_status --product-dir products\P000001 --store shop-a                                  # 事后确认终态（只读）
 python -m pipeline.ozon_status --product-dir products\P000001 --fixture contracts\fixtures\ozon-import-info.json  # 离线演练
 
+### 网页操作台（给自己点着测）
+
+服务只监听服务器回环地址，用 SSH 隧道访问（无需公网暴露、无需额外鉴权）：
+
+```powershell
+ssh -i "<你的私钥>" -N -L 8766:127.0.0.1:8766 ubuntu@<服务器>
+# 然后浏览器打开 http://127.0.0.1:8766/
+```
+
+页面能做的（按钮即流程）：
+
+| 按钮 | 作用 | 是否写 Ozon |
+|---|---|---|
+| 1. 跑流程（干跑） | 跑完剩余步骤（AI 文案 / 出图 / 属性 / 载荷） | ❌ |
+| 2. 发布图片到对象存储 | 上传图片并写公网地址（Ozon 要能匿名抓） | ❌（只写对象存储） |
+| 3. 提交前预检 | 店铺+凭据、production 载荷、图片匿名可达性、币种一致性 | ❌ 只读 |
+| 4. 真实提交 | 真的建商品 | ✅ 需输入 `SUBMIT` 确认 |
+| 5. 提交后核对 | 读回 Ozon：SKU / 属性 / 图片转存 / 变体是否合并成一张卡 | ❌ 只读 |
+| 看要点 | 俄文标题、简介、标签、上架属性、变体价格、图片预览、阻断项 | ❌ 只读 |
+
+对应接口：`GET /`、`GET /api/workbench/stores`、`POST /api/workbench/products/{id}/{publish-images,preflight,verify,submit}`、`GET .../{id}/summary`。
+
 ### 真实提交流程（2026-10 已实测跑通）
 
 ```bash

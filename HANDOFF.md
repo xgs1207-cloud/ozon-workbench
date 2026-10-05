@@ -243,6 +243,10 @@ field_completion ──编译──> ozon-attributes-final.json ──被引用�
 2. `python -m pipeline.category --name "Простыня" [--fixture-dir contracts/fixtures]`
    → `config/category-bindings.json`：类目名 → 真实 `category_id/type_id`（只读匹配，找不到就报 unmatched）；
    `python -m collector.seerfar_xlsx ... --bindings config/category-bindings.json` 会把真实 id 套进关键词库。
+3. `python -m collector.collection_plan --plan output/sourcing-plan.json --products products`
+   → `output/collection-plan.{json,md}`：待采集/已采集状态（扫商品目录里真实记录的关键词，不靠人工打勾）；
+   采集时 `--keyword "<俄文词>"` 会把关键词写进 `source.json` 与 `input/selected-keywords.json`，
+   商品因此天然与关键词库对齐、可跳过手工选词；`doctor` 的「关键词 → 商品」一节可查这个词的进展。
 
 ---
 

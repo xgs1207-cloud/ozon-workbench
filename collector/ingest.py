@@ -221,6 +221,10 @@ def normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         skus.append(normalized)
 
     category = payload.get("category") or payload.get("selected_category")
+    # 从选品清单采集时，关键词自带绑定好的真实类目 —— 采集时没选类目就用它（仍不猜）
+    keyword_category = payload.get("keyword_category")
+    if category is None and isinstance(keyword_category, Mapping) and keyword_category:
+        category = keyword_category
     normalized_category = None
     if isinstance(category, Mapping) and category:
         normalized_category = {
@@ -256,7 +260,30 @@ def normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         "images": images,
         "raw": payload.get("raw") if isinstance(payload.get("raw"), Mapping) else dict(payload),
         "extra": payload.get("extra") if isinstance(payload.get("extra"), Mapping) else {},
+        "keywords": _normalize_keywords(payload),
+        "keyword_category": dict(keyword_category) if isinstance(keyword_category, Mapping) else None,
+        "keyword_source": payload.get("keyword_source"),
     }
+
+
+def _normalize_keywords(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """采集载荷里可选的关键词（来自选品清单）：保留字符串与记录两种写法。"""
+    raw = payload.get("keywords") or payload.get("source_keywords") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in raw:
+        if isinstance(item, Mapping):
+            text = str(item.get("keyword") or "").strip()
+            if text:
+                rows.append({**dict(item), "keyword": text})
+        else:
+            text = str(item or "").strip()
+            if text:
+                rows.append({"keyword": text})
+    return rows
 
 
 # --------------------------------------------------------------------- 落盘
@@ -383,7 +410,24 @@ def ingest_capture(
         "stored_images": stored_images,
         "extra": normalized["extra"],
     }
+    keywords = normalized.get("keywords") or []
+    if keywords:
+        source_payload["keywords"] = keywords
+        source_payload["keyword_source"] = normalized.get("keyword_source") or "collection_plan"
+        if isinstance(normalized.get("keyword_category"), Mapping):
+            source_payload["keyword_category"] = normalized["keyword_category"]
     _write_json(product_dir / "input" / "source.json", source_payload)
+
+    # 带上关键词的采集：直接把选词写进 input/selected-keywords.json，商品天然与关键词库对齐
+    if keywords:
+        try:
+            from pipeline.selection import set_selected_keywords
+
+            set_selected_keywords(product_dir, keywords, source=source_payload["keyword_source"])
+        except Exception as error:  # noqa: BLE001 - 选词失败不该让采集入库失败
+            warnings.append(f"关键词写入选词文件失败（可手工补）：{error}")
+        else:
+            warnings.append(f"已带上 {len(keywords)} 个关键词（来源：{source_payload['keyword_source']}），可直接跑文案")
     _write_json(
         product_dir / "input" / "raw-snapshot.json",
         {
@@ -503,10 +547,17 @@ def import_folder(
     skus: Sequence[Mapping[str, Any]] | None = None,
     title_zh: str | None = None,
     allow_new_version: bool = False,
+    keywords: Sequence[Any] | None = None,
+    keyword_source: str = "collection_plan",
 ) -> dict[str, Any]:
     payload = build_payload_from_folder(
         folder, source_url=source_url, category=category, skus=skus, title_zh=title_zh
     )
+    if keywords:
+        payload["keywords"] = [
+            dict(item) if isinstance(item, Mapping) else str(item) for item in keywords
+        ]
+        payload["keyword_source"] = keyword_source
     return ingest_capture(products_root, payload, allow_new_version=allow_new_version)
 
 
@@ -533,6 +584,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--category-path-zh", default=None)
     parser.add_argument("--title-zh", default=None)
     parser.add_argument("--sku", action="append", dest="skus", help="<sku_id>:<采购价>，可重复")
+    parser.add_argument(
+        "--keyword",
+        action="append",
+        dest="keywords",
+        help="来自选品清单的关键词（可重复）：会写进 source.json 与 selected-keywords.json",
+    )
+    parser.add_argument("--keyword-source", default="collection_plan")
     parser.add_argument("--new-version", action="store_true", help="同一 offer 已存在时新建版本")
     args = parser.parse_args(argv)
 
@@ -553,6 +611,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             skus=_parse_sku_flags(args.skus) or None,
             title_zh=args.title_zh,
             allow_new_version=args.new_version,
+            keywords=args.keywords or None,
+            keyword_source=args.keyword_source,
         )
     except DuplicateCaptureError as error:
         print(json.dumps({"ok": False, **error.to_dict()}, ensure_ascii=False, indent=2))

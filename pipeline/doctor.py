@@ -182,6 +182,22 @@ def _first_blocking_step(blockers: Sequence[str]) -> str:
     return "unknown"
 
 
+def _keywords_of_product(directory: Path) -> list[str]:
+    """商品上真实记录的关键词（source.json 的 keywords / selected-keywords.json）。"""
+    texts: list[str] = []
+    for relative, key in (("input/source.json", "keywords"), ("input/selected-keywords.json", "keywords")):
+        payload = _read_json(directory / relative)
+        for item in payload.get(key) or []:
+            text = str(item.get("keyword") if isinstance(item, Mapping) else item or "").strip()
+            if text and text not in texts:
+                texts.append(text)
+    return texts
+
+
+def product_keywords(directory: Path | str) -> list[str]:
+    return _keywords_of_product(Path(directory))
+
+
 def run_doctor(
     products_root: Path | str,
     *,
@@ -204,6 +220,18 @@ def run_doctor(
     ready = [item["product_id"] for item in products if item["ready_to_submit"]]
     blocked = [item["product_id"] for item in products if not item["ready_to_submit"]]
 
+    # 关键词 → 商品（回答："这个词下有几个商品、走到哪一步了"）
+    keyword_index: dict[str, list[dict[str, Any]]] = {}
+    for item, directory in zip(products, directories):
+        for text in _keywords_of_product(Path(directory)):
+            keyword_index.setdefault(text, []).append(
+                {
+                    "product_id": item["product_id"],
+                    "status": item.get("status"),
+                    "ready_to_submit": item.get("ready_to_submit"),
+                }
+            )
+
     next_steps: list[str] = []
     if environment["blockers"]:
         next_steps.extend(environment["blockers"])
@@ -219,12 +247,14 @@ def run_doctor(
         "products_root": str(root),
         "environment": environment,
         "products": products,
+        "keywords": keyword_index,
         "summary": {
             "products": len(products),
             "ready_to_submit": len(ready),
             "blocked": len(blocked),
             "ready_ids": ready,
             "blocked_ids": blocked,
+            "keywords_with_products": len(keyword_index),
         },
         "next_steps": next_steps,
         "api_writes_performed": False,
@@ -261,6 +291,20 @@ def render_report(report: Mapping[str, Any]) -> str:
             f"| {item.get('product_id')} | {item.get('status')} | {'✅' if item.get('ready_to_submit') else '❌'} | {first} |"
         )
     lines.append("")
+    keywords = report.get("keywords") or {}
+    if keywords:
+        lines.append("## 关键词 → 商品")
+        lines.append("")
+        lines.append("| 关键词 | 商品数 | 商品（状态 / 可否提交） |")
+        lines.append("|---|---|---|")
+        for keyword, rows in sorted(keywords.items(), key=lambda item: -len(item[1]))[:30]:
+            detail = "、".join(
+                f"{row['product_id']}（{row.get('status') or '未知'}"
+                f"{' / 可提交' if row.get('ready_to_submit') else ''}）"
+                for row in rows
+            )
+            lines.append(f"| {keyword} | {len(rows)} | {detail} |")
+        lines.append("")
     if report.get("next_steps"):
         lines.append("## 下一步")
         for step in report["next_steps"]:

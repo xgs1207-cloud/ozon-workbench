@@ -290,6 +290,27 @@ python -m collector.sourcing --library keyword-library --top 20 --translate --pr
 | 4 | 0.911 | `шуйские ситцы постельное белье` | 品类 | 床单 |
 | 5 | 0.898 | `озон хоум` | 品类 | 床单 |
 
+### 采集清单（选品清单 → 采集任务，带状态跟踪）
+
+```powershell
+python -m collector.collection_plan --plan output/sourcing-plan.json --products products --top 10
+python -m collector.collection_plan --library keyword-library --products products          # 直接从词库重建
+python -m collector.collection_plan --mark products\P000001 --keyword "простынь на резинке 160х200"  # 补记关键词
+```
+
+- 每个词给出 **目标 Ozon 类目**（来自绑定；未绑定时会明确显示"未绑定"）、两个搜索入口、打分；
+- **状态不靠人工打勾**：扫 `products/*/input/source.json` 与 `selected-keywords.json` 里真实记录的关键词，
+  判定 `⬜ 待采集` / `✅ 已采集`，并列出已采集的商品与它们的当前状态；
+- **采集时带上关键词**（这样商品与关键词库天然对齐、还能跳过手工选词）：
+  ```powershell
+  python -m collector.ingest --folder D:\capture\p1 --keyword "простынь на резинке 160х200"
+  ```
+  入库后会写 `source.json.keywords` + 直接写好 `input/selected-keywords.json`；
+  若没给类目但给了 `keyword_category`，类目也会沿用绑定值（**不猜**，只是沿用）；
+- `doctor` 新增「关键词 → 商品」一节，回答"这个词下有几个商品、走到哪一步、能不能提交"。
+
+
+
 ### 类目绑定（类目名 → 真实 category_id/type_id）
 
 Seerfar 表只有类目**名称**（`床单` / `Простыня`），没有 Ozon 的 id，而关键词库与商品都要用真实类目：

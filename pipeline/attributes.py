@@ -350,6 +350,7 @@ def compile_attributes(
     design_hash: str | None = None,
     fill_input_hash: str | None = None,
     dictionary_lookups: Mapping[str, Any] | None = None,
+    human_attributes: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """把类目属性快照 + 填值输入编译成 ``ozon-attributes-final``。
 
@@ -491,6 +492,40 @@ def compile_attributes(
                 continue
 
         common.append(entry)
+
+    # 人工确认入口：运营在 input/human-confirmations.json 里写 {"attributes": {"9048": "..."}}，
+    # **只补机器没填上的**（绝不覆盖已推导出的值），来源如实标成人工确认。
+    confirmed = {
+        int(key): value
+        for key, value in ((human_attributes or {}).items() if isinstance(human_attributes, Mapping) else [])
+        if str(key).lstrip("-").isdigit() and str(value or "").strip()
+    }
+    if confirmed:
+        by_id = {attribute.get("attribute_id"): attribute for attribute in attributes if isinstance(attribute, Mapping)}
+        for attribute_id, value in confirmed.items():
+            if attribute_id in {item["attribute_id"] for item in common}:
+                continue
+            attribute = by_id.get(attribute_id) or {}
+            common.append(
+                _attribute_entry(
+                    attribute_id=attribute_id,
+                    attribute_name=str(attribute.get("attribute_name") or f"属性 {attribute_id}"),
+                    required=bool(attribute.get("required")),
+                    value=value if isinstance(value, (int, float)) else str(value),
+                    dictionary_value_id=None,
+                    source="human_confirmation",
+                    scope="common",
+                    confidence=1.0,
+                    evidence=["input/human-confirmations.json"],
+                    mapping_method="human_confirmed",
+                )
+            )
+            warnings.append(f"属性 {attribute_id} 使用人工确认值：{value}")
+            if attribute_id in missing_ids:
+                missing_ids.remove(attribute_id)
+            # 人工确认也算"填上了"，否则 required_summary 会与 missing 列表自相矛盾
+            if bool(attribute.get("required")):
+                required_filled += 1
 
     filled_common_ids = {item["attribute_id"] for item in common}
     filled_sku_ids = {

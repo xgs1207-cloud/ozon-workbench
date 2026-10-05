@@ -18,6 +18,8 @@ CATEGORY_SNAPSHOT = "output/ozon-category-attributes.json"
 ASPECT_FILE = "output/ozon-aspect-attributes.json"
 #: 旁挂的字典精确查值结果（品牌等大字典属性）
 LOOKUP_FILE = "output/ozon-dictionary-lookups.json"
+#: 人工确认（事实 + 属性）：运营填一次，流水线续跑
+HUMAN_CONFIRMATIONS = "input/human-confirmations.json"
 CATEGORY_FILE = "output/ozon-category.json"
 FILL_INPUT = "output/attribute-fill-input.json"
 ATTRIBUTES_FINAL = "output/ozon-attributes-final.json"
@@ -113,6 +115,9 @@ def handle_field_completion(ctx: StepContext) -> dict[str, Any]:
     # 大字典属性（品牌）用 category_match 时旁挂的"精确查值"结果填，保持编译步骤不发 API 调用
     lookup_file = ctx.read_json(LOOKUP_FILE) if ctx.path(LOOKUP_FILE).is_file() else {}
     dictionary_lookups = lookup_file.get("lookups") if isinstance(lookup_file, Mapping) else None
+    # 人工确认可补属性（例如 9048 型号名称，来源里没有、只能人来定）
+    confirmations = ctx.read_json(HUMAN_CONFIRMATIONS) if ctx.path(HUMAN_CONFIRMATIONS).is_file() else {}
+    human_attributes = confirmations.get("attributes") if isinstance(confirmations, Mapping) else None
 
     compiled = compile_attributes(
         product_id=ctx.product_dir.name,
@@ -121,6 +126,7 @@ def handle_field_completion(ctx: StepContext) -> dict[str, Any]:
         design_hash=sha256_of(ctx.path(DESIGN_FILE)),
         fill_input_hash=sha256_of(fill_input_path),
         dictionary_lookups=dictionary_lookups,
+        human_attributes=human_attributes,
     )
     problems = validate_contract("ozon-attributes-final", compiled)
     if problems:

@@ -46,13 +46,39 @@ class ForcedValueTests(unittest.TestCase):
 
 
 class CompileTests(unittest.TestCase):
-    def _compile(self, skus=None, lookups=None, attributes=None):
+    def _compile(self, skus=None, lookups=None, attributes=None, human_attributes=None):
         return compile_attributes(
             product_id="P000004",
             category_snapshot={"attributes": attributes or REAL_ATTRIBUTE_SHAPES},
             fill_input={"skus": skus or [{"sku_id": "S1", "color_ru": "белый"}]},
             dictionary_lookups=lookups,
+            human_attributes=human_attributes,
         )
+
+    def test_human_confirmed_attribute_fills_the_last_required_one(self):
+        """9048 型号名称：来源与字典都没有，只能人来定 —— 人工确认入口要能把它补上。"""
+        compiled = self._compile(human_attributes={"9048": "Bedding-200x200"})
+        common = {item["attribute_id"]: item for item in compiled["common_attributes"]}
+        self.assertIn(9048, common)
+        self.assertEqual(common[9048]["value"], "Bedding-200x200")
+        self.assertEqual(common[9048]["source"], "human_confirmation")
+        self.assertEqual(common[9048]["confidence"], 1.0)
+        # 这个用例没给品牌字典查值 → 仍缺 85；9048 已由人工确认补上
+        self.assertEqual(compiled["required_summary"]["missing"], 1)
+        self.assertEqual(compiled["required_summary"]["missing_attribute_ids"], [85])
+        self.assertEqual(compiled["required_summary"]["filled"], 2)
+
+    def test_human_confirmation_never_overrides_machine_value(self):
+        """人工确认只补空缺，不覆盖类目字典/代码推导出来的值。"""
+        compiled = self._compile(human_attributes={"8229": "人工乱填的"})
+        common = {item["attribute_id"]: item for item in compiled["common_attributes"]}
+        self.assertEqual(common[8229]["value"], "床单")
+        self.assertEqual(common[8229]["mapping_method"], "single_dictionary_value_forced")
+
+    def test_invalid_human_confirmation_keys_are_ignored(self):
+        compiled = self._compile(human_attributes={"品牌": "x", "9048": "  "})
+        common = {item["attribute_id"]: item for item in compiled["common_attributes"]}
+        self.assertNotIn(9048, common)
 
     def test_chinese_brand_name_is_recognised_with_lookup(self):
         """真实踩到：属性名是中文「品牌」，而品牌模式表原先只有俄文 → 分支进不去。

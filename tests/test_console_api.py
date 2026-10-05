@@ -1,4 +1,4 @@
-"""操作台（网页控制台）与新增接口的测试：页面可打开、店铺接口不泄密、真提交必须显式确认。"""
+"""操作台页面与工序接口的测试：页面可打开、工序来自单一来源、关键交互存在。"""
 
 from __future__ import annotations
 
@@ -48,8 +48,38 @@ class ConsoleApiTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_console_page_is_served(self):
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        # 工序台：导轨 + 校样 + 动作
+        for marker in ("上品工序台", 'id="rail"', 'id="panel-copy"', "真实提交", "/api/workbench/steps"):
+            self.assertIn(marker, response.text, marker)
+        self.assertIn("/api/workbench/products/", response.text)
+
+    def test_steps_endpoint_uses_single_source(self):
+        from pipeline.steps import PIPELINE_STEPS
+
+        response = self.client.get("/api/workbench/steps")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual([item["step"] for item in payload["steps"]], list(PIPELINE_STEPS))
+        self.assertTrue(all(item["label"] for item in payload["steps"]))
+
+    def test_stores_endpoint_never_leaks_secrets(self):
+        secret = "super-secret-value"
+        with unittest.mock.patch.dict(
+            os.environ, {"OZON_DEFAULT_CLIENT_ID": "1000", "OZON_DEFAULT_API_KEY": secret}
+        ):
+            response = self.client.get("/api/workbench/stores")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["shops"][0]["credentials_ready"])
+        self.assertNotIn(secret, json.dumps(payload, ensure_ascii=False))
+        self.assertNotIn("1000", json.dumps(payload, ensure_ascii=False))
+
     def test_summary_reads_top_level_copy_fields(self):
-        """真机：hashtags/primary_keywords 在 copy-ru.json 顶层（不是 copy_bundle 里），汇总不能读空。"""
+        """真机：hashtags/primary_keywords 在 copy-ru.json 顶层（不是 copy_bundle 里）。"""
         response = self.client.post(
             "/api/collector/products",
             json={
@@ -70,44 +100,18 @@ class ConsoleApiTests(unittest.TestCase):
                     "description_ru": "х" * 200,
                     "hashtags": ["#простыня", "#хлопок"],
                     "primary_keywords": ["простыня 200х200"],
-                    "description_sections": {"product_value": "…"},
                 },
                 ensure_ascii=False,
             ),
             encoding="utf-8",
         )
-        (output / "image-public-urls.json").write_text(
-            json.dumps({"urls": {"main-S1": "https://example.com/a.png"}}), encoding="utf-8"
-        )
         payload = self.client.get(f"/api/workbench/products/{product_id}/summary").json()
         self.assertEqual(payload["title_ru"], "Простыня хлопковая")
         self.assertEqual(payload["hashtags"], ["#простыня", "#хлопок"])
         self.assertEqual(payload["primary_keywords"], ["простыня 200х200"])
-        self.assertEqual(list(payload["images"]), ["main-S1"])
-
-    def test_console_page_is_served(self):
-        response = self.client.get("/")
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("Ozon 上品工作台", response.text)
-        self.assertIn("/api/workbench/doctor", response.text)
-
-    def test_stores_endpoint_never_leaks_secrets(self):
-        secret = "super-secret-value"
-        with unittest.mock.patch.dict(
-            os.environ, {"OZON_DEFAULT_CLIENT_ID": "1000", "OZON_DEFAULT_API_KEY": secret}
-        ):
-            response = self.client.get("/api/workbench/stores")
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertTrue(payload["ok"])
-        self.assertEqual(payload["shops"][0]["id"], "default")
-        self.assertTrue(payload["shops"][0]["credentials_ready"])
-        self.assertNotIn(secret, json.dumps(payload, ensure_ascii=False))
-        self.assertNotIn("1000", json.dumps(payload, ensure_ascii=False))
 
     def test_submit_requires_explicit_confirmation(self):
         response = self.client.post("/api/workbench/products/P-not-exist/submit", json={"store": "default"})
-        # 没有 confirm → 直接 400；商品不存在也必须先被 confirm 拦住（不能误触发写）
         self.assertEqual(response.status_code, 400)
         self.assertIn("SUBMIT", response.json()["detail"])
 

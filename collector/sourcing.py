@@ -51,10 +51,71 @@ PLAN_COLUMNS = (
 LATIN_PATTERN = re.compile(r"[A-Za-z]{3,}")
 BRAND_MARK_PATTERN = re.compile(r"[®™]|\b(?:brand|tm)\b", re.IGNORECASE)
 
+#: 俄文品牌名（Cyrillic）不会被拉丁规则抓到 —— 真机实测踩到：`шуйские ситцы`、`озон хоум`
+#: 都是品牌，却因为"没有拉丁字母"被当成品类词。用一份可维护的观察名单兜住这类。
+BRAND_WATCHLIST_FILE = "brand-watchlist.txt"
+BRAND_WATCHLIST_PATHS = (
+    "config/brand-watchlist.txt",
+    "deploy/brand-watchlist.example.txt",
+)
+#: 兜底清单（Cyrillic 品牌居多，供应商/市场自有品牌）。可用 config/brand-watchlist.txt 覆盖/追加。
+DEFAULT_BRAND_WATCHLIST = (
+    "шуйские ситцы",
+    "трехгорная мануфактура",
+    "трёхгорная мануфактура",
+    "ившвейстандарт",
+    "валетекс",
+    "смоленские",
+    "ozon home",
+    "озон хоум",
+    "clever",
+    "sofi de marko",
+    "homequeen",
+    "тва",
+    "монолит",
+)
 
-def classify_keyword(keyword: str) -> tuple[str, str | None]:
+
+def load_brand_watchlist(root: Path | str | None = None) -> tuple[str, ...]:
+    """读品牌观察名单：``config/brand-watchlist.txt``（一行一个）优先，缺省用内置兜底清单。"""
+    base = Path(root) if root else Path.cwd()
+    for relative in BRAND_WATCHLIST_PATHS:
+        path = base / relative
+        try:
+            if path.is_file():
+                entries = [
+                    line.strip().casefold()
+                    for line in path.read_text(encoding="utf-8").splitlines()
+                    if line.strip() and not line.strip().startswith("#")
+                ]
+                if entries:
+                    return tuple(entries)
+        except OSError:
+            continue
+    return DEFAULT_BRAND_WATCHLIST
+
+
+def brand_in_text(text: str, watchlist: Sequence[str]) -> str | None:
+    """文本里是否出现观察名单中的品牌（按词边界匹配，避免 "тва" 命中 "тварь" 这类误判）。"""
+    lowered = str(text or "").casefold()
+    for brand in watchlist:
+        if not brand:
+            continue
+        if re.search(rf"(?<![a-zа-яё0-9]){re.escape(brand)}(?![a-zа-яё0-9])", lowered):
+            return brand
+    return None
+
+
+def classify_keyword(keyword: str, watchlist: Sequence[str] | None = None) -> tuple[str, str | None]:
     """给关键词分类：``generic``（品类词）/ ``brand_or_latin``（疑似品牌词）。"""
     text = str(keyword or "")
+    brands = tuple(watchlist) if watchlist is not None else DEFAULT_BRAND_WATCHLIST
+    matched = brand_in_text(text, brands)
+    if matched:
+        return (
+            "brand_or_latin",
+            f"命中品牌观察名单「{matched}」：标题里不得使用他人品牌，请按**品类**找货并做无品牌包装",
+        )
     if BRAND_MARK_PATTERN.search(text) or LATIN_PATTERN.search(text):
         has_cyrillic = bool(re.search(r"[А-Яа-яЁё]", text))
         note = (
@@ -160,8 +221,10 @@ def build_plan(
     *,
     chinese_terms: Mapping[str, str] | None = None,
     warnings: Sequence[str] = (),
+    watchlist: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """把关键词记录组装成选品清单（含两个链接）。"""
+    brands = tuple(watchlist) if watchlist is not None else load_brand_watchlist()
     fallback = _chinese_terms_from_records(records)
     provided = {str(key): str(value) for key, value in (chinese_terms or {}).items()}
     rows: list[dict[str, Any]] = []
@@ -172,7 +235,7 @@ def build_plan(
         extra = record.get("extra") if isinstance(record.get("extra"), Mapping) else {}
         chinese = provided.get(keyword) or fallback.get(keyword) or ""
         source = "model" if keyword in provided else ("seerfar_category" if chinese else "missing")
-        kind, kind_note = classify_keyword(keyword)
+        kind, kind_note = classify_keyword(keyword, brands)
         rows.append(
             {
                 "keyword": keyword,
@@ -306,6 +369,8 @@ def build_sourcing_plan(
     provider: Any | None = None,
     translate: bool = False,
 ) -> dict[str, Any]:
+    # 品牌观察名单（俄文品牌名不会被拉丁规则抓到，真机踩过：шуйские ситцы / озон хоум）
+    watchlist = load_brand_watchlist()
     records = pick_keywords(
         library_root,
         category_id=category_id,
@@ -325,7 +390,7 @@ def build_sourcing_plan(
             context={"category": (records[0].get("extra") or {}).get("category_name_zh")},
         )
         warnings.extend(translate_warnings)
-    plan = build_plan(records, chinese_terms=chinese_terms, warnings=warnings)
+    plan = build_plan(records, chinese_terms=chinese_terms, warnings=warnings, watchlist=watchlist)
     plan["filters"] = {
         "category_id": category_id,
         "type_id": type_id,

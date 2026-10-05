@@ -149,6 +149,9 @@ def diagnose_product(
         "product_id": product_id,
         "status": status.get("status"),
         "current_step": status.get("current_step"),
+        # 界面要在"工序导轨"上画进度：已完成的工序必须给出来，否则只能显示当前一步
+        "completed_steps": list(status.get("completed_steps") or []),
+        "progress": status.get("progress"),
         "next_action": status.get("next_action"),
         "target_stores": store_ids,
         "store_plan": plan,

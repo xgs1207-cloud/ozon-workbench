@@ -1179,3 +1179,11 @@ def _blockers_for(directory: Path) -> list[str]:
         return list(diagnose_product(directory, enabled_store_ids=enabled_shop_ids(ensure_registry(None))).get("blockers") or [])
     except Exception as error:  # noqa: BLE001
         return [f"阻断项检查失败：{type(error).__name__}: {error}"]
+
+@app.get("/api/workbench/steps")
+def workbench_steps() -> dict[str, Any]:
+    """工序顺序与中文名（**单一来源**：pipeline.steps，页面不写死）。"""
+    from pipeline.steps import PIPELINE_STEPS, STEP_LABELS_ZH
+
+    steps = [{"step": step, "label": STEP_LABELS_ZH.get(step, step)} for step in PIPELINE_STEPS]
+    return {"ok": True, "count": len(steps), "steps": steps}

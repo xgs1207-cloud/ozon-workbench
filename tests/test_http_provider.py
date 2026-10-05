@@ -365,6 +365,37 @@ class ProviderBehaviourTests(unittest.TestCase):
         # 系统字段不该让模型输出
         self.assertIn("不要输出", prompt)
 
+    def test_thinking_toggle_and_max_tokens_are_sent(self):
+        """省钱快捷：默认关掉方舟思考链，并给单次回复设上限（实测 13.1s/527token → 4.5s/83token）。"""
+        import json as _json
+
+        from models.http_provider import OpenAICompatibleTransport, ProviderConfig
+
+        transport = OpenAICompatibleTransport(
+            base_url="https://ark.cn-beijing.volces.com/api/v3",
+            api_key="k",
+            model="ep-test",
+            thinking="disabled",
+            max_tokens=1234,
+        )
+        request = transport.build_request(system="s", user="u", temperature=0.3)
+        body = _json.loads(request.data.decode("utf-8"))
+        self.assertEqual(body["thinking"], {"type": "disabled"})
+        self.assertEqual(body["max_tokens"], 1234)
+
+    def test_config_defaults_to_disabled_thinking(self):
+        from models.http_provider import ProviderConfig
+
+        config = ProviderConfig.ark_from_env(
+            {"ARK_API_KEY": "ark-x", "ARK_TEXT_MODEL": "ep-test", "MODEL_TIMEOUT": "300"}
+        )
+        self.assertEqual(config.thinking, "disabled")
+        self.assertEqual(config.max_tokens, 4000)
+        off = ProviderConfig.ark_from_env(
+            {"ARK_API_KEY": "ark-x", "ARK_TEXT_MODEL": "ep-test", "ARK_THINKING": "enabled"}
+        )
+        self.assertEqual(off.thinking, "enabled")
+
     def test_facts_enrichment_uses_confirmed_inputs(self):
         """已知事实（类目名/人工确认的尺寸重量/无品牌规则）由代码补进 facts，不靠模型照抄。"""
         import json as _json

@@ -41,6 +41,8 @@ from contracts.normalize import normalize_payload
 DEFAULT_TIMEOUT = 90
 DEFAULT_TEMPERATURE = 0.3
 DEFAULT_MAX_ATTEMPTS = 3
+#: 单次回复上限（够写完整 JSON，又能挡住异常长回复烧钱）
+DEFAULT_MAX_TOKENS = 4000
 
 JSON_FENCE = re.compile(r"```(?:json)?\s*(.+?)```", re.DOTALL)
 
@@ -87,6 +89,8 @@ class OpenAICompatibleTransport:
         urlopen: Any | None = None,
         response_format: bool = True,
         extra_headers: Mapping[str, str] | None = None,
+        thinking: str | None = None,
+        max_tokens: int | None = None,
     ) -> None:
         cleaned = str(base_url).strip().rstrip("/")
         if not cleaned.startswith(("http://", "https://")):
@@ -98,6 +102,9 @@ class OpenAICompatibleTransport:
         self._urlopen = urlopen or urllib.request.urlopen
         self.response_format = response_format
         self.extra_headers = dict(extra_headers or {})
+        #: 方舟推理模型的"思考开关"：``disabled`` 时又快又省（实测 13.1s/527token → 4.5s/83token）
+        self.thinking = (str(thinking).strip().lower() or None) if thinking else None
+        self.max_tokens = int(max_tokens) if max_tokens else None
 
     @property
     def endpoint(self) -> str:
@@ -113,6 +120,11 @@ class OpenAICompatibleTransport:
         }
         if temperature is not None:
             body["temperature"] = temperature
+        if self.max_tokens:
+            body["max_tokens"] = self.max_tokens
+        if self.thinking:
+            # 方舟/豆包：{"type": "disabled"} 关掉思考链 —— 快 3 倍、输出 token 少 6 倍
+            body["thinking"] = {"type": self.thinking}
         if self.response_format:
             body["response_format"] = {"type": "json_object"}
         headers = {
@@ -452,6 +464,10 @@ class ProviderConfig:
     temperature: float = DEFAULT_TEMPERATURE
     max_attempts: int = DEFAULT_MAX_ATTEMPTS
     fallback_to_deterministic: bool = False
+    #: 方舟/豆包思考开关（``disabled`` = 又省钱又快；实测 13.1s→4.5s、527→83 token）
+    thinking: str | None = None
+    #: 单次回复上限，避免最坏情况烧钱
+    max_tokens: int | None = DEFAULT_MAX_TOKENS
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "ProviderConfig":
@@ -511,6 +527,8 @@ def _optional_numbers(source: Mapping[str, str]) -> dict[str, Any]:
         "timeout": number("MODEL_TIMEOUT", DEFAULT_TIMEOUT, int),
         "temperature": number("MODEL_TEMPERATURE", DEFAULT_TEMPERATURE, float),
         "max_attempts": max(1, number("MODEL_MAX_ATTEMPTS", DEFAULT_MAX_ATTEMPTS, int)),
+        "max_tokens": number("MODEL_MAX_TOKENS", DEFAULT_MAX_TOKENS, int),
+        "thinking": str(source.get("ARK_THINKING") or source.get("MODEL_THINKING") or "disabled").strip().lower() or None,
         "fallback_to_deterministic": str(source.get("MODEL_FALLBACK_TO_DETERMINISTIC") or "").strip().lower()
         in {"1", "true", "yes", "on"},
     }
@@ -812,6 +830,8 @@ def build_provider_from_env(env: Mapping[str, str] | None = None, *, ark: bool =
         api_key=config.api_key,
         model=config.model,
         timeout=config.timeout,
+        thinking=config.thinking,
+        max_tokens=config.max_tokens,
     )
     return HttpModelProvider(
         transport,

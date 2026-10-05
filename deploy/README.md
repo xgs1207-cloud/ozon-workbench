@@ -144,7 +144,57 @@ sudo -u ozon crontab -e
 
 ---
 
-## 7. 排错
+## 8. 共享服务器模式（已在真实腾讯云机器上跑通）
+
+如果这台机器上**已经跑着别的项目**（例如 `/opt/ozon-finance`、`/opt/penguin-*` 与 nginx 站点），
+请用**最小侵入**方式部署，不要跑 `install.sh` 的 apt 部分（可能升级/重启 nginx）：
+
+```bash
+# 1) 只传代码（用 git archive，自动排除密钥、业务数据与 .git）
+#    本机：git archive --format=tar.gz -o ozon-workbench.tar.gz HEAD
+scp -i <密钥> ozon-workbench.tar.gz ubuntu@<IP>:/tmp/
+
+# 2) 解压到**独立目录**（不碰别人的目录）
+ssh -i <密钥> ubuntu@<IP> '
+  sudo mkdir -p /opt/ozon-workbench
+  sudo tar -xzf /tmp/ozon-workbench.tar.gz -C /opt/ozon-workbench
+  sudo chown -R ubuntu:ubuntu /opt/ozon-workbench'
+
+# 3) Python 环境（服务器自带 python3.14，无需 apt）
+ssh -i <密钥> ubuntu@<IP> 'cd /opt/ozon-workbench &&
+  python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt &&
+  bash contracts/fetch_contracts.sh'
+
+# 4) 自检（在服务器上跑全部测试 + 演示）
+ssh -i <密钥> ubuntu@<IP> 'cd /opt/ozon-workbench &&
+  .venv/bin/python -m unittest discover -s tests -p "test*.py" 2>&1 | tail -3 &&
+  .venv/bin/python examples/run_demo.py >/dev/null && echo "演示 OK"'
+
+# 5) 目录与配置
+ssh -i <密钥> ubuntu@<IP> '
+  mkdir -p /opt/ozon-workbench/config
+  cp /opt/ozon-workbench/deploy/shops.example.json /opt/ozon-workbench/config/shops.json
+  sudo install -m 600 -o root -g root \
+       /opt/ozon-workbench/deploy/ozon-workbench.env.example /etc/ozon-workbench.env
+  sudo mkdir -p /var/www/ozon-images && sudo chown ubuntu:ubuntu /var/www/ozon-images'
+
+# 6) 只新增一个 systemd 服务（用 ubuntu 用户跑；服务名独立，不动别人的）
+ssh -i <密钥> ubuntu@<IP> '
+  sed -e "s/^User=ozon$/User=ubuntu/" -e "s/^Group=ozon$/Group=ubuntu/" \
+      /opt/ozon-workbench/deploy/ozon-workbench-api.service | sudo tee /etc/systemd/system/ozon-workbench-api.service >/dev/null
+  sudo systemctl daemon-reload && sudo systemctl enable --now ozon-workbench-api'
+curl -s http://127.0.0.1:8766/health   # 在服务器上执行
+```
+
+### 真实踩过的四个坑（都已在代码里修掉，别再踩）
+
+| 坑 | 现象 | 修法 |
+|---|---|---|
+| Windows 上 `git archive` 把脚本打成 **CRLF** | `set: pipefail: invalid option name`，契约一个都拉不下来 | 加 `.gitattributes`（`*.sh text eol=lf`），并有测试守着 git 里的 blob 不含 CR |
+| `ReadWritePaths` 指向**尚不存在**的目录 | 服务 `226/NAMESPACE` 崩溃重启（`ActiveState=activating`），但手动起的进程还能跑，容易误判"已经好了" | unit 里写成 `ReadWritePaths=-/路径`（`-` = 缺失不致命），安装脚本同时 `mkdir -p` |
+| 共享服务器上跑 `install.sh` | `apt-get install nginx` 可能升级/重启 nginx，影响别人站点 | 用 `--no-apt`，或按上面这份手工流程 |
+| 缺 `httpx` | `tests/test_api*.py` 整块导入失败（TestClient 依赖），服务器自检跑不全 | `requirements.txt` 里加 `httpx`，并有测试守着 |
+
 
 | 现象 | 原因 / 处理 |
 |---|---|

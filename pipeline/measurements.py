@@ -32,9 +32,15 @@ CONFIG_PATH = Path("config") / "pricing.json"
 DEFAULT_CONFIG: dict[str, Any] = {
     "rub_per_cny": 11.6,
     "commission_rate": 0.15,
+    #: 按"价格百分比"计的费用（平台佣金里的比例部分、收单、提现等）
     "logistics_commission_rate": 0.05,
     "acquiring_fee_rate": 0.015,
     "withdrawal_fee_rate": 0.01,
+    #: 按**卢布金额**计的固定费（Ozon 的物流/处理费多数是这个形状，不是"价格的百分比"）：
+    #: 每件固定 + 每公斤，二者相加后按 rub_per_cny 折算成人民币参与定价
+    "logistics_fee_rub_per_item": 0.0,
+    "logistics_fee_rub_per_kg": 0.0,
+    "order_processing_fee_rub": 0.0,
     "shipping_cost_cny_per_kg": 45.0,
     "shipping_min_cny": 15.0,
     "packing_fee_cny": 1.5,
@@ -282,6 +288,16 @@ def compute_sku_pricing(
     shipping = max(float(config["shipping_min_cny"]), shipping_from_weight)
 
     base_cost = (purchase or 0) + shipping + float(config["packing_fee_cny"]) + float(config["other_fixed_cost_cny"])
+    # Ozon 的物流/处理费是"每件 + 每公斤"的卢布固定费（不是价格百分比）→ 折成人民币后进成本
+    rub_per_cny = float(config["rub_per_cny"]) or 1.0
+    logistics_fixed_rub = (
+        float(config.get("logistics_fee_rub_per_item") or 0)
+        + float(config.get("logistics_fee_rub_per_kg") or 0) * (billable_weight / 1000)
+        + float(config.get("order_processing_fee_rub") or 0)
+    )
+    logistics_fixed_cny = logistics_fixed_rub / rub_per_cny
+    base_cost += logistics_fixed_cny
+
     fee_rate = (
         float(config["commission_rate"])
         + float(config["logistics_commission_rate"])
@@ -336,6 +352,8 @@ def compute_sku_pricing(
         "purchase_cost_cny": purchase,
         "purchase_cost_source": "input/source.json",
         "shipping_cost_cny": round(shipping, 2),
+        "logistics_fee_rub": round(logistics_fixed_rub, 2),
+        "logistics_fee_cny": round(logistics_fixed_cny, 2),
         "actual_weight_g": actual_weight,
         "volumetric_weight_g": volumetric,
         "billable_weight_g": billable_weight,
@@ -347,6 +365,21 @@ def compute_sku_pricing(
         "margin_rate": margin_rate,
         "status": status,
         "errors": errors,
+        # 钱花在哪：定价明细（人审与事后对账都要看这个）
+        "breakdown_cny": {
+            "purchase": round(purchase or 0, 2),
+            "shipping_to_ozon": round(shipping, 2),
+            "packing": round(float(config["packing_fee_cny"]), 2),
+            "other_fixed": round(float(config["other_fixed_cost_cny"]), 2),
+            "ozon_logistics_fixed": round(logistics_fixed_cny, 2),
+            "total_cost": round(base_cost, 2),
+        },
+        "breakdown_rub": {
+            "selling_price": selling_rub,
+            "platform_fees": round(selling_rub * fee_rate, 2) if selling_rub else None,
+            "cost": round(base_cost * rub_per_cny, 2) if selling_rub else None,
+            "profit": profit_rub,
+        },
     }
 
 
@@ -493,3 +526,111 @@ def handle_measurements(ctx: StepContext) -> dict[str, Any]:
 
 
 MEASUREMENT_HANDLERS = {"measurements": handle_measurements}
+
+
+def quote(
+    *,
+    cost_cny: float,
+    weight_g: int | None = None,
+    length_mm: int | None = None,
+    width_mm: int | None = None,
+    height_mm: int | None = None,
+    sku_id: str = "QUOTE",
+    config_path: Path | str | None = None,
+    config_overrides: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """给一个假想 SKU 试算价格（上线前 sanity check，不用建商品）。"""
+    config, warnings = load_pricing_config(config_path)
+    for key, value in (config_overrides or {}).items():
+        if value is not None and key in config:
+            config[key] = value
+    dimensions = None
+    if length_mm and width_mm and height_mm:
+        dimensions = {
+            "length_mm": int(length_mm),
+            "width_mm": int(width_mm),
+            "height_mm": int(height_mm),
+            "weight_g": int(weight_g) if weight_g else None,
+        }
+    row = compute_sku_pricing(
+        sku={"sku_id": sku_id, "purchase_price_cny": cost_cny, "weight_g": weight_g},
+        sku_id=sku_id,
+        config=config,
+        dimensions=dimensions,
+    )
+    return {"config": config, "config_warnings": warnings, "quote": row}
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """报价试算 CLI：``python -m pipeline.measurements --quote --cost-cny 18.5 --weight-g 430``"""
+    import argparse
+    import json as _json
+
+    parser = argparse.ArgumentParser(description="定价/尺寸重量：报价试算与配置查看")
+    parser.add_argument("--quote", action="store_true", help="试算一个假想 SKU 的售价与利润")
+    parser.add_argument("--cost-cny", type=float, default=None)
+    parser.add_argument("--weight-g", type=int, default=None)
+    parser.add_argument("--length-mm", type=int, default=None)
+    parser.add_argument("--width-mm", type=int, default=None)
+    parser.add_argument("--height-mm", type=int, default=None)
+    parser.add_argument("--config", default=None, help="pricing.json 路径（默认 config/pricing.json）")
+    parser.add_argument("--set", action="append", dest="overrides", help="临时覆盖配置，如 --set commission_rate=0.17")
+    parser.add_argument("--show-config", action="store_true", help="打印当前生效的定价配置")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+
+    if args.show_config:
+        config, warnings = load_pricing_config(args.config)
+        if args.json:
+            print(_json.dumps({"ok": True, "config": config, "warnings": warnings}, ensure_ascii=False, indent=2))
+        else:
+            print("\n".join(f"{key} = {value}" for key, value in config.items()))
+            for item in warnings:
+                print(f"⚠️ {item}")
+        return 0
+
+    if not args.quote:
+        parser.error("要么 --quote，要么 --show-config")
+    if args.cost_cny is None:
+        parser.error("--quote 需要 --cost-cny")
+
+    overrides: dict[str, Any] = {}
+    for item in args.overrides or []:
+        key, _, value = str(item).partition("=")
+        try:
+            overrides[key.strip()] = float(value)
+        except ValueError:
+            overrides[key.strip()] = value.strip()
+    report = quote(
+        cost_cny=args.cost_cny,
+        weight_g=args.weight_g,
+        length_mm=args.length_mm,
+        width_mm=args.width_mm,
+        height_mm=args.height_mm,
+        config_path=args.config,
+        config_overrides=overrides,
+    )
+    row = report["quote"]
+    if args.json:
+        print(_json.dumps({"ok": row["status"] != "REJECT", **report}, ensure_ascii=False, indent=2))
+    else:
+        breakdown = row["breakdown_cny"]
+        print(
+            f"采购 {breakdown['purchase']} CNY → 建议售价 {row['selling_price_rub']} RUB"
+            f"（≈{row['selling_price_cny']} CNY，计费重 {row['billable_weight_g']} g）"
+        )
+        print("成本构成（CNY）：" + "，".join(f"{key} {value}" for key, value in breakdown.items()))
+        margin = "—" if row["margin_rate"] is None else format(row["margin_rate"], ".1%")
+        print(
+            f"平台费率合计 {row['total_fee_rate']:.2%}｜预计利润 {row['estimated_profit_rub']} RUB｜利润率 {margin}"
+        )
+        print(f"判定：{row['status']}" + (f"（{'; '.join(row['errors'])}）" if row["errors"] else ""))
+        for item in report["config_warnings"]:
+            print(f"⚠️ {item}")
+    return 0 if row["status"] != "REJECT" else 1
+
+
+if __name__ == "__main__":
+    import sys as _sys
+
+    _sys.exit(main())

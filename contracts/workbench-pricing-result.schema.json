@@ -28,6 +28,9 @@
         "logistics_commission_rate": { "type": "number", "minimum": 0, "maximum": 0.3 },
         "acquiring_fee_rate": { "type": "number", "minimum": 0, "maximum": 0.1 },
         "withdrawal_fee_rate": { "type": "number", "minimum": 0, "maximum": 0.1 },
+        "logistics_fee_rub_per_item": { "type": "number", "minimum": 0 },
+        "logistics_fee_rub_per_kg": { "type": "number", "minimum": 0 },
+        "order_processing_fee_rub": { "type": "number", "minimum": 0 },
         "shipping_cost_cny_per_kg": { "type": "number", "minimum": 0 },
         "shipping_min_cny": { "type": "number", "minimum": 0 },
         "packing_fee_cny": { "type": "number", "minimum": 0 },
@@ -86,7 +89,31 @@
         "estimated_profit_rub": { "$ref": "#/$defs/nullableMoney" },
         "margin_rate": { "type": ["number", "null"], "minimum": -1, "maximum": 1 },
         "status": { "enum": ["UPLOAD", "WARNING", "REJECT"] },
-        "errors": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+        "errors": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "logistics_fee_rub": { "type": "number", "minimum": 0 },
+        "logistics_fee_cny": { "type": "number", "minimum": 0 },
+        "breakdown_cny": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "purchase": { "type": "number" },
+            "shipping_to_ozon": { "type": "number" },
+            "packing": { "type": "number" },
+            "other_fixed": { "type": "number" },
+            "ozon_logistics_fixed": { "type": "number" },
+            "total_cost": { "type": "number" }
+          }
+        },
+        "breakdown_rub": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "selling_price": { "$ref": "#/$defs/nullableMoney" },
+            "platform_fees": { "$ref": "#/$defs/nullableMoney" },
+            "cost": { "$ref": "#/$defs/nullableMoney" },
+            "profit": { "$ref": "#/$defs/nullableMoney" }
+          }
+        }
       }
     }
   }

@@ -200,7 +200,12 @@ class ArkImageTransport:
 
 
 def normalize_to_qc_png(data: bytes, target: tuple[int, int] = TARGET_SIZE) -> bytes:
-    """把图片归一化成 3:4、≥目标尺寸的 PNG（需要 Pillow；缺失时如实报错）。"""
+    """把图片归一化成严格 3:4 且**尺寸等于目标**（900×1200）的 PNG。
+
+    真机踩坑：早先只在"比目标小"时才缩放，于是 seedream 返回的 1920×2560 直接落盘，
+    同一个商品里主图 1920×2560、详情图 900×1200，尺寸不一致。现在统一裁成 3:4 后
+    **按目标尺寸缩放**（Ozon 主图推荐就是 900×1200，文件也更小、上传更快）。
+    """
     try:
         import io
 
@@ -223,7 +228,7 @@ def normalize_to_qc_png(data: bytes, target: tuple[int, int] = TARGET_SIZE) -> b
                 new_height = int(round(width / target_ratio))
                 top = max(0, (height - new_height) // 2)
                 image = image.crop((0, top, width, top + new_height))
-        if image.width < target[0] or image.height < target[1]:
+        if image.size != target:
             image = image.resize(target, Image.LANCZOS)
         buffer = io.BytesIO()
         image.save(buffer, format="PNG", optimize=True)

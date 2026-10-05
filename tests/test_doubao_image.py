@@ -195,6 +195,23 @@ class ArkTransportTests(unittest.TestCase):
 
 @unittest.skipUnless(HAS_PILLOW, "归一化需要 Pillow")
 class NormalizeTests(unittest.TestCase):
+    def test_large_image_is_downscaled_to_target(self):
+        """真机踩坑：seedream 返回 1920×2560，早先只放大不缩小 → 同商品里尺寸不一致。"""
+        normalized = normalize_to_qc_png(png_bytes(1920, 2560))
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "big.png"
+            path.write_bytes(normalized)
+            probe = probe_image(path)
+        self.assertEqual((probe["width"], probe["height"]), (900, 1200))
+
+    def test_wide_large_image_is_cropped_then_downscaled(self):
+        normalized = normalize_to_qc_png(png_bytes(2400, 2000))
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "wide.png"
+            path.write_bytes(normalized)
+            probe = probe_image(path)
+        self.assertEqual((probe["width"], probe["height"]), (900, 1200))
+
     def test_square_image_is_cropped_to_3x4_and_scaled(self):
         normalized = normalize_to_qc_png(png_bytes(1024, 1024))
         with tempfile.TemporaryDirectory() as directory:

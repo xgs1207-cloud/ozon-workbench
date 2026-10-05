@@ -134,6 +134,39 @@ class ShellSyntaxTests(unittest.TestCase):
         self.check("contracts/fetch_contracts.sh")
 
 
+class LicenseTests(unittest.TestCase):
+    """许可文件必须在位且是官方原文（不是我自己缩写的摘要）。"""
+
+    def setUp(self):
+        self.text = (ROOT / "LICENSE").read_text(encoding="utf-8")
+
+    def test_license_is_polyform_noncommercial_and_has_notice(self):
+        self.assertIn("PolyForm Noncommercial License 1.0.0", self.text)
+        self.assertIn("Required Notice: Copyright", self.text)
+        self.assertIn("Licensor: xgs1207-cloud", self.text)
+
+    def test_official_sections_are_intact(self):
+        for section in (
+            "## Acceptance",
+            "## Copyright License",
+            "## Distribution License",
+            "## Notices",
+            "## Noncommercial Purposes",
+            "## No Liability",
+            "## Definitions",
+        ):
+            self.assertIn(section, self.text, section)
+
+    def test_commercial_use_warning_present(self):
+        self.assertIn("商业用途", self.text)
+        self.assertIn("上游", self.text)
+
+    def test_readme_points_at_license(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("[LICENSE](LICENSE)", readme)
+        self.assertIn("PolyForm Noncommercial", readme)
+
+
 class ObjectStorageCliDocsTests(unittest.TestCase):
     def test_readme_documents_local_storage_option(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

@@ -541,28 +541,31 @@ capture-<offer_id>/
 
 ## 仓库与许可
 
-- 本仓库**不包含**上游作者的契约文件 `contracts/original/`（PolyForm Noncommercial 1.0.0，对外分发有许可问题）：
-  用 `powershell -ExecutionPolicy Bypass -File .\contracts\fetch_contracts.ps1` 自行拉取；
-- 仓库里**不含**任何真实密钥：`config/shops.json` 只写环境变量名，`.gitignore` 排除 `config/`、`.env*`、
-  采集与导出数据（`*.xlsx`）、运行时产物（`products/`、`keyword-library/`、`output/`）；
-- 本工作台自身的代码许可由你决定（当前未加 `LICENSE` 文件）。
+- **许可**：[LICENSE](LICENSE) —— **PolyForm Noncommercial License 1.0.0**。
+  非商业用途免费可用；**商业用途（含代运营、SaaS、对外销售）需另行取得授权**。
+  许可文本为官方原文（含 `Required Notice` 声明），未做改动；
+- 本仓库**不包含**上游作者的契约文件 `contracts/original/`（上游同样是非商业许可，对外分发有许可问题）：
+  用 `powershell -ExecutionPolicy Bypass -File .\contracts\fetch_contracts.ps1`（Linux 用
+  `bash contracts/fetch_contracts.sh`）自行拉取；规则文档为按技能约束**重新表述**；
+- 仓库里**不含**任何真实密钥：`config/` 只写环境变量名，`.gitignore` 排除 `config/`、`.env*`、
+  采集与导出数据（`*.xlsx`）、运行时产物（`products/`、`keyword-library/`、`output/`）。
 
 ## 决策状态
 
 已确定：
 
-1. **生图用豆包（火山方舟）** —— 已实现 `models/doubao_image.py`（参考图 + 提示词、900×1200 png 归一化、
-   逐槽位容错、`--show-request` 先看不发）；
-2. **Seerfar 实际列名已核对**（24 列全部识别，773 行零跳过）—— 已实现 `collector/seerfar_xlsx.py`；
-3. **代码推到你的 GitHub 仓库** —— 本地仓库已建好（`git init` + 首个提交，95 个文件，
-   `.gitignore` 已排除密钥/上游契约/业务数据），**只差远端地址与认证方式**。
+1. **生图用豆包（火山方舟）** —— `models/doubao_image.py`（参考图 + 提示词、900×1200 png 归一化、逐槽位容错）；
+2. **文本模型也用火山方舟** —— `--provider ark`，与生图共用 `ARK_API_KEY`（`ARK_TEXT_MODEL` 填接入点 ID）；
+3. **Seerfar 实际列名已核对**（24 列全部识别，773 行零跳过）—— `collector/seerfar_xlsx.py`；
+4. **对象存储在你自己的服务器上** —— `pipeline/oss_local.py`（同步到 nginx 目录 + 写出图片公网地址）
+   与 `deploy/` 部署套件（systemd / nginx / 一键安装 / Linux 契约拉取）；
+5. **许可**：PolyForm Noncommercial 1.0.0（见上）。
 
-仍待你确认：
+仍待你确认/提供：
 
-1. **GitHub 仓库地址**（`owner/repo`）与认证方式：推荐你先跑 `gh auth login`，之后就由我推送；
-   或者给我一个带 `repo` 权限的令牌（不推荐，令牌会出现在会话里）；
-2. **文本模型**用哪家（`models/http_provider.py` 已就绪：任何 OpenAI 兼容端点都能接，
-   包括火山方舟的 `https://ark.cn-beijing.volces.com/api/v3`）；
-3. **对象存储**用哪个（只需上传图片并产出 `output/image-public-urls.json`，已有 `publish_urls` 生成映射）；
-4. 本仓库要不要加 `LICENSE`（以及许可类型）。
+1. **服务器信息**（用于上传部署）：公网 IP 或域名、SSH 端口、用户名、**SSH 密钥文件路径**、
+   系统版本、代码目录、图片目录 + **HTTPS 域名**（Ozon 只抓 https，门禁也只接受 https）；
+2. **GitHub 推送**：本机到 github.com 超时（gh 设备码登录也失败），换网络后我立刻推送
+   （本地已备好 9 个提交，作者 `xgs1207-cloud`）。
+
 

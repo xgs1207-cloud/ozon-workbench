@@ -200,8 +200,11 @@ class PipelineIntegrationTests(unittest.TestCase):
         self.assertEqual(report["stop_reason"], "until_reached")
         self.assertEqual(report["completed_steps"], ["collect_source", "validate_source"])
         self.assertEqual(report["api_write_count"], 0)
-        # 采集入库写了 raw-snapshot 与 category-selection，所以不应有"缺少可选输入"的告警
-        self.assertEqual(report["executed"][0]["warnings"], [])
+        # 采集入库写了 raw-snapshot 与 category-selection，所以不应有"缺少可选输入"的告警；
+        # 但采集体检会提醒"这个商品还没有图片"（这是提醒不是阻断，图片步骤自己会再拦）
+        warnings = report["executed"][0]["warnings"]
+        self.assertFalse(any("缺少可选输入" in item for item in warnings), warnings)
+        self.assertTrue(any("图" in item for item in warnings), warnings)
 
         # 再往下跑：因为步骤还没实现，必须停下而不是假装完成
         again = run_product(self.products / product_id)

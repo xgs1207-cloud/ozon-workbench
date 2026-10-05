@@ -185,6 +185,24 @@ class AfterChainTests(DossierFixture):
         self.assertIn("⛔", text)
         self.assertIn("⚠️", text)
 
+    def test_capture_quality_shown_in_dossier(self):
+        (self.product_dir / "output" / "source-quality.json").write_text(
+            json.dumps(
+                {
+                    "blocking": [],
+                    "warnings": ["一张图都没有（input/main-images 等为空）：图片规划/质检做不了，补图后再跑"],
+                    "stats": {"skus_active": 3, "skus_total": 3, "images": {"main": 0}},
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        dossier = collect_dossier(self.product_dir)
+        self.assertTrue(dossier["capture_quality"]["checked"])
+        text = render_dossier(dossier)
+        self.assertIn("采集体检", text)
+        self.assertIn("一张图都没有", text)
+
     def test_write_and_cli(self):
         self.run_chain()
         result = write_dossier(self.product_dir)

@@ -66,6 +66,7 @@ def collect_dossier(product_dir: Path | str) -> dict[str, Any]:
     attributes = _read_json(out / "ozon-attributes-final.json")
     feasibility = _read_json(out / "upload-feasibility.json")
     publications = _read_json(out / "store-publications.json")
+    quality = _read_json(out / "source-quality.json")
 
     selected = [str(item) for item in (sku_selection.get("selected") or [])]
     price_rows = {str(row.get("sku_id")): row for row in _rows(pricing.get("skus"))}
@@ -199,6 +200,12 @@ def collect_dossier(product_dir: Path | str) -> dict[str, Any]:
             or feasibility.get("blockers")
             or [],
         },
+        "capture_quality": {
+            "checked": bool(quality),
+            "blocking": quality.get("blocking") or [],
+            "warnings": quality.get("warnings") or [],
+            "stats": quality.get("stats") or {},
+        },
         "receipts": receipts,
         "publication_stores": sorted((publications.get("stores") or {}).keys()),
     }
@@ -220,6 +227,18 @@ def render_dossier(dossier: Mapping[str, Any]) -> str:
     add("")
 
     add("## 一、选词与类目")
+    quality = dossier.get("capture_quality") or {}
+    if quality.get("checked"):
+        stats = quality.get("stats") or {}
+        add(
+            f"> 采集体检：阻断 {len(quality.get('blocking') or [])} 条、提醒 {len(quality.get('warnings') or [])} 条"
+            f"（SKU {_fmt(stats.get('skus_active'))}/{_fmt(stats.get('skus_total'))}，图片 {_fmt(stats.get('images'))}）"
+        )
+        for item in quality.get("blocking") or []:
+            add(f"> - ⛔ {item}")
+        for item in (quality.get("warnings") or [])[:4]:
+            add(f"> - ⚠️ {item}")
+        add("")
     keywords = dossier.get("keywords") or []
     if keywords:
         add("| 关键词 | 来源 | 分数 | 热度分位 | 竞争分位 |")

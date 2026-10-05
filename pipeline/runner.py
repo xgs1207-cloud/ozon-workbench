@@ -105,6 +105,28 @@ def handler_validate_source(ctx: StepContext) -> dict[str, Any]:
         raise PipelineGateError(ctx.step, "SKU 资料不完整", {"skus": missing_sku_fields})
     checks["sku_fields_ok"] = True
 
+    # 采集体检：重复 SKU、offer_id 撞车、一张图都没有 → 阻断；价格离群/缺变体值 → 提醒
+    from .source_quality import check_capture, render_report as render_quality
+
+    quality = check_capture(
+        {**dict(source), "product_id": ctx.product_dir.name},
+        product_dir=ctx.product_dir,
+        active_sku_ids=[str(item.get("sku_id") or "") for item in skus],
+    )
+    ctx.write_json(
+        "output/source-quality.json",
+        {**quality, "artifacts_note": "由 validate_source 生成；upload_feasibility 与 dossier 会读它"},
+    )
+    checks["quality_blocking"] = len(quality["blocking"])
+    checks["quality_warnings"] = len(quality["warnings"])
+    if quality["blocking"]:
+        raise PipelineGateError(
+            ctx.step,
+            "采集体检不通过：" + "；".join(quality["blocking"][:3]),
+            {"blocking": quality["blocking"], "summary": render_quality(quality)},
+        )
+    warnings.extend(quality["warnings"])
+
     for optional, label in (
         ("input/raw-snapshot.json", "原始快照 raw-snapshot.json"),
         ("input/category-selection.json", "类目选择 category-selection.json"),
@@ -114,7 +136,11 @@ def handler_validate_source(ctx: StepContext) -> dict[str, Any]:
 
     result = {"checked_at": now_iso(), "checks": checks, "warnings": warnings, "api_calls": 0}
     ctx.write_json("output/source-validation.json", result)
-    return {"warnings": warnings, "artifacts": ["output/source-validation.json"], "checks": checks}
+    return {
+        "warnings": warnings,
+        "artifacts": ["output/source-validation.json", "output/source-quality.json"],
+        "checks": checks,
+    }
 
 
 def handler_offer_exists_check(ctx: StepContext) -> dict[str, Any]:

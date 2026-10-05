@@ -444,6 +444,28 @@ Ozon 的 import 只给任务号，最终结果要另查一次。所以提交之�
   **绝不估算**；包装 < 商品本体会被判 `hierarchy_ok=false` 并阻断上传；
 - 产物：`output/pricing-result.json`、`output/measurements.json`、`output/profit-analysis.json`（都过契约）。
 
+### 采集体检（跑流水线之前先看一眼）
+
+```powershell
+python -m pipeline.source_quality --product-dir products\P000002            # 人读版
+python -m pipeline.source_quality --product-dir products\P000002 --json     # 机器读版
+```
+
+真实 1688 采集常见的坑，会在**跑流水线之前**被挑出来（并写 `output/source-quality.json`，档案里也会显示）：
+
+| 检查 | 严重度 | 为什么 |
+|---|---|---|
+| 重复 `sku_id` | ⛔ 阻断 | 同一 offer 会被提交两次，Ozon 直接报重复 |
+| 清洗/截断后 **offer_id 撞车**（如 `红 500` 与 `蓝 500` 都变成 `-500`） | ⛔ 阻断 | 两个不同规格会变成同一个 offer |
+| `sku_id` > 40 字符 | ⚠️ 提醒 | offer_id 截到 50 字符后可能撞车 |
+| 采购价 <1 元或 >20000 元 | ⚠️ 提醒 | 多半抓错了 |
+| 没有颜色/规格值 | ⚠️ 提醒 | Ozon 变体属性会缺值 |
+| 没有图片 / 主图数 < 上架 SKU 数 | ⚠️ 提醒 | 图片步骤自己会拦（needs_review），这里先预警 |
+| 中文标题缺失或过短 | ⚠️ 提醒 | AI 总结少一个关键输入 |
+
+> 设计取舍：只有"**确定是错的**"才阻断（重复/撞车）。"没有图片"是提醒而不是阻断——
+> 先跑文案、后补图是合法流程，硬门禁交给真正需要图片的那一步。
+
 ### Ozon 官方规则自检（文案被拒审的高发点）
 
 ```powershell
@@ -456,6 +478,16 @@ python -m rules.validate --title "Термос 500 мл ТЕРМОС" --descript
   连续标点（`!!!`）、绝对化用语（`лучший`/`№1` —— 俄罗斯广告法要求可举证）；
 - 严重度分级是刻意的：把"标题 130 字符"当阻断会误伤（Ozon 上限 255），而"标题里写电话"必须阻断。
   详见 [rules/ozon-title-description-rules.md](rules/ozon-title-description-rules.md) §5.1。
+
+### 商品档案（提交前的人审一页纸）
+
+```powershell
+python -m pipeline.dossier --product-dir products\P000002 --print   # 写出 output/dossier.md 并打印
+```
+
+把散落的十几个 JSON 汇总成一页：采集体检 → 选词与类目 → SKU（含上架范围与排除原因）→ AI 总结与卖点 →
+俄文文案（带规则阻断/建议）→ 图片规划（每张图用途/参考图/图上俄文/质检）→ Ozon 属性完成度 →
+上传可行性与店铺回执 → 下一步命令。**缺什么就写"缺"**，不会用默认值假装数据已就绪。
 
 ### 一条命令跑完一天（`pipeline.day`）
 把整条链串成一个入口：**选词入库 → 选品清单 → 采集清单 → 跑已采集商品 → 上线前预检**，最后给一份"今天干了什么 + 还需要你做什么 + 下一步敲什么命令"的报告。

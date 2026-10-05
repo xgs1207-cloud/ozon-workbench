@@ -204,6 +204,29 @@ class ProviderRetryTests(unittest.TestCase):
         self.assertTrue(any("丢弃" in item for item in warnings), warnings)
         self.assertEqual(provider.calls[0]["ok"], True)
 
+    def test_document_contracts_are_normalised_individually(self):
+        """copy 调用一次校验多份文档 → 也要逐个归一化（真机踩到 title_ru.evidence 给了 dict）。"""
+        from models.http_provider import HttpModelProvider
+
+        payload = {
+            "title_ru": {
+                "product_id": "P000006",
+                "title_ru": "Простыня хлопковая 200х200",
+                "evidence": [{"source": "input/source.json"}],  # 契约要 string
+            },
+            "description_ru": {"product_id": "P000006", "description_ru": "x"},
+        }
+        transport = self.ScriptedTransport([json.dumps(payload, ensure_ascii=False)])
+        provider = HttpModelProvider(transport, max_attempts=1)
+        result, warnings = provider._call_json(
+            task="russian_copy",
+            user="u",
+            validate=lambda data: [],
+            document_contracts={"title_ru": "title-ru", "description_ru": "description-ru"},
+        )
+        self.assertEqual(result["title_ru"]["evidence"], ["input/source.json"])
+        self.assertTrue(any("evidence" in item for item in warnings), warnings)
+
     def test_semantic_error_still_retries_with_problem_list(self):
         transport = self.ScriptedTransport(["{}", "{}", "{}"])
         provider = HttpModelProvider(transport, max_attempts=3)

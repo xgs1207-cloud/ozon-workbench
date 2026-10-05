@@ -439,6 +439,17 @@ def _schema_hint(contract: str) -> str:
         values = node.get("enum")
         return f"（取值：{'|'.join(str(item) for item in values)}）" if isinstance(values, list) and values else ""
 
+    def limits_of(node: Mapping[str, Any]) -> str:
+        """把 minItems/maxItems/minLength 这类**硬约束**也告诉模型（真机踩过 minItems 3）。"""
+        parts = []
+        if node.get("minItems"):
+            parts.append(f"至少 {node['minItems']} 条")
+        if node.get("maxItems"):
+            parts.append(f"最多 {node['maxItems']} 条")
+        if node.get("minLength"):
+            parts.append(f"至少 {node['minLength']} 字符")
+        return f"（{'，'.join(parts)}）" if parts else ""
+
     def describe(node: Any, path: str, depth: int) -> None:
         node = resolve(node)
         if depth > 2 or not node:
@@ -454,9 +465,9 @@ def _schema_hint(contract: str) -> str:
                 if isinstance(child.get("items"), Mapping):
                     item = resolve(child["items"])
                     item_required = item.get("required") or []
-                    detail = ""
+                    detail = limits_of(child)
                     if item.get("properties"):
-                        detail = "；每项必填 " + "、".join(str(name) for name in item_required)
+                        detail += "；每项必填 " + "、".join(str(name) for name in item_required)
                         extra = [
                             f"{name}{enums_of(resolve(item['properties'][name]))}"
                             for name in list(item["properties"])[:8]
@@ -602,16 +613,24 @@ class HttpModelProvider:
         system: str = SYSTEM_JSON,
         attempts: int | None = None,
         contract: str | None = None,
+        document_contracts: Mapping[str, str] | None = None,
     ) -> tuple[dict[str, Any], list[str]]:
-        """调模型 → 抠 JSON →（按契约机械归一化）→ 校验 → 失败带问题清单重试。"""
+        """调模型 → 抠 JSON →（按契约机械归一化）→ 校验 → 失败带问题清单重试。
+
+        ``contract``：整份 payload 对应的契约。
+        ``document_contracts``：payload 里**多个子文档**各自的契约（例如 russian_copy 的
+        ``title_ru`` / ``description_ru`` / ``keywords_ru``），逐个归一化。
+        """
         warnings: list[str] = []
         problems: list[str] = []
         prompt = user
         schema: Mapping[str, Any] | None = None
-        if contract:
+        try:
+            from contracts import load_contract
+        except Exception:  # noqa: BLE001 - 没有契约模块就跳过归一化
+            load_contract = None  # type: ignore[assignment]
+        if contract and load_contract is not None:
             try:
-                from contracts import load_contract
-
                 schema = load_contract(contract)
             except Exception:  # noqa: BLE001 - 拿不到契约就跳过归一化
                 schema = None
@@ -624,6 +643,17 @@ class HttpModelProvider:
             else:
                 if schema is not None:
                     payload, fixes = normalize_payload(payload, schema)
+                for key, document_contract in (document_contracts or {}).items():
+                    document = payload.get(key)
+                    if not isinstance(document, Mapping) or load_contract is None:
+                        continue
+                    try:
+                        document_schema = load_contract(document_contract)
+                    except Exception:  # noqa: BLE001 - 没有契约就跳过
+                        continue
+                    normalized, document_fixes = normalize_payload(document, document_schema)
+                    payload[key] = normalized
+                    fixes.extend(f"{key}: {item}" for item in document_fixes)
                 problems = list(validate(payload))
             self.calls.append(
                 {
@@ -735,7 +765,16 @@ class HttpModelProvider:
                 positioning=request.positioning,
             )
         )
-        payload, warnings = self._call_json(task="russian_copy", user=user, validate=validate)
+        payload, warnings = self._call_json(
+            task="russian_copy",
+            user=user,
+            validate=validate,
+            document_contracts={
+                "title_ru": "title-ru",
+                "description_ru": "description-ru",
+                "keywords_ru": "keywords-ru",
+            },
+        )
         bundle = dict(payload.get("copy_bundle") or {})
         bundle.setdefault("generated_by", getattr(self.transport, "name", self.name))
         bundle["generated_by"] = f"{bundle['generated_by']}+http"

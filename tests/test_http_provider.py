@@ -185,6 +185,56 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(provider.transport.base_url, "https://api.example.com/v1")
         self.assertEqual(provider.transport.api_key, "sk-secret")
 
+    def test_ark_config_shares_one_key_with_image_generation(self):
+        """一个 ARK_API_KEY 走完文本 + 生图（用户选定方案）。"""
+        config = ProviderConfig.ark_from_env({"ARK_API_KEY": "ark-key", "ARK_TEXT_MODEL": "ep-2026xxx"})
+        self.assertEqual(config.base_url, "https://ark.cn-beijing.volces.com/api/v3")
+        self.assertEqual(config.api_key, "ark-key")
+        self.assertEqual(config.model, "ep-2026xxx")
+
+        # MODEL_* 显式覆盖优先
+        overridden = ProviderConfig.ark_from_env(
+            {
+                "ARK_API_KEY": "ark-key",
+                "ARK_BASE_URL": "https://ark.example.com",
+                "MODEL_BASE_URL": "https://override.example.com/v1",
+                "MODEL_NAME": "m2",
+                "MODEL_API_KEY": "mw",
+            }
+        )
+        self.assertEqual(overridden.base_url, "https://override.example.com/v1")
+        self.assertEqual(overridden.api_key, "mw")
+        self.assertEqual(overridden.model, "m2")
+
+    def test_ark_config_reports_missing_pieces(self):
+        with self.assertRaises(ModelError) as ctx:
+            ProviderConfig.ark_from_env({})
+        message = str(ctx.exception)
+        self.assertIn("ARK_API_KEY", message)
+        self.assertIn("ARK_TEXT_MODEL", message)
+
+        with self.assertRaises(ModelError) as ctx2:
+            ProviderConfig.ark_from_env({"ARK_API_KEY": "k"})
+        self.assertIn("ARK_TEXT_MODEL", str(ctx2.exception))
+
+    def test_load_provider_ark_alias(self):
+        import os
+
+        previous = {key: os.environ.get(key) for key in ("ARK_API_KEY", "ARK_TEXT_MODEL")}
+        try:
+            os.environ["ARK_API_KEY"] = "ark-key"
+            os.environ["ARK_TEXT_MODEL"] = "ep-2026xxx"
+            provider = load_provider("ark")
+            self.assertIsInstance(provider, HttpModelProvider)
+            self.assertEqual(provider.transport.base_url, "https://ark.cn-beijing.volces.com/api/v3")
+            self.assertEqual(provider.transport.model, "ep-2026xxx")
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
 
 @unittest.skipUnless(HAS_CONTRACTS, "contracts/original 尚未拉取")
 class ProviderBehaviourTests(unittest.TestCase):

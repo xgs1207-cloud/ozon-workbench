@@ -133,10 +133,17 @@ image_generation → image_qc → ozon_upload`
 
 - 接口：`models/base.py` 的 `ModelProvider`，实现五个方法
   `analyze_product / position_product / design_listing / write_copy_ru / plan_images`。
-- 注册：`models/__init__.py:load_provider()`；目前只有 `fake`。加一个 adapter 就多一个分支。
+- 注册：`models/__init__.py:load_provider()`；已实现两个：
+  * `fake`：确定性自检（不需要密钥）；
+  * `http` / `ark`：OpenAI 兼容端点。**你选定文本与生图都用火山方舟豆包**，所以推荐
+    `--provider ark` + `--image-generator doubao`，两者共用 `ARK_API_KEY`：
+    ```powershell
+    $env:ARK_API_KEY="..."
+    $env:ARK_TEXT_MODEL="ep-2026xxxx"     # 方舟控制台的文本接入点 ID
+    $env:ARK_IMAGE_MODEL="doubao-seedream-3-0-t2i-250415"   # 生图模型或接入点
+    ```
 - 参考样例：`models/fake.py` + `models/design.py`（**它们的产物能通过全部契约校验**，新 adapter 可直接对照）。
-  注意 `models/design.py` 已经是"确定性装配器"：接真实模型时，可以只用它做**校验与兜底**，
-  让模型产出候选、装配器负责补全与过契约。
+  注意 `models/design.py` 已经是"确定性装配器"：半结构化的模型输出交给它补全并过契约（`HttpModelProvider` 就是这么做的）。
 - 验收：`validate_contract("product-analysis" | "product-positioning" | "ozon-ecommerce-design" | "title-ru" | "description-ru" | "keywords-ru" | "image-plan", …)` 全空；
   文案再过 `rules.validate_copy_bundle`。
 - 如果是 Codex CLI：原项目的调用形态是
@@ -159,12 +166,17 @@ field_completion ──编译──> ozon-attributes-final.json ──被引用�
 
 ### 5.2 生图后端
 
-- 接口：实现 `generate(request: ImageRequest) -> {"generated": [{"slot","path"}], "generator": str, "final_images": bool}`。
-- 注册：`run_product(image_generator=...)` 或 CLI `--image-generator`；本地占位实现见 `models/local_image.py`。
-- 约束（来自 `rules/image-slot-and-qc-rules.md`）：3:4、≥900×1200、仅 png、**禁止后置叠字**、照片级实拍、
-  参考图是"事实锁"不是可复制画布；`comparison`/`size_spec` 类必须真实原图确定性合成。
-- 也可以走"有参考图的编辑"而不是纯生成：把 `image-plan.json` 里每个槽位的 `reference_product_images`
-  与 `prompt` 交给后端即可。
+**已实现豆包（火山方舟）**：`models/doubao_image.py`（用户选定）。
+
+- 实现 `generate(request: ImageRequest) -> {"generated": [...], "generator", "final_images": True}`；
+- 参考图以 `data:image/png;base64,…` 随请求发送（图生图/编辑），默认最多 3 张；
+- 返回后可选 Pillow 归一化为 3:4、900×1200 png（居中裁剪，不变形）；
+- `python -m models.doubao_image --product-dir <商品> --show-request` 先看不发；
+- 要换别家（即梦/MJ/自建）只需按同一协议写一个 `generate()`，并在
+  `models/__init__.py:load_image_generator()` 里加一个分支。
+
+**约束**（来自 `rules/image-slot-and-qc-rules.md`）：3:4、≥900×1200、仅 png、**禁止后置叠字**、照片级实拍、
+参考图是"事实锁"不是可复制画布；`comparison`/`size_spec` 类必须真实原图确定性合成。
 
 ### 5.3 对象存储（替换原项目的 24h 隧道）
 

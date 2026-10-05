@@ -246,6 +246,9 @@ def _schema_hint(contract: str) -> str:
 # --------------------------------------------------------------------- provider
 
 
+ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+
+
 @dataclass
 class ProviderConfig:
     base_url: str
@@ -265,25 +268,58 @@ class ProviderConfig:
                 "模型层配置不完整，缺少环境变量：" + ", ".join(missing)
                 + "（示例：MODEL_BASE_URL=https://api.deepseek.com/v1 MODEL_API_KEY=sk-xxx MODEL_NAME=deepseek-chat）"
             )
-        def number(key: str, fallback: Any, cast: Callable[[str], Any]) -> Any:
-            raw = str(source.get(key) or "").strip()
-            if not raw:
-                return fallback
-            try:
-                return cast(raw)
-            except ValueError:
-                return fallback
-
         return cls(
             base_url=str(source["MODEL_BASE_URL"]).strip(),
             api_key=str(source["MODEL_API_KEY"]).strip(),
             model=str(source["MODEL_NAME"]).strip(),
-            timeout=number("MODEL_TIMEOUT", DEFAULT_TIMEOUT, int),
-            temperature=number("MODEL_TEMPERATURE", DEFAULT_TEMPERATURE, float),
-            max_attempts=max(1, number("MODEL_MAX_ATTEMPTS", DEFAULT_MAX_ATTEMPTS, int)),
-            fallback_to_deterministic=str(source.get("MODEL_FALLBACK_TO_DETERMINISTIC") or "").strip().lower()
-            in {"1", "true", "yes", "on"},
+            **_optional_numbers(source),
         )
+
+    @classmethod
+    def ark_from_env(cls, env: Mapping[str, str] | None = None) -> "ProviderConfig":
+        """火山方舟：**与生图共用 ARK_API_KEY**，文本端点是 OpenAI 兼容的 /api/v3。
+
+        只需要 ``ARK_API_KEY`` + ``ARK_TEXT_MODEL``（或 ``MODEL_NAME``）；
+        端点可用 ``ARK_BASE_URL`` / ``MODEL_BASE_URL`` 覆盖。
+        """
+        source = env if env is not None else os.environ
+        api_key = str(source.get("MODEL_API_KEY") or source.get("ARK_API_KEY") or "").strip()
+        model = str(source.get("MODEL_NAME") or source.get("ARK_TEXT_MODEL") or "").strip()
+        base_url = str(
+            source.get("MODEL_BASE_URL") or source.get("ARK_BASE_URL") or ARK_BASE_URL
+        ).strip()
+        missing = []
+        if not api_key:
+            missing.append("ARK_API_KEY（或 MODEL_API_KEY）")
+        if not model:
+            missing.append("ARK_TEXT_MODEL（或 MODEL_NAME，填方舟控制台的接入点 ID，如 ep-2026xxxx）")
+        if missing:
+            raise ModelError("火山方舟文本模型配置不完整，缺少：" + "、".join(missing))
+        return cls(
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            **_optional_numbers(source),
+        )
+
+
+def _optional_numbers(source: Mapping[str, str]) -> dict[str, Any]:
+    def number(key: str, fallback: Any, cast: Any) -> Any:
+        raw = str(source.get(key) or "").strip()
+        if not raw:
+            return fallback
+        try:
+            return cast(raw)
+        except ValueError:
+            return fallback
+
+    return {
+        "timeout": number("MODEL_TIMEOUT", DEFAULT_TIMEOUT, int),
+        "temperature": number("MODEL_TEMPERATURE", DEFAULT_TEMPERATURE, float),
+        "max_attempts": max(1, number("MODEL_MAX_ATTEMPTS", DEFAULT_MAX_ATTEMPTS, int)),
+        "fallback_to_deterministic": str(source.get("MODEL_FALLBACK_TO_DETERMINISTIC") or "").strip().lower()
+        in {"1", "true", "yes", "on"},
+    }
 
 
 class HttpModelProvider:
@@ -501,8 +537,8 @@ class HttpModelProvider:
 # --------------------------------------------------------------------- 入口
 
 
-def build_provider_from_env(env: Mapping[str, str] | None = None) -> HttpModelProvider:
-    config = ProviderConfig.from_env(env)
+def build_provider_from_env(env: Mapping[str, str] | None = None, *, ark: bool = False) -> HttpModelProvider:
+    config = ProviderConfig.ark_from_env(env) if ark else ProviderConfig.from_env(env)
     transport = OpenAICompatibleTransport(
         base_url=config.base_url,
         api_key=config.api_key,
@@ -518,6 +554,7 @@ def build_provider_from_env(env: Mapping[str, str] | None = None) -> HttpModelPr
 
 
 __all__ = [
+    "ARK_BASE_URL",
     "ChatTransport",
     "HttpModelProvider",
     "OpenAICompatibleTransport",

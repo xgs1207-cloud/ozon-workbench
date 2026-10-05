@@ -259,12 +259,20 @@ python -m collector.seerfar_xlsx --xlsx <同上> --category-id 1001 --type-id 20
 # 自检：确定性 fake（不需要任何密钥）
 python -m pipeline.runner --product-dir products\P000001 --provider fake
 
-# 真实模型：OpenAI 兼容端点（DeepSeek / 通义 / 自建 vLLM 都适用）
+# 火山方舟豆包（与生图共用同一个 ARK_API_KEY）—— 你选定的方案
+$env:ARK_API_KEY="你的方舟 API Key"
+$env:ARK_TEXT_MODEL="ep-2026xxxx（方舟控制台的文本接入点 ID）"
+python -m pipeline.runner --product-dir products\P000001 --provider ark --image-generator doubao
+
+# 或任意 OpenAI 兼容端点（DeepSeek / 通义 / 自建 vLLM）
 $env:MODEL_BASE_URL="https://api.deepseek.com/v1"
 $env:MODEL_API_KEY="sk-xxx"
 $env:MODEL_NAME="deepseek-chat"
 python -m pipeline.runner --product-dir products\P000001 --provider http
 ```
+
+`--provider ark` 的等价写法是 `--provider http` + `MODEL_BASE_URL=https://ark.cn-beijing.volces.com/api/v3`；
+`ark` 只是为了少配两行：端点与密钥默认取 `ARK_BASE_URL` / `ARK_API_KEY`，模型名取 `ARK_TEXT_MODEL`。
 
 **核心原则：模型负责创意，装配器负责结构。** 让通用模型直接产出 23KB 设计契约或 20 字段图位基本不可能一次过契约，所以：
 

@@ -34,6 +34,11 @@ def load_provider(name: str | None = None) -> ModelProvider:
         from .http_provider import build_provider_from_env
 
         return build_provider_from_env()
+    if resolved in {"ark", "doubao", "volcengine", "volcano"}:
+        # 火山方舟文本端点（与生图共用 ARK_API_KEY）
+        from .http_provider import build_provider_from_env
+
+        return build_provider_from_env(ark=True)
     if resolved in {"none", "off", ""}:
         raise ModelError("未启用模型层（provider=none）")
     raise ModelError(

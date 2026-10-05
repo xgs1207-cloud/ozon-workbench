@@ -33,6 +33,16 @@ def _read_json(path: Path) -> dict[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
+def count_brand_rows(rows: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    """疑似品牌词（拉丁字母/含 ®™/带品牌提示）——这些要让 1688 按**品类**找货。"""
+    return [
+        row
+        for row in rows
+        if str(row.get("keyword_kind") or row.get("kind") or row.get("type") or "") in {"brand_or_latin"}
+        or "品牌" in str(row.get("keyword_note") or "")
+    ]
+
+
 def _step(name: str, status: str, **detail: Any) -> dict[str, Any]:
     return {"step": name, "status": status, **detail}
 
@@ -108,7 +118,7 @@ def run_day(
     written = write_plan(base_dir, plan)
     render_markdown(plan)  # 渲染一次，确保报告里能用的字段都在
     rows = list(plan.get("rows") or plan.get("items") or [])
-    brand_rows = [row for row in rows if "品牌" in str(row.get("kind") or row.get("type") or "")]
+    brand_rows = count_brand_rows(rows)
     steps.append(
         _step(
             "sourcing_plan",

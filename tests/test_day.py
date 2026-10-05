@@ -39,6 +39,8 @@ def write_seerfar_xlsx(path: pathlib.Path) -> pathlib.Path:
         (2, "термос для чая", "Термосы (保温杯)", "термос", "FBS", "1350₽", 600, "810000₽", 9000, "4.0%", 280, 12, 12, 420, "5.5%", "2.8%", 90, 4.7, "0.75", "0.58", "0.22", "480 g", "1.4 L", "4.0%"),
         (3, "кружка керамическая", "Кружки (陶瓷杯)", "кружка", "FBS", "600₽", 300, "180000₽", 15000, "2.0%", 900, 200, 200, 200, "3.0%", "1.5%", 400, 4.9, "0.40", "0.30", "0.50", "300 g", "0.6 L", "2.0%"),
         (4, "стакан бумажный", "Стаканы (纸杯)", "стакан", "FBS", "300₽", 120, "36000₽", 4000, "1.5%", 120, 5, 5, 60, "2.0%", "1.0%", 30, 4.5, "0.30", "0.20", "0.40", "50 g", "0.3 L", "1.5%"),
+        # 拉丁字母词（真实表里 yerrna 这类）→ 高热度 + 低竞争，必进选品清单，且应被点名"疑似品牌词"
+        (5, "yerrna постельное белье", "Простыня (床单)", "постельное белье", "FBS", "1500₽", 900, "1350000₽", 20000, "6.0%", 200, 3, 3, 700, "7.0%", "4.0%", 150, 4.9, "0.90", "0.70", "0.15", "700 g", "2.0 L", "2.5%"),
     ]
     for row in rows:
         sheet.append(list(row))
@@ -69,8 +71,8 @@ class ImportAndPlanTests(DayFixture):
         )
         by_name = {item["step"]: item for item in report["steps"]}
         self.assertEqual(by_name["import_keywords"]["status"], "ok")
-        self.assertEqual(by_name["import_keywords"]["rows_parsed"], 4)
-        self.assertEqual(by_name["import_keywords"]["keywords"], 4)
+        self.assertEqual(by_name["import_keywords"]["rows_parsed"], 5)
+        self.assertEqual(by_name["import_keywords"]["keywords"], 5)
         self.assertEqual(by_name["sourcing_plan"]["status"], "ok")
         self.assertGreater(by_name["sourcing_plan"]["candidates"], 0)
         # 采集清单产出文件
@@ -228,6 +230,22 @@ class LaunchStepTests(DayFixture):
             f"待办里应当点名该商品：{report['todos']}",
         )
         self.assertFalse(report["ok"])
+
+
+class BrandRowTests(unittest.TestCase):
+    """品牌词计数（直接测逻辑，不依赖打分结果）。"""
+
+    def test_counts_latin_and_noted_rows(self):
+        from pipeline.day import count_brand_rows
+
+        rows = [
+            {"keyword": "термос 500 мл", "keyword_kind": "generic"},
+            {"keyword": "yerrna", "keyword_kind": "brand_or_latin"},
+            {"keyword": "abc 123", "keyword_note": "含拉丁字母（多为品牌名）：1688 上请按品类找货"},
+            {"keyword": "кружка", "kind": "brand_or_latin"},
+        ]
+        self.assertEqual(len(count_brand_rows(rows)), 3)
+        self.assertEqual(count_brand_rows([]), [])
 
 
 class CliTests(DayFixture):

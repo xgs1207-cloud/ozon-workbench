@@ -115,7 +115,39 @@ python -m pipeline.ozon_write --payload products\P000001\output\store-runs\shop-
 python -m pipeline.ozon_write --payload <同上> --send --store shop-a --i-understand-this-hits-ozon             # 真的提交（需凭据）
 python -m pipeline.ozon_status --product-dir products\P000001 --store shop-a                                  # 事后确认终态（只读）
 python -m pipeline.ozon_status --product-dir products\P000001 --fixture contracts\fixtures\ozon-import-info.json  # 离线演练
-python -m pipeline.runner --product-dir products\P000001 --provider fake --image-generator placeholder --uploader dry-run --ozon-fixture contracts/fixtures
+
+### 真实提交流程（2026-10 已实测跑通）
+
+```bash
+# 0) 店铺：启用要提交的店，并确认凭据就绪（密钥只从环境变量读，不会打印）
+python -m pipeline.stores --list                     # 看每个店 enabled / 凭据是否就绪
+python -m pipeline.stores --enable default           # 决定哪个店参与提交
+
+# 1) 提交前预检（**只读**，不发任何写请求）：店铺+凭据、production 载荷、图片匿名可达性、币种一致性
+python -m pipeline.preflight --product-dir products/P000006 --shop default
+
+# 2) 图片必须先在对象存储里公开可读（Ozon 是匿名来抓图的）
+python -m pipeline.oss_cos --product-dir products/P000006     # 发布并写 output/image-public-urls.json
+
+# 3) 真提交（写操作，需要显式确认）
+python -m pipeline.ozon_write --payload products/P000006/output/store-runs/default/payload.json \
+    --send --store default --i-understand-this-hits-ozon
+
+# 4) 事后确认终态（只读）→ 回填台账 output/store-publications.json
+python -m pipeline.ozon_status --product-dir products/P000006 --store default --task-id <task_id>
+```
+
+实测结果（P000006 → 店铺 default）：`imported 2/2、0 错误`；Ozon 侧
+`model_info={"model_id":…,"count":2}`（两个变体合并成一张卡）、分配了真实 SKU（5956082914/5956083009）、
+图片被转存到 `ir.ozone.ru`、品牌与颜色等属性落库（颜色被映射到 Ozon 字典 id 61571/61576）。
+
+踩过的两个坑（都已有回归测试锁死）：
+
+1. **属性值必须在 `values[]` 里**：`{"id":8229,"values":[{"dictionary_value_id":92612,"value":"床单"}]}`。
+   写成顶层 `dictionary_value_id` 会让**必填属性值变 None**，Ozon 直接拒。
+2. **币种必须等于店铺合同币种**（`config/shops.json` 的 `default_currency_code`）：合同是 CNY 却提交
+   RUB → `currency_differs_from_contract`。价格要取同币种字段（`selling_price_cny` / `selling_price_rub`），
+   `pipeline.preflight` 现在会在提交前就拦下不一致。python -m pipeline.runner --product-dir products\P000001 --provider fake --image-generator placeholder --uploader dry-run --ozon-fixture contracts/fixtures
 python -m collector.ingest --folder D:\capture\p1 --products-root products   # 文件夹导入真实采集
 python -m pipeline.runner --product-dir products\P000001 --provider fake     # 带模型层跑流水线（仍是干跑）
 python -m pipeline.handlers --product-dir products\P000001 --step russian_copy --provider fake

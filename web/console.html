@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Ozon 上品工作台</title>
+<style>
+  :root { color-scheme: light dark; --line:#d5d9e0; --muted:#6b7280; --ok:#0a7d32; --bad:#b3261e; --warn:#a15c00; }
+  * { box-sizing: border-box; }
+  body { font: 14px/1.55 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; margin: 0; padding: 20px 24px 60px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 16px; margin: 26px 0 10px; }
+  .muted { color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin-top: 8px; }
+  th, td { border: 1px solid var(--line); padding: 7px 9px; text-align: left; vertical-align: top; }
+  th { background: rgba(127,127,127,.09); font-weight: 600; white-space: nowrap; }
+  button { font: inherit; padding: 5px 10px; margin: 0 4px 4px 0; border: 1px solid var(--line); border-radius: 6px; background: transparent; cursor: pointer; }
+  button:hover { background: rgba(127,127,127,.12); }
+  button.primary { border-color: var(--ok); color: var(--ok); font-weight: 600; }
+  button.danger { border-color: var(--bad); color: var(--bad); font-weight: 600; }
+  .pill { display:inline-block; padding: 1px 7px; border-radius: 999px; border:1px solid var(--line); font-size: 12px; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+  pre { background: rgba(127,127,127,.1); padding: 10px 12px; border-radius: 8px; overflow: auto; max-height: 340px; white-space: pre-wrap; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  #log { position: fixed; right: 16px; bottom: 16px; width: 460px; max-height: 45vh; overflow: auto; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<h1>Ozon 上品工作台 <span class="muted" id="health">…</span></h1>
+<div class="muted">关键词 → 采集 → AI 文案 → 图片 → 真实类目属性 → 提交。左侧操作都是本机服务（只监听 127.0.0.1）。</div>
+
+<h2>店铺</h2>
+<div id="stores" class="muted">加载中…</div>
+
+<h2>商品</h2>
+<div class="row">
+  <button onclick="loadProducts()">刷新列表</button>
+  <span class="muted" id="productCount"></span>
+</div>
+<table id="products"><thead><tr>
+  <th>商品</th><th>状态</th><th>可提交</th><th>阻断项</th><th>操作</th>
+</tr></thead><tbody></tbody></table>
+
+<h2 id="detailTitle" class="hidden">商品详情</h2>
+<div id="detail" class="hidden">
+  <div class="row">
+    <button class="primary" onclick="act('run')">1. 跑流程（干跑）</button>
+    <button onclick="act('publish-images')">2. 发布图片到对象存储</button>
+    <button onclick="act('preflight')">3. 提交前预检</button>
+    <button onclick="act('submit')" class="danger">4. 真实提交（写 Ozon）</button>
+    <button onclick="act('verify')">5. 提交后核对</button>
+  </div>
+  <pre id="detailOut">（选一个动作）</pre>
+</div>
+
+<h2>日志</h2>
+<pre id="log" class="hidden"></pre>
+
+<script>
+const state = { products: [], current: null, store: null };
+const $ = (id) => document.getElementById(id);
+
+function log(message, data) {
+  const box = $('log');
+  box.classList.remove('hidden');
+  box.textContent = `[${new Date().toLocaleTimeString()}] ${message}\n` + (data ? JSON.stringify(data, null, 2) + '\n' : '') + box.textContent;
+}
+
+async function api(method, path, body) {
+  const response = await fetch(path, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await response.text();
+  let data; try { data = JSON.parse(text); } catch { data = { raw: text }; }
+  if (!response.ok) throw Object.assign(new Error(`${response.status} ${response.statusText}`), { data });
+  return data;
+}
+
+async function loadHealth() {
+  try { const data = await api('GET', '/health'); $('health').textContent = '· 服务正常'; }
+  catch (error) { $('health').textContent = '· 服务异常：' + error.message; $('health').className = 'bad'; }
+}
+
+async function loadStores() {
+  try {
+    const data = await api('GET', '/api/workbench/stores');
+    const ready = data.shops.filter((shop) => shop.enabled && shop.credentials_ready);
+    state.store = ready.length ? ready[0].id : (data.shops[0] || {}).id;
+    $('stores').innerHTML = data.shops.map((shop) => {
+      const mark = shop.enabled && shop.credentials_ready ? '<span class="ok">✅ 可提交</span>'
+        : shop.enabled ? '<span class="warn">⚠️ 已启用但缺凭据</span>' : '<span class="muted">⏸ 未启用</span>';
+      const missing = shop.missing_env && shop.missing_env.length ? `（缺 ${shop.missing_env.join('、')}）` : '';
+      return `<div>${mark} <b>${shop.id}</b>｜${shop.display_name}｜币种 ${shop.default_currency_code || '?'}${missing}</div>`;
+    }).join('') + `<div class="muted">提交会用：<b>${state.store || '（没有可用店铺）'}</b></div>`;
+  } catch (error) { $('stores').innerHTML = '<span class="bad">读取店铺失败：' + error.message + '</span>'; }
+}
+
+async function loadProducts() {
+  try {
+    const data = await api('GET', '/api/workbench/doctor');
+    state.products = data.products || [];
+    $('productCount').textContent = `共 ${state.products.length} 个`;
+    $('products').querySelector('tbody').innerHTML = state.products.map((product) => {
+      const submit = product.ready_to_submit ? '<span class="ok">✅</span>' : '<span class="bad">❌</span>';
+      const blockers = (product.blockers || []).slice(0, 2).join('；') || '—';
+      return `<tr>
+        <td><b>${product.product_id}</b><div class="muted">${product.status || ''}</div></td>
+        <td>${product.status || '—'}</td>
+        <td>${submit}</td>
+        <td class="muted">${blockers}</td>
+        <td><button onclick="select('${product.product_id}')">选择</button></td>
+      </tr>`;
+    }).join('') || '<tr><td colspan="5" class="muted">还没有商品</td></tr>';
+  } catch (error) { log('读取商品失败', error.data || error.message); }
+}
+
+function select(productId) {
+  state.current = productId;
+  $('detailTitle').classList.remove('hidden');
+  $('detail').classList.remove('hidden');
+  $('detailTitle').textContent = '商品详情：' + productId;
+  $('detailOut').textContent = '（选一个动作）';
+}
+
+async function act(action) {
+  if (!state.current) return;
+  const product = state.current;
+  const payload = { store: state.store };
+  if (action === 'submit') {
+    const typed = prompt(`真实提交会把 ${product} 写到 Ozon 店铺「${state.store}」，不可撤销。\n输入 SUBMIT 确认：`);
+    if (typed !== 'SUBMIT') { $('detailOut').textContent = '已取消（没有输入 SUBMIT）'; return; }
+    payload.confirm = 'SUBMIT';
+  }
+  $('detailOut').textContent = `⏳ ${action} 执行中…（真提交/出图可能要几十秒）`;
+  try {
+    const data = await api('POST', `/api/workbench/products/${product}/${action}`, payload);
+    $('detailOut').textContent = JSON.stringify(data, null, 2);
+    log(`${product} → ${action} 完成`);
+    if (action !== 'verify') loadProducts();
+  } catch (error) {
+    $('detailOut').textContent = JSON.stringify(error.data || { error: error.message }, null, 2);
+    log(`${product} → ${action} 失败`, error.data);
+  }
+}
+
+loadHealth();
+loadStores();
+loadProducts();
+</script>
+</body>
+</html>

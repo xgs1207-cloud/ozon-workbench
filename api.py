@@ -986,3 +986,128 @@ def workbench_keyword_products() -> dict[str, Any]:
                 }
             )
     return {"ok": True, "count": len(index), "keywords": index}
+
+
+# ----------------------------------------------------------------- 操作台（网页）
+
+WEB_CONSOLE = Path(__file__).resolve().parent / "web" / "console.html"
+
+
+class StoreActionRequest(BaseModel):
+    """操作台里的店铺参数（真提交还需要 confirm）。"""
+
+    store: str | None = None
+    confirm: str | None = None
+
+
+def _store_for(directory: Path, requested: str | None) -> str:
+    """没指定店铺时，用商品台账里第一个目标店铺，再退回注册表里第一个已启用的。"""
+    if requested:
+        return str(requested)
+    from pipeline.status import load_status, normalize
+
+    targets = normalize(load_status(directory)).get("target_store_ids") or []
+    if targets:
+        return str(targets[0])
+    from pipeline.stores import enabled_shop_ids, ensure_registry
+
+    enabled = enabled_shop_ids(ensure_registry(None))
+    if enabled:
+        return str(enabled[0])
+    raise HTTPException(status_code=400, detail="没有可用店铺：先在 config/shops.json 里启用一个（pipeline.stores --enable <id>）")
+
+
+@app.get("/", include_in_schema=False)
+def workbench_console() -> Any:
+    """单文件操作台（无构建步骤）：浏览器直接点着测。"""
+    from fastapi.responses import HTMLResponse
+
+    if not WEB_CONSOLE.is_file():
+        raise HTTPException(status_code=404, detail=f"缺少页面文件：{WEB_CONSOLE}")
+    return HTMLResponse(WEB_CONSOLE.read_text(encoding="utf-8"))
+
+
+@app.get("/api/workbench/stores")
+def workbench_stores() -> dict[str, Any]:
+    """店铺清单（**不含密钥**，只说 enabled / 凭据是否就绪）。"""
+    from pipeline.stores import ensure_registry, shop_summary
+
+    shops = shop_summary(ensure_registry(None))
+    return {"ok": True, "count": len(shops), "shops": shops}
+
+
+@app.post("/api/workbench/products/{product_id}/publish-images")
+def publish_images(product_id: str, dry_run: bool = False) -> dict[str, Any]:
+    """把图片发布到对象存储并写 output/image-public-urls.json（Ozon 要能匿名抓到）。"""
+    from pipeline.oss_cos import _storage_from_env
+
+    directory = _require_product(product_id)
+    storage = _storage_from_env(dry_run=dry_run)
+    try:
+        summary = storage.publish_product(directory, write_urls=not dry_run)
+    except Exception as error:  # noqa: BLE001 - 存储配置/网络问题都如实返回
+        raise HTTPException(status_code=422, detail=f"发布失败：{error}") from error
+    return {"ok": True, "dry_run": dry_run, "summary": summary}
+
+
+@app.post("/api/workbench/products/{product_id}/preflight")
+def preflight_product(product_id: str, request: StoreActionRequest) -> dict[str, Any]:
+    """提交前预检（只读：店铺/凭据 + production 载荷 + 图片匿名可达性 + 币种）。"""
+    from pipeline.preflight import preflight
+
+    directory = _require_product(product_id)
+    return {"ok": True, "report": preflight(directory, shop=_store_for(directory, request.store))}
+
+
+@app.post("/api/workbench/products/{product_id}/verify")
+def verify_product(product_id: str, request: StoreActionRequest) -> dict[str, Any]:
+    """提交后核对（只读）：读回 Ozon 上的 SKU / 属性 / 图片 / 变体合并。"""
+    from pipeline.ozon_verify import verify_submitted
+
+    directory = _require_product(product_id)
+    return {"ok": True, "report": verify_submitted(directory, store_id=_store_for(directory, request.store))}
+
+
+@app.post("/api/workbench/products/{product_id}/submit")
+def submit_product(product_id: str, request: StoreActionRequest) -> dict[str, Any]:
+    """**真实提交**（写 Ozon）：必须显式 confirm="SUBMIT"，并在 production 模式下执行。
+
+    这一路会：跑完剩余步骤（缺什么补什么）→ 发布图片（若已配置发布器）→ 构建 production 载荷 → 提交 → 记账。
+    """
+    if str(request.confirm or "").strip().upper() != "SUBMIT":
+        raise HTTPException(status_code=400, detail='真提交需要 {"confirm": "SUBMIT"}（这是写操作）')
+
+    from models import ModelError, load_provider
+    from pipeline.launch import launch_product
+    from pipeline.ozon_write import OzonWriteUploader
+
+    directory = _require_product(product_id)
+    store = _store_for(directory, request.store)
+
+    provider = None
+    try:
+        provider = load_provider(os.environ.get("WORKBENCH_WEB_PROVIDER", "ark"))
+    except ModelError:
+        provider = None
+
+    image_generator = None
+    if os.environ.get("ARK_IMAGE_MODEL"):
+        try:
+            from models.doubao_image import DoubaoImageGenerator
+
+            image_generator = DoubaoImageGenerator.from_env()
+        except ModelError:
+            image_generator = None
+
+    try:
+        report = launch_product(
+            directory,
+            provider=provider,
+            image_generator=image_generator,
+            uploader=OzonWriteUploader(),
+            execute_upload=True,
+            store_ids=[store],
+        )
+    except Exception as error:  # noqa: BLE001 - 真提交失败要如实回给界面
+        raise HTTPException(status_code=422, detail=f"提交失败：{error}") from error
+    return {"ok": True, "store": store, "report": report}

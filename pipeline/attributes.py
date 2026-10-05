@@ -23,12 +23,14 @@ from rules.validate import normalize_capacity_text, normalize_russian_color_name
 
 COMPILER_VERSION = "1.0.0"
 
-#: 颜色类属性（Ozon 侧 attr 10097「Название цвета」等）
-COLOR_PATTERNS: tuple[str, ...] = ("название цвета", "цвет товара", "цвет")
+#: 颜色类属性（Ozon 侧 attr 10097「Название цвета」；属性名语言随拉取 language 变化，中俄英都要认）
+COLOR_PATTERNS: tuple[str, ...] = ("название цвета", "цвет товара", "цвет", "颜色", "color")
 #: 容量/体积类属性
-CAPACITY_PATTERNS: tuple[str, ...] = ("объём", "объем", "объем товара", "ёмкость", "емкость", "capacity", "volume")
+CAPACITY_PATTERNS: tuple[str, ...] = (
+    "объём", "объем", "объем товара", "ёмкость", "емкость", "capacity", "volume", "容量", "体积",
+)
 #: 品牌类属性
-BRAND_PATTERNS: tuple[str, ...] = ("бренд",)
+BRAND_PATTERNS: tuple[str, ...] = ("бренд", "品牌", "brand")
 #: 无品牌时的默认字典值（原项目 AGENTS.md 的"无品牌"规则）
 UNBRANDED_TEXT = "Нет бренда"
 

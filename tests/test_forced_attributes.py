@@ -46,12 +46,57 @@ class ForcedValueTests(unittest.TestCase):
 
 
 class CompileTests(unittest.TestCase):
-    def _compile(self, skus=None):
+    def _compile(self, skus=None, lookups=None, attributes=None):
         return compile_attributes(
             product_id="P000004",
-            category_snapshot={"attributes": REAL_ATTRIBUTE_SHAPES},
+            category_snapshot={"attributes": attributes or REAL_ATTRIBUTE_SHAPES},
             fill_input={"skus": skus or [{"sku_id": "S1", "color_ru": "белый"}]},
+            dictionary_lookups=lookups,
         )
+
+    def test_chinese_brand_name_is_recognised_with_lookup(self):
+        """真实踩到：属性名是中文「品牌」，而品牌模式表原先只有俄文 → 分支进不去。
+        加上中文别名 + 字典查值结果后，品牌必须被填上。"""
+        compiled = self._compile(
+            lookups={
+                "unbranded": {
+                    "attribute_id": 85,
+                    "attribute_name": "品牌",
+                    "query": "Нет бренда",
+                    "value": "Нет бренда",
+                    "dictionary_value_id": 126745801,
+                    "api_endpoint": "/v1/description-category/attribute/values/search",
+                }
+            }
+        )
+        common = {item["attribute_id"]: item for item in compiled["common_attributes"]}
+        self.assertIn(85, common)
+        self.assertEqual(common[85]["value"], "Нет бренда")
+        self.assertEqual(common[85]["dictionary_value_id"], 126745801)
+        self.assertEqual(common[85]["mapping_method"], "project_unbranded_rule_searched")
+        # 类型（唯一字典值）+ 品牌（字典查值）= 2/3，只剩型号名称
+        summary = compiled["required_summary"]
+        self.assertEqual(summary["total"], 3)
+        self.assertEqual(summary["filled"], 2)
+        self.assertEqual(summary["missing_attribute_ids"], [9048])
+
+    def test_chinese_brand_without_lookup_still_reports_missing(self):
+        compiled = self._compile()
+        common = {item["attribute_id"]: item for item in compiled["common_attributes"]}
+        self.assertNotIn(85, common)
+        self.assertIn(85, compiled["required_summary"]["missing_attribute_ids"])
+        self.assertTrue(any("品牌" in item for item in compiled["warnings"]), compiled["warnings"])
+
+    def test_chinese_color_attribute_fills_per_sku(self):
+        compiled = self._compile(
+            attributes=[
+                {"attribute_id": 10097, "attribute_name": "颜色名称", "required": False, "type": "String",
+                 "dictionary_id": 1000, "allowed_values": [{"id": 61576, "value": "белый"}], "values_truncated": False},
+            ],
+            skus=[{"sku_id": "S1", "color_ru": "белый"}],
+        )
+        variants = compiled.get("attributes_by_sku") or {}
+        self.assertIn("белый", str(variants))
 
     def test_forced_type_is_filled_truncated_brand_is_not(self):
         compiled = self._compile()

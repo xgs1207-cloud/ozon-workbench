@@ -134,6 +134,38 @@ class ShellSyntaxTests(unittest.TestCase):
         self.check("contracts/fetch_contracts.sh")
 
 
+class DeploymentGotchaTests(unittest.TestCase):
+    """两个只有真部署才会暴露的坑，锁成测试防止回归。"""
+
+    def test_shell_scripts_are_lf_in_git_blobs(self):
+        """Windows 上 git archive 会把脚本打成 CRLF → Linux 上 `set -o pipefail` 报错。"""
+        import shutil
+        import subprocess
+
+        git = shutil.which("git")
+        if not git:
+            self.skipTest("本机没有 git")
+        for path in ("contracts/fetch_contracts.sh", "deploy/install.sh"):
+            result = subprocess.run(
+                [git, "-C", str(ROOT), "show", f"HEAD:{path}"],
+                capture_output=True,
+            )
+            if result.returncode != 0:
+                self.skipTest("还不是 git 仓库或文件未提交")
+            self.assertNotIn(b"\r", result.stdout, f"{path} 的 git 内容里有 CR（应为 LF）")
+
+    def test_gitattributes_forces_lf_for_scripts(self):
+        text = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+        self.assertIn("*.sh text eol=lf", text)
+        self.assertIn("* text=auto eol=lf", text)
+
+    def test_requirements_include_self_check_dependency(self):
+        """服务器自检要跑 API 测试，必须有 httpx（否则 TestClient 导入失败）。"""
+        text = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+        self.assertIn("httpx", text)
+        self.assertIn("fastapi", text)
+
+
 class LicenseTests(unittest.TestCase):
     """许可文件必须在位且是官方原文（不是我自己缩写的摘要）。"""
 

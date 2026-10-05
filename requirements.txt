@@ -6,6 +6,9 @@ uvicorn==0.34.0
 # （服务器上跑 `python -m unittest` 做部署自检时必需）
 httpx>=0.27
 
+# 图片存储：腾讯云 COS 官方 SDK（用它的签名；自己实现 v5 签名容易"看着对、实际被拒"）
+cos-python-sdk-v5>=1.9
+
 # 可选但推荐（没有也能跑核心流水线，只影响这两个功能）：
 #   Pillow   —— 豆包生图结果的 3:4 / 900×1200 归一化（pipeline/oss_local 与 models/doubao_image 用）
 #   openpyxl —— 读 Seerfar 导出的 .xlsx（collector/seerfar_xlsx）

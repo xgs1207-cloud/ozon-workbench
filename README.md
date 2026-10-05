@@ -444,25 +444,42 @@ Ozon 的 import 只给任务号，最终结果要另查一次。所以提交之�
   **绝不估算**；包装 < 商品本体会被判 `hierarchy_ok=false` 并阻断上传；
 - 产物：`output/pricing-result.json`、`output/measurements.json`、`output/profit-analysis.json`（都过契约）。
 
-### 对象存储（自建服务器 / nginx）
+### 对象存储（腾讯云 COS ／ 自建 nginx，二选一）
 
-你把图片存在**自己的腾讯云服务器**上，所以用「本地静态目录 + nginx + https」这套：
+**你选定的是腾讯云 COS**（自带 https 域名，Ozon 能直接抓）：
+
+```powershell
+# 环境变量（服务器上写进 /etc/ozon-workbench.env，别写进仓库）
+$env:COS_SECRET_ID="AKIDxxx"; $env:COS_SECRET_KEY="xxx"
+$env:COS_BUCKET="my-bucket-1250000000"; $env:COS_REGION="ap-hongkong"
+$env:COS_KEY_PREFIX="ozon-images"          # 可选；# COS_PUBLIC_BASE_URL 走 CDN 时填
+
+python -m pipeline.oss_cos --check                                   # ★ 先自检：PUT + 匿名 GET + DELETE
+python -m pipeline.oss_cos --product-dir products\P000001 --dry-run  # 看要传哪些
+python -m pipeline.oss_cos --product-dir products\P000001            # 真上传并写 image-public-urls.json
+```
+
+- **用官方 SDK 签名**（`cos-python-sdk-v5`）—— v5 签名自己实现容易"看起来对、实际被拒"；
+- `--check` 是最有价值的验证：PUT 一个探针对象 → **匿名 GET（模拟 Ozon 抓取）** → DELETE；
+  403 会直接告诉你"桶/前缀不是公有读，Ozon 抓不到图片"；
+- **增量同步**：先 `head_object` 比大小，相同就跳过；上传带 `Content-Type` 与 30 天缓存头；
+- 写出 `output/image-public-urls.json`（**上传载荷就读它**），默认 URL 形如
+  `https://<bucket>.cos.<region>.myqcloud.com/ozon-images/<product_id>/<slot>.png`；
+- ⚠️ 签名/上传路径**未用真实密钥验证过**（我没有你的 COS 凭据）：拿到凭据后先跑 `--check`。
+
+**另一条路（自建 nginx + Let's Encrypt）**：
 
 ```powershell
 python -m pipeline.oss_local --product-dir products\P000001 `
-    --root /var/www/ozon-images --base-url https://img.example.com --dry-run   # 先看要做什么
-python -m pipeline.oss_local --product-dir products\P000001 `
-    --root /var/www/ozon-images --base-url https://img.example.com             # 真同步
+    --root /var/www/ozon-images --base-url https://img.example.com
 ```
 
-- 把 `output/generated-images/**` 按 `<product_id>/<slot>.png` 复制到服务器目录（**按 sha256 增量**，没变不重传）；
-- 写出 `output/image-public-urls.json`（slot → https URL）—— **上传载荷就读它**，这就是替换原项目 24h 隧道的位置；
-- `--url-base-path /ozon` 支持"目录名与 URL 路径不同"（CDN 前缀）的情况；`--slot` 可只同步某几个槽位；
-- ⚠️ **上传门禁只接受 https**：没域名/证书时会被 `production_blockers` 拦住（这是刻意的，Ozon 必须能抓到图）。
-  用 Let's Encrypt 免费证书，或改用腾讯云 COS 的 https 域名。
+- 把 `output/generated-images/**` 按 `<product_id>/<slot>.png` 复制到服务器目录（**按 sha256 增量**）；
+- `--url-base-path /ozon` 支持"目录名与 URL 路径不同"（CDN 前缀）；`--slot` 可只同步某几个槽位；
+- ⚠️ **上传门禁只接受 https**：没域名/证书时会被 `production_blockers` 拦住（这是刻意的）。
 
-**部署到腾讯云服务器**：完整步骤见 [deploy/README.md](deploy/README.md)（一键安装脚本 `deploy/install.sh`、
-systemd 服务、nginx 站点配置、Linux 版契约拉取 `contracts/fetch_contracts.sh`、排错表）。
+**部署到腾讯云服务器**：完整步骤见 [deploy/README.md](deploy/README.md)（共享服务器模式、systemd、nginx、
+Linux 版契约拉取，以及四个真实踩坑记录）。
 
 ### 定价与尺寸重量（measurements）
 ### 上线前预检（doctor）

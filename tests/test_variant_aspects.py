@@ -130,6 +130,20 @@ class StubClient:
     ) -> dict:
         return {"result": [], "has_next": False}
 
+    def search_attribute_values(
+        self,
+        *,
+        attribute_id: int,
+        category_id: int,
+        type_id: int,
+        value: str,
+        limit: int = 10,
+        language: str = "ZH_HANS",
+    ) -> dict:
+        if value.casefold() == "нет бренда":
+            return {"result": [{"id": 126745801, "value": "Нет бренда"}]}
+        return {"result": []}
+
 
 class CategoryMatchSideFileTests(unittest.TestCase):
     def setUp(self):
@@ -189,6 +203,33 @@ class CategoryMatchSideFileTests(unittest.TestCase):
             (self.product_dir / "output" / "ozon-category-attributes.json").read_text(encoding="utf-8")
         )
         self.assertNotIn("is_aspect", json.dumps(snapshot))
+
+    def test_lookup_side_file_records_unbranded_value(self):
+        """品牌字典被截断时，用字典搜索端点精确定位「Нет бренда」，结果旁挂保存供编译使用。"""
+        tree = json.loads((ROOT / "contracts" / "fixtures" / "ozon-category-tree.json").read_text(encoding="utf-8"))
+        client = StubClient(tree, self.payload)
+        handler = category_handlers(client)["category_match"]
+        handler(
+            StepContext(
+                product_dir=self.product_dir,
+                step="category_match",
+                dry_run=True,
+                app_mode="development",
+                status={},
+                provider=None,
+                uploader=None,
+                image_generator=None,
+                ozon_client=client,
+            )
+        )
+        lookup_path = self.product_dir / "output" / "ozon-dictionary-lookups.json"
+        self.assertTrue(lookup_path.is_file())
+        payload = json.loads(lookup_path.read_text(encoding="utf-8"))
+        unbranded = payload["lookups"].get("unbranded")
+        self.assertIsNotNone(unbranded, payload)
+        self.assertEqual(unbranded["value"], "Нет бренда")
+        self.assertEqual(unbranded["dictionary_value_id"], 126745801)
+        self.assertEqual(unbranded["api_endpoint"], "/v1/description-category/attribute/values/search")
 
 
 if __name__ == "__main__":

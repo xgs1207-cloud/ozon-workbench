@@ -18,6 +18,7 @@ from typing import Any, Mapping, Sequence
 from contracts import format_problems, validate_contract
 
 from .context import PipelineGateError, StepContext
+from .attributes import UNBRANDED_TEXT
 from .ozon_http import (
     OzonClient,
     OzonHttpError,
@@ -31,6 +32,8 @@ CATEGORY_FILE = "output/ozon-category.json"
 SNAPSHOT_FILE = "output/ozon-category-attributes.json"
 #: 旁挂的变体属性文件（上游契约里没有 is_aspect，见下方 handle_category_match 注释）
 ASPECT_FILE = "output/ozon-aspect-attributes.json"
+#: 旁挂的字典查值结果（品牌等大字典属性用搜索端点精确查值）
+LOOKUP_FILE = "output/ozon-dictionary-lookups.json"
 SELECTION_FILE = "input/category-selection.json"
 
 
@@ -134,6 +137,66 @@ def handle_category_match(ctx: StepContext) -> dict[str, Any]:
     )
     if not aspect_attributes:
         warnings.append("这个类目没有 is_aspect 变体属性：多规格会按独立商品卡处理（不合并）")
+
+    # 字典查值：品牌字典常有上千个值（快照被截断），但"无品牌"的官方值可以用搜索端点精确定位。
+    # 结果旁挂保存，属性编译（纯本地步骤）读它来填品牌，保持"编译不发 API 调用"的约束。
+    lookups: dict[str, Any] = {}
+    brand_attribute = next(
+        (
+            item
+            for item in raw_attributes
+            if "бренд" in str(item.get("name") or "").casefold()
+            or "品牌" in str(item.get("name") or "")
+        ),
+        None,
+    )
+    if brand_attribute:
+        brand_id = int(brand_attribute.get("id"))
+        snapshot_values = next(
+            (
+                item.get("allowed_values") or []
+                for item in (snapshot.get("attributes") or [])
+                if item.get("attribute_id") == brand_id
+            ),
+            [],
+        )
+        has_unbranded = any(
+            str(item.get("value") or "").strip().casefold() == UNBRANDED_TEXT.casefold()
+            for item in snapshot_values
+            if isinstance(item, Mapping)
+        )
+        if not has_unbranded:
+            try:
+                found = client.search_attribute_values(
+                    attribute_id=brand_id, category_id=category_id, type_id=type_id, value=UNBRANDED_TEXT
+                )
+            except OzonHttpError as error:
+                warnings.append(f"字典查值失败（不阻断）：{error}")
+                found = {}
+            for item in found.get("result") or []:
+                if str(item.get("value") or "").strip().casefold() == UNBRANDED_TEXT.casefold():
+                    lookups["unbranded"] = {
+                        "attribute_id": brand_id,
+                        "attribute_name": brand_attribute.get("name"),
+                        "query": UNBRANDED_TEXT,
+                        "value": item.get("value"),
+                        "dictionary_value_id": item.get("id"),
+                        "api_endpoint": "/v1/description-category/attribute/values/search",
+                    }
+                    break
+            if "unbranded" not in lookups:
+                warnings.append(f"品牌字典里搜不到「{UNBRANDED_TEXT}」：品牌属性需人工填")
+    ctx.write_json(
+        LOOKUP_FILE,
+        {
+            "schema_version": "1.0.0",
+            "product_id": ctx.product_dir.name,
+            "source": "ozon_seller_api",
+            "fetched_at": now_iso(),
+            "note": "字典精确查值结果；属性编译（本地步骤）读它填品牌等大字典属性",
+            "lookups": lookups,
+        },
+    )
     ctx.write_json(
         CATEGORY_FILE,
         {

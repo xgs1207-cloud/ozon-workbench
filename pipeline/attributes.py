@@ -347,6 +347,7 @@ def compile_attributes(
     fill_input: Mapping[str, Any],
     design_hash: str | None = None,
     fill_input_hash: str | None = None,
+    dictionary_lookups: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """把类目属性快照 + 填值输入编译成 ``ozon-attributes-final``。
 
@@ -390,7 +391,31 @@ def compile_attributes(
                     mapping_method="project_unbranded_rule",
                 )
             else:
-                warnings.append(f"类目字典里没有「{UNBRANDED_TEXT}」，品牌属性 {attribute_id} 留空")
+                # 品牌字典常有上千个值、快照被截断 → 用 category_match 旁挂的"精确查值"结果
+                looked_up = ((dictionary_lookups or {}).get("unbranded") or {})
+                if (
+                    isinstance(looked_up, Mapping)
+                    and int(looked_up.get("attribute_id") or -1) == attribute_id
+                    and str(looked_up.get("value") or "").strip()
+                ):
+                    entry = _attribute_entry(
+                        attribute_id=attribute_id,
+                        attribute_name=name,
+                        required=required,
+                        value=str(looked_up["value"]),
+                        dictionary_value_id=looked_up.get("dictionary_value_id"),
+                        source="category_dictionary_search",
+                        scope="common",
+                        confidence=0.9,
+                        evidence=["output/ozon-dictionary-lookups.json"],
+                        mapping_method="project_unbranded_rule_searched",
+                    )
+                    warnings.append(
+                        f"品牌属性 {attribute_id} 用字典搜索结果填入「{looked_up['value']}」"
+                        f"（查询值 id={looked_up.get('dictionary_value_id')}）"
+                    )
+                else:
+                    warnings.append(f"类目字典里没有「{UNBRANDED_TEXT}」，品牌属性 {attribute_id} 留空")
         elif _matches(name, COLOR_PATTERNS):
             for sku in skus:
                 color = sku.get("color_ru")

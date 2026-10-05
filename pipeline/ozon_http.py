@@ -29,6 +29,7 @@ BASE_URL = "https://api-seller.ozon.ru"
 PATH_TREE = "/v1/description-category/tree"
 PATH_ATTRIBUTES = "/v1/description-category/attribute"
 PATH_ATTRIBUTE_VALUES = "/v1/description-category/attribute/values"
+PATH_ATTRIBUTE_VALUES_SEARCH = "/v1/description-category/attribute/values/search"
 
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "contracts" / "fixtures"
 MAX_VALUES_PER_ATTRIBUTE = 200
@@ -202,6 +203,33 @@ class OzonClient:
                 "language": language,
                 "last_value_id": 0,
                 "limit": int(limit),
+            },
+        )
+
+    def search_attribute_values(
+        self,
+        *,
+        attribute_id: int,
+        category_id: int,
+        type_id: int,
+        value: str,
+        limit: int = 10,
+        language: str = "ZH_HANS",
+    ) -> dict[str, Any]:
+        """在（可能几千个值的）字典里按关键词精确查值。
+
+        用途举例：品牌字典 1000+ 且分页，但"无品牌"的官方值 ``Нет бренда`` 可以用这个端点直接查到，
+        不必把整个字典拉下来。
+        """
+        return self.transport.post(
+            PATH_ATTRIBUTE_VALUES_SEARCH,
+            {
+                "attribute_id": int(attribute_id),
+                "description_category_id": int(category_id),
+                "type_id": int(type_id),
+                "value": str(value),
+                "limit": int(limit),
+                "language": language,
             },
         )
 

@@ -377,9 +377,19 @@ def import_xlsx(
     if rescore:
         for key in categories:
             catalog_category, _, catalog_type = key.partition(":")
-            rescored[key] = keyword_store.rescore(
+            result = keyword_store.rescore(
                 library_root, category_id=catalog_category, type_id=catalog_type
             )
+            # upsert 内部已经重算过一轮，所以这里 promoted 常常是 0；直接数当前状态更诚实
+            qualified = len(
+                keyword_store.query(
+                    library_root,
+                    category_id=catalog_category,
+                    type_id=catalog_type,
+                    status=keyword_store.STATUS_QUALIFIED,
+                )
+            )
+            rescored[key] = {**result, "qualified": qualified}
 
     warnings: list[str] = []
     if not (category_id and type_id):
@@ -406,6 +416,7 @@ def import_xlsx(
         "rescored": {
             key: {
                 "scored": value.get("scored"),
+                "qualified": value.get("qualified"),
                 "promoted": value.get("promoted"),
                 "demoted": value.get("demoted"),
             }
@@ -452,9 +463,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         for key, count in summary["categories"].items():
             scored = summary["rescored"].get(key, {})
             print(
-                f"  {key}: {count} 条（已评分 {scored.get('scored')}，达标提升 {scored.get('promoted')}，"
-                f"回落 {scored.get('demoted')}）"
+                f"  {key}: {count} 条（已评分 {scored.get('scored')}，"
+                f"**高热度低竞争达标 {scored.get('qualified')} 条**）"
             )
+        print("提示：达标 = 热度分位 ≥ 0.6 且竞争分位 ≤ 0.6（可用 POST /api/keywords/score 调 λ 与门槛）")
         for item in summary["warnings"]:
             print(f"⚠️ {item}")
     return 0

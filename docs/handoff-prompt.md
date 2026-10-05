@@ -30,7 +30,7 @@
    **整段脚本解析失败会一行都不执行**（曾因此误判"已部署"）。要跑 Python 就写成文件传过去。
 
 **认领任务**：从 `HANDOFF.md` §3.3 的清单里挑一件，按优先级推荐：
-先做 #4（型号名称人工确认，最小、可直接验证），再做 #1（1688 真实采集，需要用户配合跑浏览器脚本）
+先做 #5（型号名称人工确认，最小、可直接验证），再做 #1（1688 真实采集，需要用户配合跑浏览器脚本）
 与 #3（用真照片重跑生图）。每完成一件，都要给出**可复现的证据**（命令 + 输出 + HTTP 状态），
 并按 §8 上线（本机测试 → 提交 → 传服务器 → 重启服务 → 服务器再跑一遍测试）。
 
@@ -46,7 +46,7 @@
 ```bash
 git clone https://github.com/xgs1207-cloud/ozon-workbench.git
 cd ozon-workbench
-python -m unittest discover -s tests -p "test*.py"      # 751 passed（Python 3.11+）
+python -m unittest discover -s tests -p "test*.py"      # 751 OK（Python 3.11 全 passed；3.14 会 skip 一批）
 ```
 
 但它**无法**完成需要真实环境的部分（服务器 `/opt/ozon-workbench`、`/etc/ozon-workbench.env` 里的密钥、

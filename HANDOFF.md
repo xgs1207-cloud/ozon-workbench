@@ -45,7 +45,7 @@ Seerfar 采词 → 热度/竞争筛选 → 按类目建关键词库 → 选品�
 ## 2. 十五分钟自检（照着跑，跑通就说明你接手成功）
 
 ```powershell
-# 本机：仓库自检（当前 751 passed；Python 3.11）
+# 本机：仓库自检（751 个测试；本机现为 Python 3.14.7，skip 56 个——此前在 Python 3.11 上 751 全 passed）
 cd E:\抖音自动化项目\ozon-workbench
 python -X utf8 -W ignore::UserWarning -m unittest discover -s tests -p "test*.py"
 
@@ -83,7 +83,7 @@ ssh -i $key ubuntu@43.132.190.110 "cd /opt/ozon-workbench && bash deploy/with-en
 | 关键词库 | 773 行 Seerfar 真实数据 → 24/24 列 → **121 个达标词**；`keyword-library/17028731-92612.jsonl` |
 | 真实类目 | 床单 → `category_id 17028731 / type_id 92612`（路径 住宅和花园→床上用品→床单）；43 个真实属性、3 个必填 |
 | 网页操作台 | `web/console.html`（单文件、零依赖）+ API：`GET /`、`/api/workbench/{steps,stores}`、`products/{id}/{summary,preflight,verify,publish-images,submit}` |
-| 测试 | **本机 751 passed**；服务器同套（skip 4） |
+| 测试 | **本机 751 OK**（Python 3.14.7，skip 56；Python 3.11 上全 passed）；服务器同套（Python 3.14，skip 4） |
 
 ### 3.2 服务器上的商品
 

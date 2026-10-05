@@ -29,6 +29,16 @@
 <h1>Ozon 上品工作台 <span class="muted" id="health">…</span></h1>
 <div class="muted">关键词 → 采集 → AI 文案 → 图片 → 真实类目属性 → 提交。左侧操作都是本机服务（只监听 127.0.0.1）。</div>
 
+<h2>关键词库 / 选品</h2>
+<div class="row">
+  <button onclick="loadKeywords()">看关键词库</button>
+  <button onclick="generateSourcing()">生成选品清单（TOP 10）</button>
+  <button onclick="loadPlan('sourcing-plan')">看选品清单</button>
+  <button onclick="generateCollection()">生成采集清单</button>
+  <button onclick="loadPlan('collection-plan')">看采集清单</button>
+</div>
+<pre id="keywordOut">（点左侧按钮）</pre>
+
 <h2>店铺</h2>
 <div id="stores" class="muted">加载中…</div>
 
@@ -161,6 +171,55 @@ async function act(action) {
     $('detailOut').textContent = JSON.stringify(error.data || { error: error.message }, null, 2);
     log(`${product} → ${action} 失败`, error.data);
   }
+}
+
+function renderPlan(plan) {
+  const rows = plan.rows || plan.keywords || plan.items || null;
+  if (Array.isArray(rows) && rows.length) {
+    const keys = Array.from(new Set(rows.flatMap((row) => Object.keys(row || {})))).slice(0, 8);
+    const head = keys.map((key) => `<th>${key}</th>`).join('');
+    const body = rows.slice(0, 40).map((row) => '<tr>' + keys.map((key) => {
+      const value = row[key];
+      const text = value && typeof value === 'object' ? JSON.stringify(value) : (value ?? '');
+      return `<td>${String(text).slice(0, 120)}</td>`;
+    }).join('') + '</tr>').join('');
+    return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+  }
+  return '<pre>' + JSON.stringify(plan, null, 2).slice(0, 4000) + '</pre>';
+}
+
+async function loadKeywords() {
+  try {
+    const data = await api('GET', '/api/keywords?limit=15');
+    const items = data.items || data.keywords || [];
+    $('keywordOut').innerHTML = `<div class="muted">共 ${data.count ?? items.length} 条（显示前 ${items.length} 条）</div>`
+      + renderPlan({ rows: items });
+  } catch (error) { $('keywordOut').textContent = JSON.stringify(error.data || { error: error.message }, null, 2); }
+}
+
+async function loadPlan(which) {
+  try {
+    const data = await api('GET', `/api/workbench/${which}`);
+    $('keywordOut').innerHTML = `<div class="muted">${which}｜${data.path || ''}</div>` + renderPlan(data.plan || data);
+  } catch (error) {
+    $('keywordOut').textContent = `还没生成（${error.message}）。点上面的生成按钮。`;
+  }
+}
+
+async function generateSourcing() {
+  $('keywordOut').textContent = '⏳ 生成选品清单中…';
+  try {
+    const data = await api('POST', '/api/workbench/sourcing-plan', { top: 10 });
+    $('keywordOut').innerHTML = '<div class="muted">已生成选品清单</div>' + renderPlan(data.plan || data);
+  } catch (error) { $('keywordOut').textContent = JSON.stringify(error.data || { error: error.message }, null, 2); }
+}
+
+async function generateCollection() {
+  $('keywordOut').textContent = '⏳ 生成采集清单中…';
+  try {
+    const data = await api('POST', '/api/workbench/collection-plan', { top: 10, from_library: true });
+    $('keywordOut').innerHTML = '<div class="muted">已生成采集清单（带"哪些词已采集"）</div>' + renderPlan(data.plan || data);
+  } catch (error) { $('keywordOut').textContent = JSON.stringify(error.data || { error: error.message }, null, 2); }
 }
 
 async function showSummary() {

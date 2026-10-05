@@ -1,10 +1,13 @@
-const DEFAULT_FACTORY_URL = "http://127.0.0.1:8766";
+const DEFAULT_FACTORY_URL = "http://43.132.190.110:8088";
 const COMMAND_CENTER_QUERY_VERSION = "2026-08-01-ui-state-v1";
+// 旧的本机/局域网地址：检测到这些旧配置时回退到新的公网默认地址
 const LEGACY_LOCAL_FACTORY_URLS = new Set([
     "http://127.0.0.1:8765",
-    "http://localhost:8765"
+    "http://localhost:8765",
+    "http://127.0.0.1:8766",
+    "http://localhost:8766"
 ]);
-let factoryConfig = { baseUrl: DEFAULT_FACTORY_URL, deviceId: "" };
+let factoryConfig = { baseUrl: DEFAULT_FACTORY_URL, authHeader: null, deviceId: "" };
 async function ensureFactoryDeviceId() {
     const stored = await chrome.storage.local.get(["factoryDeviceId"]);
     let deviceId = String(stored.factoryDeviceId || "").trim();
@@ -14,16 +17,19 @@ async function ensureFactoryDeviceId() {
     }
     return deviceId;
 }
-function normalizeFactoryUrl(value) {
+// 解析工作台地址：允许局域网地址与公网服务器地址（manifest 已声明 http://*/* host 权限）。
+// URL 里可带 Basic Auth 用户信息（http://user:pass@host:port），返回供请求头使用。
+function parseFactoryUrl(value) {
     const url = new URL(String(value || DEFAULT_FACTORY_URL).trim());
-    if (url.protocol !== "http:")
-        throw new Error("工作台地址必须以 http:// 开头");
-    const host = url.hostname.toLowerCase();
-    const privateIpv4 = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host);
-    if (host !== "127.0.0.1" && host !== "localhost" && !host.endsWith(".local") && !privateIpv4) {
-        throw new Error("只允许填写主电脑的局域网地址");
+    if (!['http:', 'https:'].includes(url.protocol))
+        throw new Error('工作台地址协议不支持');
+    const origin = `${url.protocol}//${url.host}`;
+    let authHeader = null;
+    if (url.username || url.password) {
+        const credentials = `${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}`;
+        authHeader = 'Basic ' + btoa(credentials);
     }
-    return `${url.protocol}//${url.host}`;
+    return { origin, authHeader };
 }
 function workbenchEntryUrl(kind, extra = {}) {
     const path = kind === "ozon" ? "/ozon-reference" : "/1688-collection";
@@ -48,12 +54,14 @@ function factoryUrlOrDefault(value) {
 }
 async function loadFactoryConfig() {
     const stored = await chrome.storage.local.get(["factoryBaseUrl"]);
-    const baseUrl = normalizeFactoryUrl(factoryUrlOrDefault(stored.factoryBaseUrl));
-    if (!cleanFactoryUrlText(stored.factoryBaseUrl) || isLegacyLocalFactoryUrl(stored.factoryBaseUrl)) {
-        await chrome.storage.local.set({ factoryBaseUrl: baseUrl });
+    const text = factoryUrlOrDefault(stored.factoryBaseUrl);
+    const access = parseFactoryUrl(text);
+    if (cleanFactoryUrlText(stored.factoryBaseUrl) !== text) {
+        await chrome.storage.local.set({ factoryBaseUrl: text });
     }
     factoryConfig = {
-        baseUrl,
+        baseUrl: access.origin,
+        authHeader: access.authHeader,
         deviceId: await ensureFactoryDeviceId()
     };
     return factoryConfig;
@@ -62,6 +70,8 @@ async function factoryFetch(path, options = {}) {
     await loadFactoryConfig();
     const headers = { ...(options.headers || {}) };
     headers["X-Factory-Device-Id"] = factoryConfig.deviceId;
+    if (factoryConfig.authHeader)
+        headers["Authorization"] = factoryConfig.authHeader;
     return fetch(`${factoryConfig.baseUrl}${path}`, { ...options, headers });
 }
 const els = {
@@ -377,10 +387,11 @@ els.openExisting.addEventListener("click", () => {
 els.createVersion.addEventListener("click", () => captureCurrentProduct(true));
 async function saveConnection() {
     try {
-        const baseUrl = normalizeFactoryUrl(els.factoryUrl.value);
-        await chrome.storage.local.set({ factoryBaseUrl: baseUrl });
-        factoryConfig = { baseUrl, deviceId: await ensureFactoryDeviceId() };
-        els.connectionResult.textContent = "主电脑地址已保存，本电脑会自动识别";
+        const text = cleanFactoryUrlText(els.factoryUrl.value);
+        const access = parseFactoryUrl(text);
+        await chrome.storage.local.set({ factoryBaseUrl: text });
+        factoryConfig = { baseUrl: access.origin, authHeader: access.authHeader, deviceId: await ensureFactoryDeviceId() };
+        els.connectionResult.textContent = "工作台地址已保存";
         await testConnection();
     }
     catch (error) {
@@ -404,7 +415,8 @@ els.saveConnection.addEventListener("click", saveConnection);
 els.testConnection.addEventListener("click", testConnection);
 async function initialize() {
     await loadFactoryConfig();
-    els.factoryUrl.value = factoryConfig.baseUrl;
+    const stored = await chrome.storage.local.get(["factoryBaseUrl"]);
+    els.factoryUrl.value = cleanFactoryUrlText(stored.factoryBaseUrl) || factoryConfig.baseUrl;
     await loadPreview();
 }
 initialize().catch((error) => {

@@ -4,7 +4,7 @@
 > 所有"未完成"都写清了缺什么、谁来做、怎么做完。
 > 读完这份 + 跑一遍 §2 的自检，你应该能在 15 分钟内接手并继续开发。
 
-最后更新：2026-10（Edge 采集插件接入 + 操作台 UI 按功能逻辑重排）。
+最后更新：2026-10（工作台公网入口：nginx 反向代理 + Basic Auth，端口 8088，无需 SSH 隧道）。
 
 ---
 
@@ -32,8 +32,9 @@ Seerfar 采词 → 热度/竞争筛选 → 按类目建关键词库 → 选品�
 | 服务器 | `ubuntu@43.132.190.110`，代码在 `/opt/ozon-workbench`，服务 `ozon-workbench-api`（uvicorn，监听 `127.0.0.1:8766`） |
 | SSH 私钥 | `D:\AI作图\ozonfinancedeploy.pem` |
 | 服务端配置/密钥 | `/etc/ozon-workbench.env`（`root:ubuntu`，`640`）——**只读用，永不打印、永不提交** |
-| 网页操作台 | 本机开隧道后访问 `http://127.0.0.1:8766/`：`ssh -i "D:\AI作图\ozonfinancedeploy.pem" -N -L 8766:127.0.0.1:8766 ubuntu@43.132.190.110` |
-| 1688 采集插件 | `collector/edge-extension/`，Edge 加载已解压扩展；默认地址 `http://127.0.0.1:8766`（需开隧道）。详见 `collector/edge-extension/README.md` |
+| 网页操作台（公网，推荐） | `http://43.132.190.110:8088/`，Basic Auth 登录（账号 `ozon` / 密码见 `/etc/nginx/ozon-workbench.htpasswd`，当前 `ozon2026wb`）。nginx 配置见 `deploy/nginx/ozon-workbench.conf`，轻量服务器防火墙已放行 TCP:8088 |
+| 网页操作台（隧道，备用） | 本机开隧道后访问 `http://127.0.0.1:8766/`：`ssh -i "D:\AI作图\ozonfinancedeploy.pem" -N -L 8766:127.0.0.1:8766 ubuntu@43.132.190.110` |
+| 1688 采集插件 | `collector/edge-extension/`，Edge 加载已解压扩展；默认地址 `http://43.132.190.110:8088`。弹窗里填 `http://ozon:ozon2026wb@43.132.190.110:8088` 保存即可（凭据只存本机 chrome.storage）。详见 `collector/edge-extension/README.md` |
 
 **两个必须知道的坑**：
 
@@ -84,7 +85,8 @@ ssh -i $key ubuntu@43.132.190.110 "cd /opt/ozon-workbench && bash deploy/with-en
 | 关键词库 | 773 行 Seerfar 真实数据 → 24/24 列 → **121 个达标词**；`keyword-library/17028731-92612.jsonl` |
 | 真实类目 | 床单 → `category_id 17028731 / type_id 92612`（路径 住宅和花园→床上用品→床单）；43 个真实属性、3 个必填 |
 | 网页操作台 | `web/console.html`（单文件、零依赖）+ API：`GET /`、`/api/workbench/{steps,stores,summary,doctor}`、`products/{id}/{summary,skus,keywords,copy,artifacts,publications,preflight,verify,publish-images,submit,run}`、`collector/{products,duplicates,ozon-reference-page}` |
-| 1688 采集插件 | `collector/edge-extension/`（MV3 Edge 插件，从原项目复用）：1688 页面抓标题/SKU/主图/详情图/属性 → 页面内抽屉选 SKU（≤10）+ 选 Ozon 类目 → 直接 POST `/api/collector/products` 入库（服务端带 Referer 下载图片）。也支持 Ozon 参考页采集。 |
+| 1688 采集插件 | `collector/edge-extension/`（MV3 Edge 插件，从原项目复用）：1688 页面抓标题/SKU/主图/详情图/属性 → 页面内抽屉选 SKU（≤10）+ 选 Ozon 类目 → 直接 POST `/api/collector/products` 入库（服务端带 Referer 下载图片）。也支持 Ozon 参考页采集。默认走公网 8088（Basic Auth 由 background 注入），无需隧道 |
+| 公网入口 | nginx 监听 8088 + Basic Auth 代理到 `127.0.0.1:8766`（配置 `deploy/nginx/ozon-workbench.conf`，服务器实际路径 `/etc/nginx/sites-available/ozon-workbench`）；轻量服务器防火墙放行 8088 |
 | 测试 | **本机 751 OK**（Python 3.14.7，skip 56；Python 3.11 上全 passed）；服务器同套（Python 3.14，skip 4） |
 
 ### 3.2 服务器上的商品
@@ -149,6 +151,10 @@ ozon-workbench/
 ├── rules/                    Ozon 标题/简介/图片可执行规则 + copy_bundle 形状提示
 ├── contracts/                上游 40 个 JSON Schema + 轻量校验器 + 自研契约
 │   └── normalize.py          契约驱动的机械归一化（丢未知键 / null→[]、{} / 字符串→单元素数组）
+├── deploy/
+│   ├── nginx/ozon-workbench.conf  公网入口配置（8088 + Basic Auth 反代）
+│   ├── with-env.sh                服务器 CLI 加载 /etc/ozon-workbench.env
+│   └── push-to-github.sh          从服务器推 GitHub
 └── tests/                    751 个测试（含端到端回归）
 ```
 

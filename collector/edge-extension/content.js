@@ -1,6 +1,6 @@
 const PLUGIN_VERSION = "0.4.25";
 const MAX_SELECTED_SKUS = 10;
-const DEFAULT_FACTORY_URL = "http://127.0.0.1:8766";
+const DEFAULT_FACTORY_URL = "http://43.132.190.110:8088";
 let latestDrawerCapture = null;
 let localCategoryTreeCachePromise = null;
 let localCategoryRulesCachePromise = null;

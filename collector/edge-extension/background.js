@@ -1,8 +1,11 @@
-const DEFAULT_FACTORY_URL = "http://127.0.0.1:8766";
+const DEFAULT_FACTORY_URL = "http://43.132.190.110:8088";
 const COMMAND_CENTER_QUERY_VERSION = "2026-08-01-ui-state-v1";
+// 旧的本机/局域网地址：检测到这些旧配置时回退到新的公网默认地址
 const LEGACY_LOCAL_FACTORY_URLS = new Set([
     "http://127.0.0.1:8765",
-    "http://localhost:8765"
+    "http://localhost:8765",
+    "http://127.0.0.1:8766",
+    "http://localhost:8766"
 ]);
 const OZON_IMAGE_HOST_SUFFIXES = ["ozone.ru", "ozon.ru", "ozonusercontent.com"];
 async function ensureFactoryDeviceId() {
@@ -14,16 +17,19 @@ async function ensureFactoryDeviceId() {
     }
     return deviceId;
 }
-function normalizeFactoryUrl(value) {
+// 解析工作台地址：允许局域网地址与公网服务器地址（manifest 已声明 http://*/* host 权限）。
+// URL 里可带 Basic Auth 用户信息（http://user:pass@host:port），返回供请求头使用。
+function parseFactoryUrl(value) {
     const url = new URL(String(value || DEFAULT_FACTORY_URL).trim());
     if (!['http:', 'https:'].includes(url.protocol))
         throw new Error('工作台地址协议不支持');
-    const host = url.hostname.toLowerCase();
-    const privateIpv4 = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host);
-    if (host !== '127.0.0.1' && host !== 'localhost' && !host.endsWith('.local') && !privateIpv4) {
-        throw new Error('只允许访问主电脑的局域网地址');
+    const origin = `${url.protocol}//${url.host}`;
+    let authHeader = null;
+    if (url.username || url.password) {
+        const credentials = `${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}`;
+        authHeader = 'Basic ' + btoa(credentials);
     }
-    return `${url.protocol}//${url.host}`;
+    return { origin, authHeader };
 }
 function cleanFactoryUrlText(value) {
     return String(value || "").trim().replace(/\/+$/, "");
@@ -37,13 +43,18 @@ function factoryUrlOrDefault(value) {
         return DEFAULT_FACTORY_URL;
     return text;
 }
-async function loadFactoryBaseUrl() {
+// 返回 { origin, authHeader }；旧/空配置时把默认地址写回存储（用户填写的完整 URL 含认证信息原样保留）
+async function loadFactoryAccess() {
     const stored = await chrome.storage.local.get(['factoryBaseUrl']);
-    const baseUrl = normalizeFactoryUrl(factoryUrlOrDefault(stored.factoryBaseUrl));
-    if (!cleanFactoryUrlText(stored.factoryBaseUrl) || isLegacyLocalFactoryUrl(stored.factoryBaseUrl)) {
-        await chrome.storage.local.set({ factoryBaseUrl: baseUrl });
+    const text = factoryUrlOrDefault(stored.factoryBaseUrl);
+    const access = parseFactoryUrl(text);
+    if (cleanFactoryUrlText(stored.factoryBaseUrl) !== text) {
+        await chrome.storage.local.set({ factoryBaseUrl: text });
     }
-    return baseUrl;
+    return access;
+}
+async function loadFactoryBaseUrl() {
+    return (await loadFactoryAccess()).origin;
 }
 function commandCenterUrl(baseUrl, taskCenter, extra = {}) {
     const params = new URLSearchParams({ v: COMMAND_CENTER_QUERY_VERSION });
@@ -141,10 +152,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             const allowedWorkbenchPath = path.startsWith('/api/workbench/market-intelligence/search-visibility/seerfar/');
             if (!path.startsWith('/api/collector/') && !allowedWorkbenchPath)
                 throw new Error('无效的工作台接口');
-            const baseUrl = await loadFactoryBaseUrl();
+            const access = await loadFactoryAccess();
             const headers = { ...(message.options?.headers || {}) };
             headers['X-Factory-Device-Id'] = await ensureFactoryDeviceId();
-            const response = await fetch(`${baseUrl}${path}`, {
+            if (access.authHeader)
+                headers['Authorization'] = access.authHeader;
+            const response = await fetch(`${access.origin}${path}`, {
                 method: message.options?.method || 'GET',
                 headers,
                 body: message.options?.body

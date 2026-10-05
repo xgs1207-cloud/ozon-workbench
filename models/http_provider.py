@@ -300,13 +300,16 @@ def enrich_facts_from_inputs(payload: dict[str, Any], request: Any) -> list[str]
 NARRATIVE_FIELDS = ("selling_points", "inferences", "unknowns", "risks", "recommendation")
 
 
-def build_narrative_prompt(request: Any) -> str:
+def build_narrative_prompt(request: Any, *, facts: Mapping[str, Any] | None = None) -> str:
     """只让模型写"叙述字段"的提示词。
 
     形状必须与 ``product-analysis`` 契约逐字一致（这里踩过坑：自己编的
     ``inferences={area,statement,basis}`` 与契约的 ``{field,value,confidence,basis}`` 不符，
     导致真模型连续 3 次过不了校验）。``tests/test_http_provider.py`` 有一条防漂移测试，
     会拿契约里的必填字段名来核对这段提示词。
+
+    ``facts``：系统已按采集 + 人工确认数据补全的事实。**必须给模型看**，否则它会因为
+    "source 里没有品牌/重量"而要求人工确认（真机踩过），而这些我们其实已经确切知道。
     """
     return (
         "请只输出下面这 5 个键（JSON 对象，**不要输出 facts / processing / schema_version 等**，"
@@ -318,10 +321,11 @@ def build_narrative_prompt(request: Any) -> str:
         "- `risks`：数组，每项 {\"area\": 字符串, \"level\": \"low\"|\"medium\"|\"high\"|\"critical\", "
         "\"message\": 字符串, \"blocking\": true|false}\n"
         "- `recommendation`：{\"decision\": \"continue\"|\"needs_human_input\"|\"reject\"|\"unknown\", \"reason\": 字符串}\n"
-        "硬规则：只依据下面的采集数据与关键词；不要编造参数、认证、品牌或材质；"
+        "硬规则：只依据下面的事实与关键词；不要编造参数、认证、品牌或材质；"
         "拿不准就写进 unknowns，或把 decision 设为 needs_human_input。"
         "数组字段不能是 null；只输出 JSON，不要解释文字。\n\n"
         + _context_block(
+            confirmed_facts=facts,
             source=request.source,
             selected_keywords=_keywords_of(request),
             positioning=getattr(request, "positioning", None),
@@ -549,7 +553,7 @@ class HttpModelProvider:
         facts_notes = enrich_facts_from_inputs(base, request)
         warnings: list[str] = ["facts 由代码从 input/source.json 派生；模型只写叙述字段"] + facts_notes
 
-        narrative_prompt = build_narrative_prompt(request)
+        narrative_prompt = build_narrative_prompt(request, facts=base.get("facts"))
 
         problems: list[str] = []
         prompt = narrative_prompt

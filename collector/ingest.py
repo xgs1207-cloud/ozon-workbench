@@ -513,6 +513,9 @@ def build_payload_from_folder(
     resolved_skus = skus or descriptor.get("skus")
     resolved_category = category or descriptor.get("category")
     resolved_title = title_zh or descriptor.get("title_zh")
+    # 选品清单里的关键词可以写在 product.json 里（采集时"带上这个词"）
+    resolved_keywords = descriptor.get("keywords") or descriptor.get("source_keywords")
+    resolved_keyword_category = descriptor.get("keyword_category")
 
     images: dict[str, list[dict[str, Any]]] = {"main": [], "sku": [], "detail": []}
     for role, relative in IMAGE_DIRS.items():
@@ -527,7 +530,7 @@ def build_payload_from_folder(
             if path.is_file() and path.suffix.lower() in _IMAGE_SUFFIXES:
                 images["main"].append({"path": str(path), "name": path.name})
 
-    return {
+    payload: dict[str, Any] = {
         "source_url": resolved_url,
         "skus": list(resolved_skus or []),
         "category": resolved_category,
@@ -536,6 +539,12 @@ def build_payload_from_folder(
         "captured_at": now_iso(),
         "raw": {"imported_from": str(base), "descriptor": descriptor or None},
     }
+    if resolved_keywords:
+        payload["keywords"] = resolved_keywords
+        payload["keyword_source"] = descriptor.get("keyword_source") or "collection_plan"
+    if isinstance(resolved_keyword_category, Mapping):
+        payload["keyword_category"] = resolved_keyword_category
+    return payload
 
 
 def import_folder(

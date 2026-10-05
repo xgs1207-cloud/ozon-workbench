@@ -1,0 +1,31 @@
+{
+  "schema_version": "1.0.0",
+  "default_read_shop": "default",
+  "_note": "店铺注册表模板：复制到 config/shops.json 再改。这里只写**环境变量名**，密钥放 /etc/ozon-workbench.env（chmod 600）。enabled=false 的店铺不会被提交。",
+  "shops": [
+    {
+      "id": "default",
+      "name": "default",
+      "display_name": "我的 Ozon 店（示例，请改成自己的）",
+      "enabled": false,
+      "client_id_env": "OZON_DEFAULT_CLIENT_ID",
+      "api_key_env": "OZON_DEFAULT_API_KEY",
+      "connection_status": "unknown",
+      "default_currency_code": "CNY",
+      "default_vat": "0",
+      "default_unbranded_value": "Нет бренда"
+    },
+    {
+      "id": "shop-b",
+      "name": "shop-b",
+      "display_name": "第二个店铺（示例：加店就复制这段）",
+      "enabled": false,
+      "client_id_env": "OZON_SHOP_B_CLIENT_ID",
+      "api_key_env": "OZON_SHOP_B_API_KEY",
+      "connection_status": "unknown",
+      "default_currency_code": "CNY",
+      "default_vat": "0",
+      "default_unbranded_value": "Нет бренда"
+    }
+  ]
+}

@@ -1,0 +1,107 @@
+"""部署套件自检：文件齐全、店铺模板合法、脚本不夹带密钥（全离线）。"""
+
+from __future__ import annotations
+
+import json
+import pathlib
+import re
+import sys
+import unittest
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
+from pipeline import stores as store_registry  # noqa: E402
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+DEPLOY = ROOT / "deploy"
+
+REQUIRED_FILES = (
+    "README.md",
+    "install.sh",
+    "ozon-workbench-api.service",
+    "ozon-workbench.env.example",
+    "nginx-ozon-images.conf",
+    "shops.example.json",
+)
+
+#: 看起来像真密钥的形态（模板里不该出现）
+SECRET_PATTERN = re.compile(r"(sk-[A-Za-z0-9]{8,}|AKID[A-Za-z0-9]{10,}|[0-9a-f]{32})")
+
+
+class DeployKitTests(unittest.TestCase):
+    def test_required_files_exist(self):
+        for name in REQUIRED_FILES:
+            self.assertTrue((DEPLOY / name).is_file(), name)
+
+    def test_shops_template_is_valid_and_disabled(self):
+        payload = json.loads((DEPLOY / "shops.example.json").read_text(encoding="utf-8"))
+        self.assertEqual(store_registry.validate_registry(payload), [])
+        self.assertTrue(payload["shops"])
+        for shop in payload["shops"]:
+            self.assertFalse(shop["enabled"], "模板里的店铺默认必须是关闭的")
+            self.assertTrue(shop["client_id_env"].startswith("OZON_"))
+            self.assertTrue(shop["api_key_env"].startswith("OZON_"))
+
+    def test_env_template_has_no_real_secrets(self):
+        text = (DEPLOY / "ozon-workbench.env.example").read_text(encoding="utf-8")
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, _, value = stripped.partition("=")
+            if key.startswith("OZON_IMAGE_ROOT"):
+                continue
+            self.assertIsNone(
+                SECRET_PATTERN.search(value), f"模板里疑似有真密钥：{key}={value}"
+            )
+
+    def test_systemd_unit_points_at_venv_and_env_file(self):
+        text = (DEPLOY / "ozon-workbench-api.service").read_text(encoding="utf-8")
+        self.assertIn("EnvironmentFile=/etc/ozon-workbench.env", text)
+        self.assertIn(".venv/bin/uvicorn", text)
+        self.assertIn("WorkingDirectory=/opt/ozon-workbench", text)
+        self.assertIn("ReadWritePaths=", text)
+
+    def test_nginx_config_forces_https_and_blocks_scripts(self):
+        text = (DEPLOY / "nginx-ozon-images.conf").read_text(encoding="utf-8")
+        self.assertIn("return 301 https://", text)
+        self.assertIn("ssl_certificate", text)
+        self.assertIn("root /var/www/ozon-images;", text)
+        self.assertIn("deny all;", text)
+        self.assertIn("autoindex off;", text)
+
+    def test_install_script_is_idempotent_and_copies_template(self):
+        text = (DEPLOY / "install.sh").read_text(encoding="utf-8")
+        self.assertIn("set -euo pipefail", text)
+        self.assertIn("if [ ! -x \"$APP_DIR/.venv/bin/python\" ]", text)  # venv 只在缺失时创建
+        self.assertIn("deploy/shops.example.json", text)
+        self.assertIn("contracts/fetch_contracts.sh", text)
+        self.assertIn("install -m 600 -o root -g root", text)
+
+    def test_linux_contract_fetcher_lists_the_same_files_as_powershell(self):
+        ps1 = (ROOT / "contracts" / "fetch_contracts.ps1").read_text(encoding="utf-8")
+        sh = (ROOT / "contracts" / "fetch_contracts.sh").read_text(encoding="utf-8")
+        ps_files = set(re.findall(r'"(templates/[^"]+\.json)"', ps1))
+        sh_files = set(re.findall(r'"(templates/[^"]+\.json)"', sh))
+        self.assertTrue(ps_files)
+        self.assertEqual(ps_files, sh_files, "两个脚本的契约清单必须一致")
+        self.assertIn("gh-proxy.com", sh)
+        self.assertIn("jsdelivr", sh)
+
+    def test_deploy_readme_covers_the_https_requirement(self):
+        text = (DEPLOY / "README.md").read_text(encoding="utf-8")
+        self.assertIn("https", text)
+        self.assertIn("oss_local", text)
+        self.assertIn("certbot", text)
+        self.assertIn("shops.example.json", text)
+
+
+class ObjectStorageCliDocsTests(unittest.TestCase):
+    def test_readme_documents_local_storage_option(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("oss_local", readme)
+        self.assertIn("对象存储", readme)
+
+
+if __name__ == "__main__":
+    unittest.main()

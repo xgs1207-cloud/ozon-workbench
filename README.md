@@ -444,6 +444,26 @@ Ozon 的 import 只给任务号，最终结果要另查一次。所以提交之�
   **绝不估算**；包装 < 商品本体会被判 `hierarchy_ok=false` 并阻断上传；
 - 产物：`output/pricing-result.json`、`output/measurements.json`、`output/profit-analysis.json`（都过契约）。
 
+### 对象存储（自建服务器 / nginx）
+
+你把图片存在**自己的腾讯云服务器**上，所以用「本地静态目录 + nginx + https」这套：
+
+```powershell
+python -m pipeline.oss_local --product-dir products\P000001 `
+    --root /var/www/ozon-images --base-url https://img.example.com --dry-run   # 先看要做什么
+python -m pipeline.oss_local --product-dir products\P000001 `
+    --root /var/www/ozon-images --base-url https://img.example.com             # 真同步
+```
+
+- 把 `output/generated-images/**` 按 `<product_id>/<slot>.png` 复制到服务器目录（**按 sha256 增量**，没变不重传）；
+- 写出 `output/image-public-urls.json`（slot → https URL）—— **上传载荷就读它**，这就是替换原项目 24h 隧道的位置；
+- `--url-base-path /ozon` 支持"目录名与 URL 路径不同"（CDN 前缀）的情况；`--slot` 可只同步某几个槽位；
+- ⚠️ **上传门禁只接受 https**：没域名/证书时会被 `production_blockers` 拦住（这是刻意的，Ozon 必须能抓到图）。
+  用 Let's Encrypt 免费证书，或改用腾讯云 COS 的 https 域名。
+
+**部署到腾讯云服务器**：完整步骤见 [deploy/README.md](deploy/README.md)（一键安装脚本 `deploy/install.sh`、
+systemd 服务、nginx 站点配置、Linux 版契约拉取 `contracts/fetch_contracts.sh`、排错表）。
+
 ### 定价与尺寸重量（measurements）
 ### 上线前预检（doctor）
 

@@ -248,6 +248,11 @@ class FolderImportRequest(BaseModel):
     skus: list[dict[str, Any]] | None = None
     title_zh: str | None = None
     allow_new_version: bool = False
+    keywords: list[str] = Field(
+        default_factory=list,
+        description="来自选品清单的关键词：会写进 source.json 与 selected-keywords.json",
+    )
+    keyword_source: str = "collection_plan"
 
 
 def _read_json_file(path: Path) -> dict[str, Any]:
@@ -315,6 +320,8 @@ def collector_import_folder(request: FolderImportRequest) -> dict[str, Any]:
             skus=request.skus,
             title_zh=request.title_zh,
             allow_new_version=request.allow_new_version,
+            keywords=request.keywords or None,
+            keyword_source=request.keyword_source,
         )
     except DuplicateCaptureError as error:
         raise HTTPException(status_code=409, detail=error.to_dict()) from error
@@ -571,3 +578,148 @@ def run_pipeline(product_id: str, request: RunPipelineRequest) -> dict[str, Any]
     except ValueError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
     return {"ok": True, "report": report}
+
+
+# ------------------------------------------- 选品清单 / 采集清单（M1 ↔ M2 的桥）
+
+
+class SourcingPlanRequest(BaseModel):
+    category_id: str | None = None
+    type_id: str | None = None
+    top: int = Field(20, ge=1, le=500)
+    statuses: list[str] = Field(default_factory=lambda: ["qualified", "in_library"])
+    min_score: float | None = None
+    translate: bool = Field(False, description="用模型给中文找货词（否则用 Seerfar 中文类目名）")
+    provider: str | None = None
+
+
+class CollectionPlanRequest(BaseModel):
+    top: int | None = Field(None, ge=1, le=500)
+    only: list[str] = Field(default_factory=list)
+    from_library: bool = Field(False, description="True 时直接从关键词库重建，忽略现有选品清单")
+    category_id: str | None = None
+    type_id: str | None = None
+
+
+class MarkCollectedRequest(BaseModel):
+    product_id: str
+    keyword: str = Field(..., min_length=2)
+
+
+def _lab_root() -> Path:
+    """清单类产物的落点：默认与关键词库同级（这样 output/ 被 .gitignore 覆盖）。"""
+    return Path(LIBRARY_ROOT).parent if str(LIBRARY_ROOT) not in {"", "."} else Path(".")
+
+
+@app.post("/api/workbench/sourcing-plan")
+def workbench_sourcing_plan(request: SourcingPlanRequest) -> dict[str, Any]:
+    """生成选品清单（Ozon 复核 + 1688 找货链接），并写到 output/。"""
+    from collector.sourcing import build_sourcing_plan, write_plan
+    from models import ModelError, load_provider
+
+    provider = None
+    if request.translate:
+        try:
+            provider = load_provider(request.provider)
+        except ModelError as error:
+            raise HTTPException(status_code=422, detail=f"模型层不可用：{error}") from error
+
+    plan = build_sourcing_plan(
+        LIBRARY_ROOT,
+        category_id=request.category_id,
+        type_id=request.type_id,
+        top_n=request.top,
+        statuses=tuple(request.statuses),
+        min_score=request.min_score,
+        provider=provider,
+        translate=request.translate,
+    )
+    written = write_plan(_lab_root(), plan, limit=50)
+    return {"ok": True, "plan": plan, "written": written}
+
+
+@app.get("/api/workbench/sourcing-plan")
+def workbench_sourcing_plan_read() -> dict[str, Any]:
+    """读回已生成的选品清单（界面刷新用）。"""
+    path = _lab_root() / "output" / "sourcing-plan.json"
+    payload = _read_json_file(path)
+    if not payload:
+        raise HTTPException(status_code=404, detail=f"还没有选品清单：先 POST /api/workbench/sourcing-plan（{path}）")
+    return {"ok": True, "plan": payload, "path": str(path)}
+
+
+@app.post("/api/workbench/collection-plan")
+def workbench_collection_plan(request: CollectionPlanRequest) -> dict[str, Any]:
+    """选品清单 → 采集清单（带"哪些词已采集"的状态跟踪），并写到 output/。"""
+    from collector.collection_plan import build_collection_plan, write_collection_plan
+
+    rows: list[dict[str, Any]] = []
+    if request.from_library:
+        from collector.sourcing import build_sourcing_plan
+
+        rows = list(
+            build_sourcing_plan(
+                LIBRARY_ROOT,
+                category_id=request.category_id,
+                type_id=request.type_id,
+                top_n=0,
+            ).get("rows")
+            or []
+        )
+    else:
+        payload = _read_json_file(_lab_root() / "output" / "sourcing-plan.json")
+        rows = list(payload.get("rows") or [])
+        if not rows:
+            raise HTTPException(
+                status_code=404,
+                detail="还没有选品清单：先 POST /api/workbench/sourcing-plan，或用 from_library=true 从库重建",
+            )
+
+    plan = build_collection_plan(
+        rows, products_root=PRODUCTS_ROOT, top=request.top, only=request.only
+    )
+    written = write_collection_plan(_lab_root(), plan)
+    return {"ok": True, "plan": plan, "written": written}
+
+
+@app.get("/api/workbench/collection-plan")
+def workbench_collection_plan_read() -> dict[str, Any]:
+    path = _lab_root() / "output" / "collection-plan.json"
+    payload = _read_json_file(path)
+    if not payload:
+        raise HTTPException(status_code=404, detail=f"还没有采集清单：先 POST /api/workbench/collection-plan（{path}）")
+    return {"ok": True, "plan": payload, "path": str(path)}
+
+
+@app.post("/api/workbench/collection-plan/mark")
+def workbench_mark_collected(request: MarkCollectedRequest) -> dict[str, Any]:
+    """把关键词补记到已有商品（等价于 CLI 的 --mark）。"""
+    from collector.collection_plan import mark_keyword
+
+    directory = _require_product(request.product_id)
+    try:
+        result = mark_keyword(directory, request.keyword)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return {"ok": True, **result}
+
+
+@app.get("/api/workbench/keyword-products")
+def workbench_keyword_products() -> dict[str, Any]:
+    """关键词 → 商品 的汇总（回答"这个词下有几个商品、走到哪一步"）。"""
+    from pipeline.doctor import product_keywords
+    from pipeline.status import load_status, normalize
+
+    index: dict[str, list[dict[str, Any]]] = {}
+    for product_id in _list_product_ids():
+        directory = PRODUCTS_ROOT / product_id
+        status = normalize(load_status(directory))
+        for text in product_keywords(directory):
+            index.setdefault(text, []).append(
+                {
+                    "product_id": product_id,
+                    "status": status.get("status"),
+                    "current_step": status.get("current_step"),
+                }
+            )
+    return {"ok": True, "count": len(index), "keywords": index}

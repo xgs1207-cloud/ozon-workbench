@@ -124,15 +124,31 @@ class BuildRequestTests(unittest.TestCase):
         self.assertEqual(item["weight_unit"], "g")
         self.assertEqual(item["dimension_unit"], "mm")
 
-    def test_dictionary_attributes_use_dictionary_value_id(self):
+    def test_dictionary_attributes_go_inside_values_array(self):
+        """真机踩坑：Ozon import 要求值放在 values 里；写成顶层 dictionary_value_id 会丢值。"""
         attributes = build_import_request(sample_payload())["items"][0]["attributes"]
         brand = [item for item in attributes if item["id"] == 85][0]
-        self.assertEqual(brand["dictionary_value_id"], 126745801)
-        self.assertNotIn("values", brand)  # 字典属性不能同时传文本值
+        self.assertEqual(
+            brand["values"],
+            [{"dictionary_value_id": 126745801, "value": "Нет бренда"}],
+        )
         volume = [item for item in attributes if item["id"] == 10096][0]
         self.assertEqual(volume["values"], [{"value": "500"}])
         color = [item for item in attributes if item["id"] == 10097][0]
         self.assertEqual(color["values"], [{"value": "красный"}])
+
+    def test_every_attribute_has_non_empty_values(self):
+        """回归守卫：真提交里出现过"必填属性值为 None"→ 每条属性都必须带非空 values。"""
+        for item in build_import_request(sample_payload())["items"]:
+            self.assertTrue(item["attributes"], "items[].attributes 不能为空")
+            for attribute in item["attributes"]:
+                self.assertIn("values", attribute, attribute)
+                self.assertTrue(attribute["values"], f"属性 {attribute['id']} 的 values 为空")
+                for value in attribute["values"]:
+                    self.assertTrue(
+                        value.get("value") or value.get("dictionary_value_id"),
+                        f"属性 {attribute['id']} 的值既没有文本也没有字典 id",
+                    )
 
     def test_name_is_truncated_and_missing_measurements_are_omitted(self):
         payload = sample_payload()

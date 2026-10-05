@@ -89,17 +89,30 @@ def _item_measurements(payload: Mapping[str, Any], sku_id: str) -> dict[str, Any
 
 
 def _attribute_entry(item: Mapping[str, Any]) -> dict[str, Any] | None:
+    """翻译成 ``/v3/product/import`` 的 attributes 形状。
+
+    ⚠️ 真机踩坑：Ozon 的 import 接口要求值放在 ``values`` 数组里::
+
+        {"id": 8229, "values": [{"dictionary_value_id": 92612, "value": "床单"}]}
+
+    早先写成 ``{"id": 8229, "dictionary_value_id": 92612}``（把"字典查值接口"的返回形状
+    当成了提交形状）→ 请求里这两条必填属性的值变成 None，真提交必被拒。
+    """
     attribute_id = item.get("attribute_id")
     if not attribute_id:
         return None
     dictionary_id = item.get("dictionary_value_id")
-    if isinstance(dictionary_id, int) and dictionary_id > 0:
-        # 字典属性：必须传 dictionary_value_id，不能再传文本值
-        return {"id": int(attribute_id), "dictionary_value_id": int(dictionary_id)}
     value = item.get("value")
-    if value in (None, ""):
+    entry: dict[str, Any] = {"id": int(attribute_id), "values": []}
+    payload_value: dict[str, Any] = {}
+    if isinstance(dictionary_id, int) and dictionary_id > 0:
+        payload_value["dictionary_value_id"] = int(dictionary_id)
+    if value not in (None, ""):
+        payload_value["value"] = str(value)
+    if not payload_value:
         return None
-    return {"id": int(attribute_id), "values": [{"value": str(value)}]}
+    entry["values"].append(payload_value)
+    return entry
 
 
 def build_import_request(payload: Mapping[str, Any]) -> dict[str, Any]:

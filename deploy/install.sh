@@ -3,9 +3,10 @@
 #
 #   sudo bash deploy/install.sh                 # 安装（幂等，可重复跑）
 #   sudo bash deploy/install.sh --no-nginx      # 不动 nginx
+#   sudo bash deploy/install.sh --no-apt        # 不装系统包（**服务器上已跑着别的项目时用这个**）
 #
 # 做四件事：
-#   1) 装系统依赖（python3-venv、git、nginx、certbot）
+#   1) 装系统依赖（python3-venv、git、nginx、certbot）—— --no-apt 时跳过
 #   2) 建用户 ozon 与目录 /opt/ozon-workbench、/var/www/ozon-images
 #   3) 建 venv 并安装 requirements.txt；拉取上游契约（contracts/fetch_contracts.sh）
 #   4) 装 systemd 服务与 nginx 站点（证书你可以稍后用 certbot 申请）
@@ -16,9 +17,11 @@ APP_DIR="${APP_DIR:-/opt/ozon-workbench}"
 IMAGE_ROOT="${IMAGE_ROOT:-/var/www/ozon-images}"
 ENV_FILE="${ENV_FILE:-/etc/ozon-workbench.env}"
 WITH_NGINX=1
+WITH_APT=1
 for arg in "$@"; do
   case "$arg" in
     --no-nginx) WITH_NGINX=0 ;;
+    --no-apt) WITH_APT=0 ;;
     *) echo "未知参数：$arg" >&2; exit 2 ;;
   esac
 done
@@ -31,14 +34,23 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-echo "==> 1/5 安装系统依赖"
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -y
-apt-get install -y python3 python3-venv python3-pip git curl ca-certificates
-if [ "$WITH_NGINX" = "1" ]; then
-  apt-get install -y nginx
-  # certbot 用于申请免费 HTTPS 证书（Ozon 只能抓 https 图片）
-  apt-get install -y certbot python3-certbot-nginx || true
+echo "==> 1/5 系统依赖"
+if [ "$WITH_APT" = "1" ]; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y
+  apt-get install -y python3 python3-venv python3-pip git curl ca-certificates
+  if [ "$WITH_NGINX" = "1" ]; then
+    # 注意：nginx 已在跑别的站点时，升级可能重启它。共享服务器请加 --no-apt
+    apt-get install -y nginx
+    # certbot 用于申请免费 HTTPS 证书（Ozon 只能抓 https 图片）
+    apt-get install -y certbot python3-certbot-nginx || true
+  fi
+else
+  echo "    --no-apt：跳过系统包安装（假定 python3/venv/git 已就绪）"
+  if ! python3 -c "import venv" 2>/dev/null; then
+    echo "    ✗ 缺少 python3-venv：请手动 apt-get install -y python3-venv" >&2
+    exit 1
+  fi
 fi
 
 echo "==> 2/5 建用户与目录"

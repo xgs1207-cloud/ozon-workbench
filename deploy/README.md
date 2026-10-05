@@ -51,6 +51,14 @@ sudo bash deploy/install.sh
 建 venv 装 `requirements.txt` 并拉取上游契约（`contracts/fetch_contracts.sh`，Linux 版，
 因为许可原因契约不进仓库）→ 装 systemd 服务与 nginx 站点。
 
+> ⚠️ **共享服务器**（上面已经跑着别的项目/站点）请用：
+> ```bash
+> sudo bash deploy/install.sh --no-apt
+> ```
+> `--no-apt` 不碰 apt，因此**不会升级/重启 nginx**；代价是要自己保证 `python3-venv`、`git` 已安装。
+> 本工作台的 nginx 站点用**独立的 server_name 或 location**，不会改动已有站点。
+
+
 ---
 
 ## 3. 填密钥与店铺（**密钥只在这里**）

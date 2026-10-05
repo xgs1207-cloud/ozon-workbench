@@ -1,3 +1,9 @@
-# 关键词库 M0 依赖（与既有 Ozon 工作台保持同版本，便于后续并入）
+# 运行依赖（关键词库/接口/采集）
 fastapi==0.115.6
 uvicorn==0.34.0
+
+# 可选但推荐（没有也能跑核心流水线，只影响这两个功能）：
+#   Pillow   —— 豆包生图结果的 3:4 / 900×1200 归一化（pipeline/oss_local 与 models/doubao_image 用）
+#   openpyxl —— 读 Seerfar 导出的 .xlsx（collector/seerfar_xlsx）
+Pillow>=11.0
+openpyxl>=3.1

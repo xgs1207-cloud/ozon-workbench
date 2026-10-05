@@ -23,6 +23,7 @@ import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from .base import (
@@ -230,6 +231,70 @@ def _keywords_of(request: Any) -> list[Any]:
     if isinstance(source, Mapping) and source.get("selected_keywords"):
         return list(source["selected_keywords"])
     return []
+
+
+def enrich_facts_from_inputs(payload: dict[str, Any], request: Any) -> list[str]:
+    """把**我们本来就确切知道**的事实补进 ``facts``（代码填，不靠模型照抄）。
+
+    - 类目中文名：``source.selected_category`` 或 ``input/category-selection.json``
+    - 尺寸/重量：``input/workbench-sku-overrides.json`` 里**人工确认过**的值
+    - 品牌：来源里没有品牌时按项目既定规则填 ``Нет бренда``（类目字典里确实有这个值，
+      属性编译阶段也是这么填的）
+    """
+    notes: list[str] = []
+    facts = payload.get("facts")
+    if not isinstance(facts, dict):
+        return notes
+    source = getattr(request, "source", None) or {}
+    product_dir = getattr(request, "product_dir", None)
+
+    def read_json(relative: str) -> dict[str, Any]:
+        if not product_dir:
+            return {}
+        path = Path(product_dir) / relative
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return value if isinstance(value, Mapping) else {}
+
+    if not facts.get("category_cn"):
+        selection = source.get("selected_category") if isinstance(source.get("selected_category"), Mapping) else {}
+        hint = selection.get("category_path_zh") or selection.get("category_name")
+        if not hint:
+            side = read_json("input/category-selection.json")
+            hint = side.get("category_path_zh") or side.get("category_name")
+        if hint:
+            facts["category_cn"] = str(hint)
+            notes.append(f"category_cn 由采集/类目选择补全：{hint}")
+
+    overrides = read_json("input/workbench-sku-overrides.json")
+    product_block = overrides.get("product") if isinstance(overrides.get("product"), Mapping) else {}
+    length, width, height = (
+        product_block.get("product_length_mm"),
+        product_block.get("product_width_mm"),
+        product_block.get("product_height_mm"),
+    )
+    if all(isinstance(item, (int, float)) and item > 0 for item in (length, width, height)):
+        facts["dimensions"] = {
+            "length_mm": length,
+            "width_mm": width,
+            "height_mm": height,
+            "source": "input/workbench-sku-overrides.json（人工确认）",
+        }
+        notes.append(f"dimensions 用人工确认值补全：{length}×{width}×{height} mm")
+    weight = product_block.get("product_weight_g")
+    if isinstance(weight, (int, float)) and weight > 0:
+        facts["weight"] = {"value_g": weight, "source": "input/workbench-sku-overrides.json（人工确认）"}
+        notes.append(f"weight 用人工确认值补全：{weight} g")
+
+    if not facts.get("brand") and not str(source.get("brand") or "").strip():
+        from pipeline.attributes import UNBRANDED_TEXT  # 延迟导入：避免 models↔pipeline 循环依赖
+
+        facts["brand"] = UNBRANDED_TEXT
+        notes.append(f"品牌：来源无品牌，按项目规则填「{UNBRANDED_TEXT}」")
+    payload["facts"] = facts
+    return notes
 
 
 NARRATIVE_FIELDS = ("selling_points", "inferences", "unknowns", "risks", "recommendation")
@@ -481,7 +546,8 @@ class HttpModelProvider:
         from contracts import validate_contract
 
         base = self._deterministic().analyze_product(request)
-        warnings: list[str] = ["facts 由代码从 input/source.json 派生；模型只写叙述字段"]
+        facts_notes = enrich_facts_from_inputs(base, request)
+        warnings: list[str] = ["facts 由代码从 input/source.json 派生；模型只写叙述字段"] + facts_notes
 
         narrative_prompt = build_narrative_prompt(request)
 

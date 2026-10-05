@@ -365,6 +365,46 @@ class ProviderBehaviourTests(unittest.TestCase):
         # 系统字段不该让模型输出
         self.assertIn("不要输出", prompt)
 
+    def test_facts_enrichment_uses_confirmed_inputs(self):
+        """已知事实（类目名/人工确认的尺寸重量/无品牌规则）由代码补进 facts，不靠模型照抄。"""
+        import json as _json
+        import tempfile
+
+        from models.http_provider import enrich_facts_from_inputs
+
+        with tempfile.TemporaryDirectory() as tmp:
+            product_dir = pathlib.Path(tmp)
+            (product_dir / "input").mkdir()
+            (product_dir / "input" / "category-selection.json").write_text(
+                _json.dumps({"category_id": "17028731", "type_id": "92612", "category_path_zh": "住宅和花园/床上用品/床单"}),
+                encoding="utf-8",
+            )
+            (product_dir / "input" / "workbench-sku-overrides.json").write_text(
+                _json.dumps({"product": {"product_length_mm": 200, "product_width_mm": 200,
+                                         "product_height_mm": 40, "product_weight_g": 900}}),
+                encoding="utf-8",
+            )
+            payload = {"facts": {"title_cn": "纯棉床单", "category_cn": None, "brand": None,
+                                 "dimensions": "unknown", "weight": "unknown"}}
+            request = AnalysisRequest(
+                product_id="P000006", product_dir=product_dir, source={"title_zh": "纯棉床单"}, selected_keywords=[]
+            )
+            notes = enrich_facts_from_inputs(payload, request)
+            self.assertEqual(payload["facts"]["category_cn"], "住宅和花园/床上用品/床单")
+            self.assertEqual(payload["facts"]["dimensions"]["length_mm"], 200)
+            self.assertEqual(payload["facts"]["weight"]["value_g"], 900)
+            self.assertEqual(payload["facts"]["brand"], "Нет бренда")
+            self.assertTrue(any("人工确认" in item for item in notes), notes)
+
+    def test_facts_enrichment_keeps_existing_values(self):
+        from models.http_provider import enrich_facts_from_inputs
+
+        payload = {"facts": {"category_cn": "已有类目", "brand": "RealBrand"}}
+        request = AnalysisRequest(product_id="P1", product_dir=None, source={}, selected_keywords=[])
+        enrich_facts_from_inputs(payload, request)
+        self.assertEqual(payload["facts"]["category_cn"], "已有类目")
+        self.assertEqual(payload["facts"]["brand"], "RealBrand")
+
     def test_facts_always_come_from_code_even_if_model_sends_its_own(self):
         """模型就算硬塞一份 facts，也不能覆盖代码从 source 派生的事实。"""
         model_reply = json.dumps(

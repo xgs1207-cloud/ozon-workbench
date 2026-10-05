@@ -35,9 +35,11 @@ from .base import (
     PositionRequest,
 )
 
+from contracts.normalize import normalize_payload
+
 DEFAULT_TIMEOUT = 90
 DEFAULT_TEMPERATURE = 0.3
-DEFAULT_MAX_ATTEMPTS = 2
+DEFAULT_MAX_ATTEMPTS = 3
 
 JSON_FENCE = re.compile(r"```(?:json)?\s*(.+?)```", re.DOTALL)
 
@@ -231,15 +233,41 @@ def _keywords_of(request: Any) -> list[Any]:
 
 
 def _schema_hint(contract: str) -> str:
+    """给模型一份**够精确**的字段表：真实模型光看"必填顶层字段"仍会加字段、给 null。"""
     try:
         from contracts import load_contract
 
         schema = load_contract(contract)
     except Exception:  # noqa: BLE001 - 没有契约时也给个提示
         return f"（请严格产出 {contract} 契约形状）"
+
+    lines: list[str] = []
+
+    def describe(node: Mapping[str, Any], path: str, depth: int) -> None:
+        if depth > 2 or not isinstance(node, Mapping):
+            return
+        declared = node.get("type")
+        types = ", ".join(declared) if isinstance(declared, list) else str(declared or "?")
+        properties = node.get("properties") if isinstance(node.get("properties"), Mapping) else {}
+        required = set(node.get("required") or [])
+        if properties:
+            names = "、".join(f"{key}{'*' if key in required else ''}" for key in list(properties)[:24])
+            if path:
+                lines.append(f"- `{path}`（{types}）包含字段：{names}")
+            for key, child in list(properties.items())[:24]:
+                if isinstance(child, Mapping) and (child.get("properties") or child.get("items")):
+                    describe(child.get("items") if child.get("items") else child, f"{path}.{key}".lstrip("."), depth + 1)
+        elif node.get("items") and isinstance(node["items"], Mapping):
+            describe(node["items"], path, depth + 1)
+
+    describe(schema, "", 0)
+    top = "、".join(f"{key}*" for key in (schema.get("required") or [])) or "（无）"
     return (
-        f"输出必须满足 {contract} 契约：顶层必填 {schema.get('required')}。"
-        "字段名、类型、枚举值必须完全一致。"
+        f"输出必须满足 {contract} 契约。带 * 的是必填。顶层必填：{top}。\n"
+        + ("\n".join(lines[:14]) + "\n" if lines else "")
+        + "硬规则：① 只能出现上面列出的键，多一个键都不行（additionalProperties=false）；"
+        "② 数组字段不能是 null，没内容就给 []；对象字段不能是 null，没内容就给 {}；"
+        "③ 类型必须一致（字符串就是字符串，不要给数组或对象）；④ 不要输出解释文字或代码围栏。"
     )
 
 
@@ -354,21 +382,42 @@ class HttpModelProvider:
         validate: Callable[[dict[str, Any]], list[str]],
         system: str = SYSTEM_JSON,
         attempts: int | None = None,
+        contract: str | None = None,
     ) -> tuple[dict[str, Any], list[str]]:
-        """调模型 → 抠 JSON → 校验 → 失败带问题清单重试。返回 (payload, 修复提示)。"""
+        """调模型 → 抠 JSON →（按契约机械归一化）→ 校验 → 失败带问题清单重试。"""
         warnings: list[str] = []
         problems: list[str] = []
         prompt = user
+        schema: Mapping[str, Any] | None = None
+        if contract:
+            try:
+                from contracts import load_contract
+
+                schema = load_contract(contract)
+            except Exception:  # noqa: BLE001 - 拿不到契约就跳过归一化
+                schema = None
         for attempt in range(1, (attempts or self.max_attempts) + 1):
             text = self.transport.complete(system=system, user=prompt, temperature=self.temperature)
             payload = extract_json(text)
+            fixes: list[str] = []
             if payload is None:
                 problems = ["输出不是合法 JSON 对象（可能需要去掉解释文字或代码围栏）"]
             else:
+                if schema is not None:
+                    payload, fixes = normalize_payload(payload, schema)
                 problems = list(validate(payload))
             self.calls.append(
-                {"task": task, "attempt": attempt, "ok": not problems, "problems": problems[:6], "chars": len(text)}
+                {
+                    "task": task,
+                    "attempt": attempt,
+                    "ok": not problems,
+                    "problems": problems[:6],
+                    "normalized": fixes[:6],
+                    "chars": len(text),
+                }
             )
+            if fixes:
+                warnings.extend(f"{task}: {item}" for item in fixes[:6])
             if not problems:
                 if attempt > 1:
                     warnings.append(f"{task}: 第 {attempt} 次尝试通过校验（前一次输出不合法）")
@@ -407,6 +456,7 @@ class HttpModelProvider:
                 task="product_analysis",
                 user=user,
                 validate=lambda data: validate_contract("product-analysis", data),
+                contract="product-analysis",
             )
         except ModelError:
             if not self.fallback_to_deterministic:
@@ -471,6 +521,7 @@ class HttpModelProvider:
             task="product_positioning",
             user=user,
             validate=lambda data: validate_contract("product-positioning", data),
+            contract="product-positioning",
         )
         return payload
 

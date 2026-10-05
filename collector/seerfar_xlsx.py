@@ -403,7 +403,14 @@ def import_xlsx(
         "competition_field": parsed["competition_field"],
         "columns": parsed["columns"],
         "unmapped_columns": parsed["unmapped_columns"],
-        "rescored": {key: {"scored": value.get("scored"), "qualified": value.get("qualified")} for key, value in rescored.items()},
+        "rescored": {
+            key: {
+                "scored": value.get("scored"),
+                "promoted": value.get("promoted"),
+                "demoted": value.get("demoted"),
+            }
+            for key, value in rescored.items()
+        },
         "warnings": warnings,
     }
 
@@ -444,7 +451,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"竞争口径：{summary['competition_field']}；类目分组：{len(summary['categories'])} 个")
         for key, count in summary["categories"].items():
             scored = summary["rescored"].get(key, {})
-            print(f"  {key}: {count} 条（已评分 {scored.get('scored')}，达标 {scored.get('qualified')}）")
+            print(
+                f"  {key}: {count} 条（已评分 {scored.get('scored')}，达标提升 {scored.get('promoted')}，"
+                f"回落 {scored.get('demoted')}）"
+            )
         for item in summary["warnings"]:
             print(f"⚠️ {item}")
     return 0

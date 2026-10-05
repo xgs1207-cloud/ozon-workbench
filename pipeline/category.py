@@ -314,6 +314,67 @@ def bind_categories(
     return {"ok": True, "written": str(path), "bound": len(bindings), "unmatched": unmatched, "bindings": bindings}
 
 
+def set_product_category(
+    product_dir: Path | str,
+    *,
+    category_id: str,
+    type_id: str,
+    category_name: str | None = None,
+    category_path_zh: str | None = None,
+) -> dict[str, Any]:
+    """给已有商品补选 Ozon 类目：写 ``input/category-selection.json`` 并回填 ``source.json``。
+
+    采集时漏选类目是常事（插件/CLI 都可能漏），补选后流水线才能继续 —— 分析步骤会读它。
+    """
+    directory = Path(product_dir)
+    if not directory.is_dir():
+        raise ValueError(f"商品目录不存在：{directory}")
+    cid, tid = str(category_id).strip(), str(type_id).strip()
+    if not cid or not tid:
+        raise ValueError("category_id 与 type_id 都必须给")
+    selection = {
+        "category_id": cid,
+        "type_id": tid,
+        "category_path_zh": category_path_zh,
+        "category_name": category_name,
+        "selected_at": now_iso(),
+        "source": "manual_set_product",
+    }
+    input_dir = directory / "input"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    (input_dir / "category-selection.json").write_text(
+        json.dumps(selection, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+
+    source_path = input_dir / "source.json"
+    patched = False
+    source: dict[str, Any] = {}
+    if source_path.is_file():
+        try:
+            source = json.loads(source_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            source = {}
+    if isinstance(source, dict):
+        source["selected_category"] = {
+            "category_id": cid,
+            "type_id": tid,
+            "category_path_zh": category_path_zh,
+            "selected_at": selection["selected_at"],
+        }
+        source_path.write_text(
+            json.dumps(source, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        patched = True
+    return {
+        "ok": True,
+        "product_id": directory.name,
+        "category_id": cid,
+        "type_id": tid,
+        "selection_file": "input/category-selection.json",
+        "source_patched": patched,
+    }
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     import argparse
 
@@ -324,8 +385,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--shop", default=None, help="真实模式下的店铺 id（默认第一家）")
     parser.add_argument("--bindings", default=None, help="绑定文件路径（默认 config/category-bindings.json）")
     parser.add_argument("--auto-pick-unique", action="store_true", help="唯一精确匹配时自动选定")
+    parser.add_argument(
+        "--set-product",
+        default=None,
+        help="给已有商品补选类目：--set-product products/P000002 --category-id X --type-id Y",
+    )
+    parser.add_argument("--category-id", default=None, help="配合 --set-product")
+    parser.add_argument("--type-id", default=None)
+    parser.add_argument("--category-path-zh", default=None)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
+
+    if args.set_product:
+        if not (args.category_id and args.type_id):
+            parser.error("--set-product 需要同时给 --category-id 与 --type-id")
+        try:
+            result = set_product_category(
+                args.set_product,
+                category_id=args.category_id,
+                type_id=args.type_id,
+                category_path_zh=args.category_path_zh,
+            )
+        except (OSError, ValueError) as error:
+            print(json.dumps({"ok": False, "error": str(error)}, ensure_ascii=False, indent=2))
+            return 1
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
 
     names = list(args.names or [])
     if args.from_library:

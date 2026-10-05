@@ -45,10 +45,28 @@ def _refs(ctx: StepContext) -> list[str]:
     return refs or ["input/source.json"]
 
 
+def _source_with_category(ctx: StepContext, source: Mapping[str, Any]) -> dict[str, Any]:
+    """把"后来补的类目"合进 source（采集时没选类目、之后补选的场景）。
+
+    采集入库时没选类目 → source.json 里 ``selected_category`` 为空；
+    用户之后在 ``input/category-selection.json`` 里补选（或由 ``pipeline.category --set-product`` 写入）
+    时，分析/设计等步骤应该能看见它，而不是永远卡在"缺少类目"。**只是合并已有值，绝不猜。**
+    """
+    merged = dict(source)
+    current = merged.get("selected_category")
+    if isinstance(current, Mapping) and current.get("category_id") and current.get("type_id"):
+        return merged
+    selection = ctx.read_json("input/category-selection.json")
+    if isinstance(selection, Mapping) and selection.get("category_id") and selection.get("type_id"):
+        merged["selected_category"] = dict(selection)
+        merged.setdefault("category_source", "input/category-selection.json")
+    return merged
+
+
 def handle_product_analysis(ctx: StepContext) -> dict[str, Any]:
     """商品信息总结：调模型 → 契约校验 → 落盘。阻断性风险与"需人工确认"都会转人工。"""
     provider = ctx.require_provider()
-    source = ctx.require_json("input/source.json")
+    source = _source_with_category(ctx, ctx.require_json("input/source.json"))
     try:
         payload = provider.analyze_product(
             AnalysisRequest(

@@ -170,6 +170,98 @@ class BindingsFileTests(unittest.TestCase):
             category_main(["--fixture-dir", str(self.fixture_dir)])
 
 
+class SetProductCategoryTests(unittest.TestCase):
+    """采集漏选类目后补选：写 category-selection.json + 回填 source.json。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+        self.product_dir = self.root / "P000001"
+        (self.product_dir / "input").mkdir(parents=True)
+        (self.product_dir / "input" / "source.json").write_text(
+            json.dumps({"product_id": "P000001", "source_url": "https://detail.1688.com/offer/1.html", "selected_category": None}),
+            encoding="utf-8",
+        )
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_sets_selection_and_patches_source(self):
+        from pipeline.category import set_product_category
+
+        result = set_product_category(
+            self.product_dir, category_id="17028922", type_id="91875", category_path_zh="家居/床上用品"
+        )
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["source_patched"])
+        selection = json.loads(
+            (self.product_dir / "input" / "category-selection.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(selection["type_id"], "91875")
+        source = json.loads((self.product_dir / "input" / "source.json").read_text(encoding="utf-8"))
+        self.assertEqual(source["selected_category"]["category_id"], "17028922")
+
+    def test_requires_both_ids(self):
+        from pipeline.category import set_product_category
+
+        with self.assertRaises(ValueError):
+            set_product_category(self.product_dir, category_id="1", type_id="")
+
+    def test_cli_set_product(self):
+        import io
+        from contextlib import redirect_stdout
+
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = category_main(
+                [
+                    "--set-product",
+                    str(self.product_dir),
+                    "--category-id",
+                    "17028922",
+                    "--type-id",
+                    "91875",
+                ]
+            )
+        self.assertEqual(code, 0, buffer.getvalue())
+        self.assertTrue(json.loads(buffer.getvalue())["ok"])
+
+    def test_cli_set_product_requires_ids(self):
+        with self.assertRaises(SystemExit):
+            category_main(["--set-product", str(self.product_dir)])
+
+    def test_analysis_sees_later_category(self):
+        """分析步骤必须能看到"后来补的类目"，否则商品永远卡在缺类目。"""
+        from models.fake import FakeProvider
+        from pipeline.handlers import run_single_step
+        from pipeline.selection import set_selected_keywords
+
+        set_selected_keywords(self.product_dir, ["простынь 200х200"])
+        (self.product_dir / "input" / "source.json").write_text(
+            json.dumps(
+                {
+                    "product_id": "P000001",
+                    "collection_id": "COL-XXXXXXXXXXXX",
+                    "source_url": "https://detail.1688.com/offer/1.html",
+                    "title_zh": "床单",
+                    "selected_category": None,
+                    "skus": [{"sku_id": "S1", "purchase_price_cny": 20.0}],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        from pipeline.category import set_product_category
+
+        set_product_category(self.product_dir, category_id="17028922", type_id="91875")
+        result = run_single_step(self.product_dir, "product_analysis", provider=FakeProvider())
+        self.assertEqual(result["decision"], "continue")
+        analysis = json.loads(
+            (self.product_dir / "output" / "product-analysis.json").read_text(encoding="utf-8")
+        )
+        self.assertFalse(any("类目" in str(risk) for risk in analysis.get("risks") or []), analysis.get("risks"))
+
+
 class SeerfarBindingTests(unittest.TestCase):
     """导入 Seerfar 表时套用类目绑定（真实 Ozon id 进关键词库）。"""
 

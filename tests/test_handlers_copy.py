@@ -271,10 +271,27 @@ class HandlerTests(unittest.TestCase):
         source = json.loads(source_path.read_text(encoding="utf-8"))
         source["selected_category"] = None
         source_path.write_text(json.dumps(source, ensure_ascii=False), encoding="utf-8")
+        # 采集时选的类目文件也要清掉：只要它还写着类目，分析步骤就应当（正确地）采用它
+        selection = self.product_dir / "input" / "category-selection.json"
+        if selection.is_file():
+            selection.unlink()
 
         with self.assertRaises(PipelineGateError) as ctx:
             run_single_step(self.product_dir, "product_analysis", provider=self.provider)
         self.assertIn("人工确认", str(ctx.exception))
+
+    def test_analysis_accepts_category_from_selection_file(self):
+        """采集时漏选类目、之后补在 category-selection.json 里：分析步骤应当能用它继续。"""
+        source_path = self.product_dir / "input" / "source.json"
+        source = json.loads(source_path.read_text(encoding="utf-8"))
+        source["selected_category"] = None
+        source_path.write_text(json.dumps(source, ensure_ascii=False), encoding="utf-8")
+        (self.product_dir / "input" / "category-selection.json").write_text(
+            json.dumps({"category_id": "1001", "type_id": "2001"}), encoding="utf-8"
+        )
+
+        result = run_single_step(self.product_dir, "product_analysis", provider=self.provider)
+        self.assertEqual(result["decision"], "continue")
 
     def test_context_without_provider_reports_gate(self):
         context = StepContext(self.product_dir, "product_analysis", True, "development", {}, None)

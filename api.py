@@ -12,8 +12,13 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
+import re
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +45,9 @@ PRODUCTS_ROOT = Path(
 )
 
 app = FastAPI(title="ozon-workbench · local workbench", version="0.2.0")
+
+#: 远程采集入库单次请求的图片总量上限（base64 之后按解码后字节算）
+MAX_CAPTURE_BYTES = int(os.environ.get("WORKBENCH_MAX_CAPTURE_BYTES") or 40 * 1024 * 1024)
 
 _SCORE_FIELDS = (
     "lam",
@@ -328,6 +336,103 @@ def collector_import_folder(request: FolderImportRequest) -> dict[str, Any]:
     except CaptureValidationError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     return {"ok": True, **summary}
+
+
+class CaptureUploadRequest(BaseModel):
+    """远程采集入库：图片以 base64 随 JSON 传（不依赖 multipart，也不要求服务器能访问你的磁盘）。"""
+
+    source_url: str
+    title_zh: str | None = None
+    category: CategoryRef | None = None
+    skus: list[dict[str, Any]] = Field(..., min_length=1, max_length=10)
+    keywords: list[str] = Field(default_factory=list)
+    keyword_source: str = "collection_plan"
+    keyword_category: CategoryRef | None = None
+    images: dict[str, list[dict[str, Any]]] = Field(
+        default_factory=dict,
+        description="{main|sku|detail: [{name, data_base64}]}",
+    )
+    allow_new_version: bool = False
+
+
+def _write_capture_images(request: CaptureUploadRequest, target: Path) -> None:
+    """把 base64 图片落到临时目录，交给 import_folder 统一入库（去重/计数/清单都在那里）。"""
+    if not request.images:
+        raise HTTPException(status_code=422, detail="没有图片：请至少上传 main 图")
+    if len(request.images) > 3:
+        raise HTTPException(status_code=422, detail=f"未知的图片角色：{sorted(request.images)}")
+    total = 0
+    for role, entries in request.images.items():
+        if role not in {"main", "sku", "detail"}:
+            raise HTTPException(status_code=422, detail=f"未知的图片角色：{role}（可用 main/sku/detail）")
+        if not entries:
+            continue
+        if len(entries) > 20:
+            raise HTTPException(status_code=422, detail=f"{role} 图片过多（最多 20 张）")
+        directory = target / f"{role}-images"
+        directory.mkdir(parents=True, exist_ok=True)
+        for index, entry in enumerate(entries, start=1):
+            if not isinstance(entry, dict):
+                continue
+            raw = str(entry.get("data_base64") or "")
+            if not raw:
+                raise HTTPException(status_code=422, detail=f"{role} 第 {index} 张缺少 data_base64")
+            try:
+                data = base64.b64decode(raw, validate=True)
+            except (ValueError, binascii.Error) as error:
+                raise HTTPException(status_code=422, detail=f"{role} 第 {index} 张 base64 解码失败：{error}") from error
+            total += len(data)
+            if total > MAX_CAPTURE_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"图片总量超过上限 {MAX_CAPTURE_BYTES // (1024 * 1024)}MB（当前 {total // (1024 * 1024)}MB）",
+                )
+            name = _sanitize_filename(str(entry.get("name") or f"{role}-{index:03d}.png"))
+            (directory / name).write_bytes(data)
+    if total == 0:
+        raise HTTPException(status_code=422, detail="上传的图片都是空的")
+
+
+def _sanitize_filename(name: str) -> str:
+    """只保留安全字符：去掉路径分隔符、折叠点串（防 `..` 之类"),并限制长度。"""
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-")
+    cleaned = re.sub(r"\.{2,}", ".", cleaned)      # ".." -> "."
+    cleaned = cleaned.strip(".")                    # 去掉首尾的点
+    cleaned = re.sub(r"-{2,}", "-", cleaned).strip("-")
+    return cleaned[-80:] or "image.png"
+
+
+@app.post("/api/collector/products/capture")
+def collector_capture_upload(request: CaptureUploadRequest) -> dict[str, Any]:
+    """远程采集入库（图片 base64）：Windows 本地采集 → SSH 隧道 → 服务器入库。"""
+    workdir = Path(tempfile.mkdtemp(prefix="ozon-capture-"))
+    try:
+        _write_capture_images(request, workdir)
+        descriptor: dict[str, Any] = {
+            "source_url": request.source_url,
+            "title_zh": request.title_zh,
+            "skus": request.skus,
+        }
+        if request.category:
+            descriptor["category"] = request.category.model_dump()
+        if request.keywords:
+            descriptor["keywords"] = request.keywords
+            descriptor["keyword_source"] = request.keyword_source
+        if request.keyword_category:
+            descriptor["keyword_category"] = request.keyword_category.model_dump()
+        (workdir / "product.json").write_text(
+            json.dumps(descriptor, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        summary = import_folder(
+            PRODUCTS_ROOT, workdir, allow_new_version=request.allow_new_version
+        )
+    except DuplicateCaptureError as error:
+        raise HTTPException(status_code=409, detail=error.to_dict()) from error
+    except CaptureValidationError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+    return {"ok": True, "via": "capture-upload", **summary}
 
 
 @app.get("/api/collector/products")

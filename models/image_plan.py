@@ -336,9 +336,12 @@ def build_image_plan(
 ) -> dict[str, Any]:
     """构建完整的 image-plan（N 张 SKU 主图 + 恰好 8 张共享详情图）。"""
     product_id = str(source.get("product_id") or product_dir.name)
-    skus = [item for item in (source.get("skus") or []) if isinstance(item, Mapping)]
+    # 只为"要上架"的 SKU 规划主图：没选的规格不该花豆包生图的钱
+    from pipeline.sku_selection import active_skus
+
+    skus = active_skus(product_dir, source.get("skus") or [])
     if not skus:
-        raise ValueError("图片规划至少需要 1 个已选 SKU")
+        raise ValueError("图片规划至少需要 1 个已选 SKU（检查 input/selected-skus.json）")
     if len(skus) > MAX_MAIN_IMAGES:
         raise ValueError(f"已选 SKU 超过 {MAX_MAIN_IMAGES} 个，无法规划主图")
 

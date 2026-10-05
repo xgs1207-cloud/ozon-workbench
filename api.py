@@ -435,6 +435,63 @@ def collector_capture_upload(request: CaptureUploadRequest) -> dict[str, Any]:
     return {"ok": True, "via": "capture-upload", **summary}
 
 
+class SkuSelectionRequest(BaseModel):
+    """选择上架 SKU（未选中的不进 offer、不生成主图、不参与定价）。"""
+
+    include: list[str] = Field(default_factory=list, description="要上架的 SKU（白名单）")
+    exclude: list[str] = Field(default_factory=list, description="不上架的 SKU（从全部里去掉）")
+    reason: str | None = Field(None, description="排除原因（记进文件，便于回溯）")
+    note: str | None = None
+    all: bool = Field(False, description="全部上架（等价于清除选择文件）")
+
+
+@app.get("/api/workbench/products/{product_id}/skus")
+def workbench_product_skus(product_id: str) -> dict[str, Any]:
+    """看某个商品采集到的 SKU 与当前上架范围。"""
+    from pipeline.sku_selection import selection_state, source_skus
+
+    directory = _require_product(product_id)
+    state = selection_state(directory)
+    rows = source_skus(directory)
+    return {
+        "ok": True,
+        "product_id": product_id,
+        **state,
+        "skus": [
+            {
+                "sku_id": str(item.get("sku_id") or f"S{index}"),
+                "color_ru": item.get("color_ru"),
+                "capacity": item.get("capacity"),
+                "purchase_price_cny": item.get("purchase_price_cny"),
+                "listed": str(item.get("sku_id") or f"S{index}") in set(state["selected"]),
+            }
+            for index, item in enumerate(rows, start=1)
+        ],
+    }
+
+
+@app.post("/api/workbench/products/{product_id}/skus")
+def workbench_set_product_skus(product_id: str, request: SkuSelectionRequest) -> dict[str, Any]:
+    """设置上架 SKU。"""
+    from pipeline.sku_selection import SkuSelectionError, clear_selection, set_selection, selection_state
+
+    directory = _require_product(product_id)
+    try:
+        if request.all:
+            result = clear_selection(directory)
+        else:
+            result = set_selection(
+                directory,
+                include=request.include,
+                exclude=request.exclude,
+                reason=request.reason,
+                note=request.note,
+            )
+    except SkuSelectionError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return {"ok": True, **result, "state": selection_state(directory)}
+
+
 class LaunchRequest(BaseModel):
     """一键跑一个商品（默认干跑：fake 模型 + 占位生图，绝不碰 Ozon）。"""
 

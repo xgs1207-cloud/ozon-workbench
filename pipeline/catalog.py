@@ -76,13 +76,28 @@ def handle_field_completion(ctx: StepContext) -> dict[str, Any]:
     analysis = ctx.read_json(ANALYSIS_FILE)
     warnings: list[str] = []
 
+    from .sku_selection import active_skus
+
+    active = active_skus(ctx.product_dir, source.get("skus") or [])
     fill_input_path = ctx.path(FILL_INPUT)
     if fill_input_path.is_file():
         fill_input = ctx.read_json(FILL_INPUT)
     else:
-        fill_input = build_attribute_fill_input(source=source, copy_bundle=copy_bundle, analysis=analysis)
+        # 只把"要上架"的 SKU 交给属性填值：否则会把没上架规格的颜色/容量当变体属性提交
+        fill_input = build_attribute_fill_input(
+            source={**dict(source), "skus": active}, copy_bundle=copy_bundle, analysis=analysis
+        )
         ctx.write_json(FILL_INPUT, fill_input)
         warnings.append("本地生成了 output/attribute-fill-input.json（设计步骤尚未实现）")
+
+    # 安全网：已有文件可能含没上架的 SKU → 过滤**并回写**，让磁盘状态与编译结果一致
+    if isinstance(fill_input.get("skus"), list):
+        allowed = {str(item.get("sku_id")) for item in active}
+        kept = [item for item in fill_input["skus"] if str(item.get("sku_id")) in allowed]
+        if len(kept) != len(fill_input["skus"]):
+            warnings.append(f"按上架 SKU 选择过滤了属性变体：{len(fill_input['skus'])} → {len(kept)}")
+            fill_input = {**fill_input, "skus": kept}
+            ctx.write_json(FILL_INPUT, fill_input)
 
     compiled = compile_attributes(
         product_id=ctx.product_dir.name,

@@ -108,6 +108,7 @@ def collect_measurements(
     product_id: str,
     source: Mapping[str, Any],
     overrides: Mapping[str, Any] | None = None,
+    product_dir: Path | str | None = None,
 ) -> dict[str, Any]:
     """整理商品/包装/各 SKU 的尺寸重量（只认确认值）；返回 workbench-measurements 形状。"""
     overrides = dict(overrides or {})
@@ -126,7 +127,10 @@ def collect_measurements(
     package_dims = _dimensions_from_block(product_block, prefix="package_")
 
     sku_measurements: dict[str, Any] = {}
-    skus = [item for item in (source.get("skus") or []) if isinstance(item, Mapping)]
+    from .sku_selection import active_skus
+
+    raw_skus = [item for item in (source.get("skus") or []) if isinstance(item, Mapping)]
+    skus = active_skus(product_dir, raw_skus) if product_dir is not None else raw_skus
     for index, sku in enumerate(skus, start=1):
         sku_id = str(sku.get("sku_id") or f"S{index}")
         block = overrides_by_sku.get(sku_id) if isinstance(overrides_by_sku, Mapping) else None
@@ -352,8 +356,13 @@ def compute_pricing(
     source: Mapping[str, Any],
     config: Mapping[str, Any],
     measurements: Mapping[str, Any] | None = None,
+    product_dir: Path | str | None = None,
 ) -> dict[str, Any]:
-    skus = [item for item in (source.get("skus") or []) if isinstance(item, Mapping)]
+    from .sku_selection import active_skus
+
+    raw_skus = [item for item in (source.get("skus") or []) if isinstance(item, Mapping)]
+    # 只为"要上架"的 SKU 定价：没选的规格缺价格不该把整单卡住
+    skus = active_skus(product_dir, raw_skus) if product_dir is not None else raw_skus
     if not skus:
         raise ValueError("没有已选 SKU，无法定价")
     warnings: list[str] = []
@@ -422,7 +431,9 @@ def handle_measurements(ctx: StepContext) -> dict[str, Any]:
     overrides = ctx.read_json(OVERRIDES_FILE)
     config, config_warnings = load_pricing_config(ctx.path("config/pricing.json"))
 
-    measurements = collect_measurements(product_id=ctx.product_dir.name, source=source, overrides=overrides)
+    measurements = collect_measurements(
+        product_id=ctx.product_dir.name, source=source, overrides=overrides, product_dir=ctx.product_dir
+    )
     problems = validate_contract("workbench-measurements", measurements)
     if problems:
         raise PipelineGateError(
@@ -433,7 +444,11 @@ def handle_measurements(ctx: StepContext) -> dict[str, Any]:
     ctx.write_json(MEASUREMENTS_FILE, measurements)
 
     pricing = compute_pricing(
-        product_id=ctx.product_dir.name, source=source, config=config, measurements=measurements
+        product_id=ctx.product_dir.name,
+        source=source,
+        config=config,
+        measurements=measurements,
+        product_dir=ctx.product_dir,
     )
     problems = validate_contract("workbench-pricing-result", pricing)
     if problems:

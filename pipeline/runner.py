@@ -73,12 +73,17 @@ def handler_validate_source(ctx: StepContext) -> dict[str, Any]:
     if not checks["source_url_is_1688"]:
         raise PipelineGateError(ctx.step, f"source_url 不是 1688 商品页：{source_url or '空'}")
 
-    skus = source.get("skus")
-    if not isinstance(skus, list) or not 1 <= len(skus) <= MAX_SELECTED_SKUS:
+    from .sku_selection import active_skus
+
+    raw_skus = source.get("skus")
+    # 只校验"要上架"的 SKU：选择文件里被排除的规格不该卡住整单
+    skus = active_skus(ctx.product_dir, raw_skus if isinstance(raw_skus, list) else [])
+    if not 1 <= len(skus) <= MAX_SELECTED_SKUS:
         raise PipelineGateError(
             ctx.step,
             f"已选 SKU 必须在 1–{MAX_SELECTED_SKUS} 之间，实际 "
-            f"{len(skus) if isinstance(skus, list) else '空'}",
+            f"{len(skus) if skus else '空'}（源数据 {len(raw_skus) if isinstance(raw_skus, list) else 0} 个，"
+            "可用 pipeline.sku_selection 调整上架范围）",
         )
     checks["sku_count"] = len(skus)
 

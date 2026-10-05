@@ -245,7 +245,7 @@ class ImagePlanHandlerTests(unittest.TestCase):
         self._prepare_copy()
         with self.assertRaises(PipelineGateError) as ctx:
             run_single_step(self.product_dir, "image_plan", provider=TwoMainProvider())
-        self.assertIn("与已选 SKU 数", str(ctx.exception))
+        self.assertIn("与要上架的 SKU 数", str(ctx.exception))
 
     def test_pipeline_reaches_image_plan(self):
         """阶段 A 用桩、文案与图片规划用真实 handler，看能否一路走到 image_generation。"""

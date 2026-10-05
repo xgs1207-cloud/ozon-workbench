@@ -249,13 +249,16 @@ def handle_image_plan(ctx: StepContext) -> dict[str, Any]:
             {"problems": problems[:12], "summary": format_problems(problems)},
         )
 
-    sku_count = len([item for item in (source.get("skus") or []) if isinstance(item, Mapping)])
+    from .sku_selection import active_skus
+
+    # 数量按"要上架的 SKU"算：选择文件排除掉的规格不该有主图，也不该被要求有
+    sku_count = len(active_skus(ctx.product_dir, source.get("skus") or []))
     main_images = list(plan.get("main_images") or [])
     detail_images = list(plan.get("detail_images") or [])
     if len(main_images) != sku_count:
         raise PipelineGateError(
             ctx.step,
-            f"主图数量 {len(main_images)} 与已选 SKU 数 {sku_count} 不一致（每个 SKU 必须恰好 1 张主图）",
+            f"主图数量 {len(main_images)} 与要上架的 SKU 数 {sku_count} 不一致（每个上架 SKU 必须恰好 1 张主图）",
             {"sku_count": sku_count, "main_images": len(main_images)},
         )
     if len(detail_images) != 8:

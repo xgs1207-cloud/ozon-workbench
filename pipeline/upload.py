@@ -137,9 +137,14 @@ def build_upload_payload(
     plan = _read_json(directory / IMAGE_PLAN_FILE)
     urls = dict(image_urls) if image_urls is not None else resolve_image_urls(directory)
 
-    skus = [item for item in (source.get("skus") or []) if isinstance(item, Mapping)]
+    from .sku_selection import active_skus, selection_state
+
+    skus = active_skus(directory, source.get("skus") or [])
     if not skus:
         blockers.append("没有已选 SKU")
+    state = selection_state(directory)
+    if state.get("has_selection") and state.get("active_count") == 0:
+        blockers.append("选择文件把 SKU 全部排除了（至少保留 1 个上架 SKU）")
 
     # 1) 类目必须来自 Ozon Seller API
     if str(category.get("metadata_source") or "") != "ozon_seller_api":

@@ -444,6 +444,28 @@ Ozon 的 import 只给任务号，最终结果要另查一次。所以提交之�
   **绝不估算**；包装 < 商品本体会被判 `hierarchy_ok=false` 并阻断上传；
 - 产物：`output/pricing-result.json`、`output/measurements.json`、`output/profit-analysis.json`（都过契约）。
 
+### 选择上架 SKU（1688 一个链接十几种规格，只上你要的那几个）
+
+```powershell
+python -m pipeline.sku_selection --product-dir products\P000001 --list          # 看采集到哪些、当前上架哪些
+python -m pipeline.sku_selection --product-dir products\P000001 --include S1 --include S3 --reason "只做两个颜色"
+python -m pipeline.sku_selection --product-dir products\P000001 --exclude S2 --reason "断货"
+python -m pipeline.sku_selection --product-dir products\P000001 --all           # 恢复全部上架
+```
+
+选择结果写在 `input/selected-skus.json`，**一处选择、处处生效**：
+
+| 环节 | 行为 |
+|---|---|
+| 上传载荷 | 只提交选中的 SKU（未选中不进 offer、不进 `variants`） |
+| 定价 / 尺寸重量 | 只为选中的 SKU 计算校验 —— **没选的规格缺价格不再卡住整单** |
+| 类目属性 | 只按选中的 SKU 值分组（不会提交没上架规格的颜色/容量） |
+| 图片规划 | 只为选中的 SKU 生成主图 —— **直接省豆包生图成本** |
+| 批次快照 / 运行前校验 | 按选中的 SKU 数量做 1–10 校验 |
+
+规则：SKU 必须存在于采集数据；同一 SKU 不能既选又排；**至少保留 1 个**；最多 10 个；未知 SKU 直接报错并列出可选项。
+没有选择文件时 = 全部上架（向后兼容）。API：`GET/POST /api/workbench/products/{id}/skus`。
+
 ### 1688 采集（浏览器抓 URL → 本机下载 → 推服务器）
 
 零手工三步，数据全程只在自己机器/服务器上：

@@ -133,7 +133,10 @@ def _validate_for_batch(product_dir: Path, *, allow_terminal_store_retry: bool =
     if "1688.com/offer/" not in source_url:
         raise ValueError(f"Requested product is not a 1688 capture: {product_id}")
 
-    skus = source.get("skus") if isinstance(source.get("skus"), list) else []
+    from .sku_selection import active_skus
+
+    # 按"要上架"的 SKU 计数（选择文件没写时 = 全部）
+    skus = active_skus(product_dir, source.get("skus") if isinstance(source.get("skus"), list) else [])
     if not 1 <= len(skus) <= MAX_SELECTED_SKUS:
         raise ValueError(
             f"{product_id}: 已选 SKU 必须在 1–{MAX_SELECTED_SKUS} 之间，实际 {len(skus)}"

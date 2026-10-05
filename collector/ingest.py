@@ -23,7 +23,10 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 import unicodedata
+import urllib.error
+import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,6 +53,47 @@ IMAGE_DIRS: dict[str, str] = {
 
 _PRICE_KEYS = ("purchase_price_cny", "cost_cny", "purchase_price", "price_cny")
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".avif"}
+# 1688 图片 CDN 校验 Referer；服务端直下时带浏览器 UA + detail 页 Referer 最稳。
+_REMOTE_IMAGE_HEADERS = {
+    "Referer": "https://detail.1688.com/",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    ),
+}
+_REMOTE_IMAGE_TIMEOUT = 20
+_REMOTE_IMAGE_MAX_BYTES = 12 * 1024 * 1024
+_REMOTE_IMAGE_MAGIC = (
+    (b"\x89PNG\r\n\x1a\n", ".png"),
+    (b"\xff\xd8\xff", ".jpg"),
+    (b"GIF8", ".gif"),
+    (b"RIFF", ".webp"),
+)
+
+
+def _detect_image_ext(data: bytes) -> str | None:
+    for magic, suffix in _REMOTE_IMAGE_MAGIC:
+        if data.startswith(magic):
+            if suffix == ".webp" and data[8:12] != b"WEBP":
+                continue
+            return suffix
+    return None
+
+
+def _download_remote_image(url: str) -> tuple[bytes, str] | None:
+    """下载一张远程图片，返回 (bytes, 扩展名)；失败返回 None（不抛，采集不因单图失败中断）。"""
+    try:
+        req = urllib.request.Request(url, headers=_REMOTE_IMAGE_HEADERS)
+        with urllib.request.urlopen(req, timeout=_REMOTE_IMAGE_TIMEOUT) as resp:
+            data = resp.read()
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return None
+    if not data or len(data) > _REMOTE_IMAGE_MAX_BYTES:
+        return None
+    ext = _detect_image_ext(data)
+    if ext is None:
+        return None
+    return data, ext
 
 
 class CaptureValidationError(ValueError):
@@ -221,7 +265,10 @@ def normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         skus.append(normalized)
 
     category = payload.get("category") or payload.get("selected_category")
-    # 从选品清单采集时，关键词自带绑定好的真实类目 —— 采集时没选类目就用它（仍不猜）
+    # Edge 插件在 SKU 抽屉里选完 Ozon 类目后放在 ozon_category_selection
+    ozon_cat = payload.get("ozon_category_selection")
+    if category is None and isinstance(ozon_cat, Mapping) and ozon_cat:
+        category = ozon_cat
     keyword_category = payload.get("keyword_category")
     if category is None and isinstance(keyword_category, Mapping) and keyword_category:
         category = keyword_category
@@ -249,11 +296,28 @@ def normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
                 else:
                     path, name = str(entry), Path(str(entry)).name
                 images[role].append({"path": str(path) if path else None, "name": str(name or "")})
+    elif "images" not in payload:
+        # Edge 插件：main_images / detail_images 是 URL 数组；SKU 图在每个 sku.image_url
+        for role, key in (("main", "main_images"), ("detail", "detail_images")):
+            for entry in payload.get(key) or []:
+                url = None
+                if isinstance(entry, Mapping):
+                    url = entry.get("url") or entry.get("src")
+                elif isinstance(entry, str):
+                    url = entry
+                if url:
+                    images[role].append({"url": str(url), "name": ""})
+        for sku in raw_skus:
+            if not isinstance(sku, Mapping):
+                continue
+            url = sku.get("image_url") or sku.get("variant_image_url")
+            if url:
+                images["sku"].append({"url": str(url), "name": str(sku.get("sku_id") or "")})
 
     return {
         "source_url": source_url,
         "offer_id": offer_id_of(source_url),
-        "title_zh": payload.get("title_zh") or payload.get("title"),
+        "title_zh": payload.get("title_zh") or payload.get("title") or payload.get("title_cn"),
         "captured_at": payload.get("captured_at") or now_iso(),
         "skus": skus,
         "category": normalized_category,
@@ -283,16 +347,28 @@ ATTRIBUTE_ALIASES: dict[str, tuple[str, ...]] = {
 def _normalize_attributes(payload: Mapping[str, Any]) -> dict[str, Any]:
     """把采集到的详情页属性规整成 ``{material, package_quantity, certifications, ...}``。
 
-    兼容两种来源：① 浏览器脚本抓的 ``attributes_zh``（原样键值表）；
-    ② 显式字段（``material_zh`` / ``package_quantity`` / ``certifications``）。
+    兼容三种来源：① 浏览器脚本抓的 ``attributes_zh``（原样键值表）；
+    ② 显式字段（``material_zh`` / ``package_quantity`` / ``certifications``）；
+    ③ Edge 插件的 ``product_attributes`` 数组（``[{name, value}, ...]`` 或 ``[{key, value}]``）。
     """
     raw: dict[str, str] = {}
-    source = payload.get("attributes_zh") or payload.get("attributes") or {}
+    source = payload.get("attributes_zh") or payload.get("attributes")
     if isinstance(source, Mapping):
         for key, value in source.items():
             text = str(value or "").strip()
             if text:
                 raw[str(key).strip()] = text
+    elif not source:
+        # Edge 插件：product_attributes 是数组，转成键值表
+        prod_attrs = payload.get("product_attributes")
+        if isinstance(prod_attrs, list):
+            for item in prod_attrs:
+                if not isinstance(item, Mapping):
+                    continue
+                name = str(item.get("name") or item.get("key") or item.get("label") or "").strip()
+                value = str(item.get("value") or item.get("values") or "").strip()
+                if name and value:
+                    raw[name] = value
 
     resolved: dict[str, Any] = {"raw": raw}
     for field, aliases in ATTRIBUTE_ALIASES.items():
@@ -345,28 +421,46 @@ def _normalize_keywords(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
 def _copy_images(
     product_dir: Path, images: Mapping[str, Sequence[Mapping[str, Any]]]
 ) -> tuple[dict[str, int], list[str], list[str]]:
-    """把采集到的图片复制进商品目录；返回 (计数, 警告, 实际落盘相对路径)。"""
+    """把采集到的图片复制进商品目录；返回 (计数, 警告, 实际落盘相对路径)。
+
+    图片条目支持两种：``{"path": 本地路径}``（原文件夹导入/控制台脚本）和
+    ``{"url": 远程 URL}``（Edge 插件直接 POST，服务端带 Referer 下载）。
+    """
     counts = {role: 0 for role in IMAGE_DIRS}
     warnings: list[str] = []
     stored: list[str] = []
     seen_hashes: set[str] = set()
+    temp_files: list[Path] = []
 
     for role, entries in images.items():
         target_dir = product_dir / IMAGE_DIRS[role]
         target_dir.mkdir(parents=True, exist_ok=True)
         for index, entry in enumerate(entries or [], start=1):
             raw_path = entry.get("path")
-            if not raw_path:
-                warnings.append(f"{role} 第 {index} 张没有本地路径，已跳过")
-                continue
-            source = Path(str(raw_path))
-            if not source.is_file():
-                warnings.append(f"{role} 图片不存在：{raw_path}")
+            url = entry.get("url")
+            source: Path | None = None
+            if raw_path:
+                source = Path(str(raw_path))
+                if not source.is_file():
+                    warnings.append(f"{role} 图片不存在：{raw_path}")
+                    continue
+            elif url:
+                downloaded = _download_remote_image(str(url))
+                if downloaded is None:
+                    warnings.append(f"{role} 第 {index} 张下载失败：{url}")
+                    continue
+                data, ext = downloaded
+                tmp = Path(tempfile.mkstemp(prefix=f"ozon-img-{role}-", suffix=ext)[1])
+                tmp.write_bytes(data)
+                temp_files.append(tmp)
+                source = tmp
+            else:
+                warnings.append(f"{role} 第 {index} 张没有本地路径也没有远程 URL，已跳过")
                 continue
             if source.suffix.lower() not in _IMAGE_SUFFIXES:
                 warnings.append(f"{role} 图片格式不支持：{source.name}")
                 continue
-            digest = sha256_file(source)
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
             if digest in seen_hashes:
                 warnings.append(f"{role} 重复图片已跳过：{source.name}")
                 continue
@@ -376,6 +470,12 @@ def _copy_images(
             shutil.copy2(source, target)
             counts[role] += 1
             stored.append(str(target.relative_to(product_dir)).replace("\\", "/"))
+
+    for tmp in temp_files:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
     return counts, warnings, stored
 
 

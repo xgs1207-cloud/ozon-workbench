@@ -110,6 +110,93 @@ class CollectorApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 422, response.text)
 
+    # ---- Edge 插件适配：新端点 + 插件载荷形状 ----
+
+    def test_workbench_summary(self):
+        response = self.client.get("/api/workbench/summary")
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["product_count"], 0)
+        self.assertIn("ready_shop_count", body)
+
+    def test_collector_duplicates_endpoint(self):
+        # 未入库
+        nope = self.client.get("/api/collector/duplicates", params={"source_url": SOURCE_URL})
+        self.assertEqual(nope.status_code, 200)
+        self.assertFalse(nope.json()["exists"])
+        # 入库后查重命中
+        self.client.post("/api/collector/products", json=PAYLOAD)
+        hit = self.client.get("/api/collector/duplicates", params={"source_url": SOURCE_URL})
+        self.assertTrue(hit.json()["exists"])
+        self.assertEqual(hit.json()["product_id"], "P000001")
+
+    def test_ozon_reference_page_endpoint(self):
+        response = self.client.post(
+            "/api/collector/ozon-reference-page",
+            json={"source_url": "https://www.ozon.ru/product/123", "title": "test", "image_urls": ["https://x/1.jpg"]},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["status"], "waiting_ai_design")
+        self.assertTrue(body["task"]["task_id"].startswith("ref-"))
+
+    def test_ozon_reference_page_missing_url_returns_422(self):
+        response = self.client.post("/api/collector/ozon-reference-page", json={"title": "x"})
+        self.assertEqual(response.status_code, 422)
+
+    def test_extension_payload_shape(self):
+        """Edge 插件 POST 的载荷：title_cn / ozon_category_selection / main_images(detail_images) URL / product_attributes 数组 / sku.purchase_price。"""
+        ext_payload = {
+            "source_url": SOURCE_URL,
+            "title_cn": "插件采集的纯棉床单",
+            "ozon_category_selection": {
+                "category_id": "17028731",
+                "type_id": "92612",
+                "category_path_zh": "住宅和花园/床上用品/床单",
+                "category_path": ["住宅和花园", "床上用品", "床单"],
+            },
+            "product_attributes": [
+                {"name": "材质", "value": "100% 棉"},
+                {"name": "规格", "value": "200x200 cm"},
+            ],
+            "main_images": [
+                {"url": "https://cbu01.alicdn.com/img/ibank/invalid-main.jpg"},
+                "https://cbu01.alicdn.com/img/ibank/invalid-main2.jpg",
+            ],
+            "detail_images": [{"url": "https://cbu01.alicdn.com/img/ibank/invalid-detail.jpg"}],
+            "skus": [
+                {"sku_id": "SKU-001", "sku_name": "白色 200x200", "purchase_price": 35.5, "price_source": "sku"},
+                {"sku_id": "SKU-002", "sku_name": "灰色 200x200", "purchase_price": 36, "image_url": "https://cbu01.alicdn.com/img/ibank/invalid-sku.jpg"},
+            ],
+            "selected_sku_ids": ["SKU-001", "SKU-002"],
+        }
+        response = self.client.post("/api/collector/products", json=ext_payload)
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["counts"]["skus"], 2)
+        # 远程图在测试环境下下载失败 → 计数为 0 但有警告，不阻断入库
+        self.assertEqual(body["counts"]["main_images"], 0)
+        self.assertTrue(any("下载失败" in w for w in body["warnings"]))
+        # 类目映射正确
+        self.assertEqual(body["ozon_category"]["category_id"], "17028731")
+        self.assertEqual(body["ozon_category"]["type_id"], "92612")
+
+        # 回读 source.json 验证 title / 属性落盘
+        source = json.loads((self.root / "products" / "P000001" / "input" / "source.json").read_text(encoding="utf-8"))
+        self.assertEqual(source["title_zh"], "插件采集的纯棉床单")
+        self.assertEqual(source["selected_category"]["category_id"], "17028731")
+        self.assertEqual(source["attributes_zh"]["raw"]["材质"], "100% 棉")
+        self.assertEqual(source["skus"][0]["purchase_price_cny"], 35.5)
+
+    def test_redirect_routes(self):
+        for path in ("/1688-collection", "/ozon-reference", "/command-center"):
+            response = self.client.get(path, follow_redirects=False)
+            self.assertIn(response.status_code, (303, 307), f"{path} -> {response.status_code}")
+            self.assertTrue(response.headers["location"].startswith("/"))
+
 
 if __name__ == "__main__":
     unittest.main()

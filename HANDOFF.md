@@ -4,7 +4,7 @@
 > 所有"未完成"都写清了缺什么、谁来做、怎么做完。
 > 读完这份 + 跑一遍 §2 的自检，你应该能在 15 分钟内接手并继续开发。
 
-最后更新：2026-10（真提交已跑通那一次）。
+最后更新：2026-10（Edge 采集插件接入 + 操作台 UI 按功能逻辑重排）。
 
 ---
 
@@ -33,6 +33,7 @@ Seerfar 采词 → 热度/竞争筛选 → 按类目建关键词库 → 选品�
 | SSH 私钥 | `D:\AI作图\ozonfinancedeploy.pem` |
 | 服务端配置/密钥 | `/etc/ozon-workbench.env`（`root:ubuntu`，`640`）——**只读用，永不打印、永不提交** |
 | 网页操作台 | 本机开隧道后访问 `http://127.0.0.1:8766/`：`ssh -i "D:\AI作图\ozonfinancedeploy.pem" -N -L 8766:127.0.0.1:8766 ubuntu@43.132.190.110` |
+| 1688 采集插件 | `collector/edge-extension/`，Edge 加载已解压扩展；默认地址 `http://127.0.0.1:8766`（需开隧道）。详见 `collector/edge-extension/README.md` |
 
 **两个必须知道的坑**：
 
@@ -82,7 +83,8 @@ ssh -i $key ubuntu@43.132.190.110 "cd /opt/ozon-workbench && bash deploy/with-en
 | 生图模型 | `doubao-seedream-5-0-260128`（该账号可直接调用；要求 **≥3.69M 像素**，现用 `1920x2560`，出图后归一化 900×1200） |
 | 关键词库 | 773 行 Seerfar 真实数据 → 24/24 列 → **121 个达标词**；`keyword-library/17028731-92612.jsonl` |
 | 真实类目 | 床单 → `category_id 17028731 / type_id 92612`（路径 住宅和花园→床上用品→床单）；43 个真实属性、3 个必填 |
-| 网页操作台 | `web/console.html`（单文件、零依赖）+ API：`GET /`、`/api/workbench/{steps,stores}`、`products/{id}/{summary,preflight,verify,publish-images,submit}` |
+| 网页操作台 | `web/console.html`（单文件、零依赖）+ API：`GET /`、`/api/workbench/{steps,stores,summary,doctor}`、`products/{id}/{summary,skus,keywords,copy,artifacts,publications,preflight,verify,publish-images,submit,run}`、`collector/{products,duplicates,ozon-reference-page}` |
+| 1688 采集插件 | `collector/edge-extension/`（MV3 Edge 插件，从原项目复用）：1688 页面抓标题/SKU/主图/详情图/属性 → 页面内抽屉选 SKU（≤10）+ 选 Ozon 类目 → 直接 POST `/api/collector/products` 入库（服务端带 Referer 下载图片）。也支持 Ozon 参考页采集。 |
 | 测试 | **本机 751 OK**（Python 3.14.7，skip 56；Python 3.11 上全 passed）；服务器同套（Python 3.14，skip 4） |
 
 ### 3.2 服务器上的商品
@@ -100,9 +102,9 @@ P000006  UPLOADED         completed 15/16   ← ★ 已真实上线（见 §3.1�
 
 | # | 事项 | 卡在哪 | 怎么做完 |
 |---|---|---|---|
-| 1 | **1688 真实采集**（用户指定链接 `offer/1072823232979`） | 服务器侧被 1688 反爬拦（返回 1KB `punish` 页），**必须在用户浏览器里跑** | 用户打开商品页 → F12 Console → 粘贴 `collector/capture_1688.js` 全文 → 下载 `capture-<offerId>.json` → 交给我们：`python -m collector.fetch_images --json <json> --out D:\capture\p1` → 传服务器 → `python -m collector.push_capture --folder … --api http://127.0.0.1:8766` |
+| 1 | ~~1688 真实采集~~ ✅ 已用 Edge 插件解决 | 原控制台脚本流程仍可用（`collector/capture_1688.js` + `fetch_images.py` + `push_capture.py`），但推荐用 `collector/edge-extension/`：浏览器加载已解压扩展 → 开 SSH 隧道（8766）→ 1688 商品页点插件采集 → 选 SKU + 类目 → 自动入库。详见 `collector/edge-extension/README.md`。 | — |
 | 2 | **多店铺上传** | 第二家店的 `OZON_SHOP_B_CLIENT_ID/API_KEY` 还没配（`config/shops.json` 里 `shop-b` 仍 `enabled=false`） | 用户在 `/etc/ozon-workbench.env` 补两个变量 → `python -m pipeline.stores --enable shop-b` → 同一商品跑一次提交即可（机制已支持按店铺独立载荷+台账） |
-| 3 | **真图替换占位图** | P000006 的详情图还是占位图（生图时参考图是占位图，所以出来的是白盒子） | 拿到 #1 的真照片后重跑 `image_generation`（`image_qc` 语义分也会随之改善；当前 `decision=revise, score=15`） |
+| 3 | **真图替换占位图** | P000006 的详情图还是占位图（生图时参考图是占位图，所以出来的是白盒子） | 用 #1 的 Edge 插件重新采集一个真商品（会自动下载真照片），再跑 `image_generation`（`image_qc` 语义分也会随之改善；当前 `decision=revise, score=15`） |
 | 4 | **图片语义质检** | `image_qc` 的 4 个语义维度未评分（显式标 `not_configured`） | 接一个视觉模型（方舟有 vision 模型但当前账号多为 Shutdown，需先在控制台开通接入点） |
 | 5 | **型号名称（9048）** | 来源与字典都没有，只能人工定 | 已做人工确认入口：`products/<id>/input/human-confirmations.json` → `{"attributes": {"9048": "你的型号"}}`（**只补空缺、不覆盖机器值**） |
 | 6 | **批量上架操作台** | 现在一次选一个商品 | 在 `web/console.html` 加多选 + 逐商品调用现有 `/run`、`/publish-images`、`/submit` |
@@ -118,6 +120,7 @@ ozon-workbench/
 ├── web/console.html          ★ 网页操作台（单文件、零依赖、无构建）
 ├── keyword_library/          关键词库（按类目 JSONL、分位数打分、CLI）
 ├── collector/
+│   ├── edge-extension/       ★ Edge 采集插件（MV3）：1688/Ozon 页面采集 + SKU 抽屉 + 类目选择，直接 POST 入库
 │   ├── seerfar_xlsx.py       Seerfar 导出表 → 关键词库
 │   ├── sourcing.py           选品清单（含品牌观察名单 classify_keyword）
 │   ├── collection_plan.py    采集清单（哪些词已采集）

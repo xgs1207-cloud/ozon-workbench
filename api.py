@@ -23,11 +23,13 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from collector.ingest import (
     CaptureValidationError,
     DuplicateCaptureError,
+    find_existing_capture,
     import_folder,
     ingest_capture,
 )
@@ -801,6 +803,91 @@ def workbench_doctor(product_id: str | None = None) -> dict[str, Any]:
     from pipeline.doctor import run_doctor
 
     return run_doctor(PRODUCTS_ROOT, product_ids=[product_id] if product_id else None)
+
+
+@app.get("/api/workbench/summary")
+def workbench_summary() -> dict[str, Any]:
+    """Edge 插件「测试连接」用的轻量状态：只说服务活着、有多少商品、店铺是否就绪。"""
+    from pipeline.stores import ensure_registry, shop_summary
+
+    product_ids = _list_product_ids()
+    shops = shop_summary(ensure_registry(None))
+    ready_shops = [s for s in shops if s.get("enabled") and s.get("credentials_ready")]
+    return {
+        "ok": True,
+        "version": app.version,
+        "products_root": str(PRODUCTS_ROOT),
+        "product_count": len(product_ids),
+        "shop_count": len(shops),
+        "ready_shop_count": len(ready_shops),
+        "ready_shops": [s.get("id") for s in ready_shops],
+    }
+
+
+@app.get("/api/collector/duplicates")
+def collector_duplicates(source_url: str = Query(...)) -> dict[str, Any]:
+    """Edge 插件采集前查重：同一 1688 offer 是否已入库。"""
+    existing = find_existing_capture(PRODUCTS_ROOT, source_url)
+    if existing is None:
+        return {"exists": False, "source_url": source_url}
+    return {"exists": True, "source_url": source_url, "product_id": existing["product_id"]}
+
+
+@app.post("/api/collector/ozon-reference-page")
+def collector_ozon_reference(payload: dict[str, Any]) -> dict[str, Any]:
+    """Edge 插件采集 Ozon 参考页：把页面数据存到 references/，返回 task_id 供操作台打开。
+
+    这是只读采集（不调 Ozon 写接口），数据用于 AI 商品卡生成时参考竞品文案/图片。
+    """
+    import uuid as _uuid
+
+    source_url = str(payload.get("source_url") or "").strip()
+    if not source_url:
+        raise HTTPException(status_code=422, detail="缺少 source_url")
+    ref_dir = Path(__file__).resolve().parent / "references"
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    task_id = f"ref-{_uuid.uuid4().hex[:12]}"
+    ref_file = ref_dir / f"{task_id}.json"
+    ref_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "ok": True,
+        "status": "waiting_ai_design",
+        "task": {"task_id": task_id, "source_url": source_url, "path": str(ref_file)},
+        "title": payload.get("title") or payload.get("title_ru") or "",
+    }
+
+
+# --- Edge 插件「打开共享工作台」的入口路由：跳到单文件操作台 ---
+@app.get("/1688-collection", include_in_schema=False)
+def redirect_1688_collection(product_id: str | None = None, task_id: str | None = None) -> Any:
+    params = []
+    if product_id:
+        params.append(f"product_id={product_id}")
+    if task_id:
+        params.append(f"task_id={task_id}")
+    suffix = f"?{'&'.join(params)}" if params else ""
+    return RedirectResponse(url=f"/{suffix}", status_code=303)
+
+
+@app.get("/ozon-reference", include_in_schema=False)
+def redirect_ozon_reference(product_id: str | None = None, task_id: str | None = None) -> Any:
+    params = ["view=ozon-reference"]
+    if product_id:
+        params.append(f"product_id={product_id}")
+    if task_id:
+        params.append(f"task_id={task_id}")
+    return RedirectResponse(url=f"/?{'&'.join(params)}", status_code=303)
+
+
+@app.get("/command-center", include_in_schema=False)
+def redirect_command_center(task_center: str | None = None, product_id: str | None = None) -> Any:
+    params = []
+    if task_center:
+        params.append(f"task_center={task_center}")
+    if product_id:
+        params.append(f"product_id={product_id}")
+    suffix = f"?{'&'.join(params)}" if params else ""
+    return RedirectResponse(url=f"/{suffix}", status_code=303)
 
 
 @app.post("/api/workbench/products/{product_id}/run")

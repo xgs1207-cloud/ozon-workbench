@@ -187,6 +187,23 @@ class WithEnvHelperTests(unittest.TestCase):
         text = (ROOT / "pipeline" / "oss_cos.py").read_text(encoding="utf-8")
         self.assertIn("with-env.sh", text)
 
+    def test_cos_permission_diagnostic_is_valid_python(self):
+        import ast
+
+        path = DEPLOY / "cos-perm-diag.py"
+        self.assertTrue(path.is_file())
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        self.assertTrue(tree.body)
+        text = path.read_text(encoding="utf-8")
+        # 诊断脚本不能把密钥写死或打印出来
+        self.assertNotIn("AKID", text.replace("AKID***", ""))
+        self.assertIn("os.environ", text)
+
+    def test_deploy_readme_documents_probe_and_diag(self):
+        text = (DEPLOY / "README.md").read_text(encoding="utf-8")
+        self.assertIn("--probe", text)
+        self.assertIn("cos-perm-diag.py", text)
+
 
 class DeploymentGotchaTests(unittest.TestCase):
     """两个只有真部署才会暴露的坑，锁成测试防止回归。"""

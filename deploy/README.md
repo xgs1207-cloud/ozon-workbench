@@ -101,8 +101,14 @@ sudo systemctl restart ozon-workbench-api
 
 # 4.3 ★ 先自检：PUT 探针 → 匿名 GET（模拟 Ozon 抓取）→ DELETE
 cd /opt/ozon-workbench
-.venv/bin/python -m pipeline.oss_cos --check
+bash deploy/with-env.sh .venv/bin/python -m pipeline.oss_cos --check
 #   ok=true 才算通过；anonymous_get=http_403 说明桶/前缀不是公有读
+
+# 4.3b 如果 --check 报 AccessDenied：先跑权限矩阵，定位是"没授权"还是"前缀不对"
+bash deploy/with-env.sh .venv/bin/python deploy/cos-perm-diag.py
+
+# 4.3c 免密钥探测（只验"Ozon 能不能抓到"，不需要密钥）
+bash deploy/with-env.sh .venv/bin/python -m pipeline.oss_cos --probe --key ozon-images/P000002/main-S1.png
 
 # 4.4 正式上传
 .venv/bin/python -m pipeline.oss_cos --product-dir products/P000001

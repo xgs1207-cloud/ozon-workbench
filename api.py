@@ -20,7 +20,7 @@ import re
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -1111,3 +1111,66 @@ def submit_product(product_id: str, request: StoreActionRequest) -> dict[str, An
     except Exception as error:  # noqa: BLE001 - 真提交失败要如实回给界面
         raise HTTPException(status_code=422, detail=f"提交失败：{error}") from error
     return {"ok": True, "store": store, "report": report}
+
+@app.get("/api/workbench/products/{product_id}/summary")
+def product_summary(product_id: str) -> dict[str, Any]:
+    """商品要点（只读）：文案、属性、价格、图片、质检、阻断项 —— 给操作台"看要点"用。"""
+    directory = _require_product(product_id)
+    output = directory / "output"
+
+    copy = _read_json_file(output / "copy-ru.json")
+    bundle = copy.get("copy_bundle") if isinstance(copy.get("copy_bundle"), Mapping) else {}
+    pricing = _read_json_file(output / "pricing-result.json")
+    attributes = _read_json_file(output / "ozon-attributes-final.json")
+    urls = _read_json_file(output / "image-public-urls.json")
+    qc = _read_json_file(output / "image-qc-report.json")
+    plan = _read_json_file(output / "image-plan.json")
+    category = _read_json_file(output / "ozon-category.json")
+
+    price_rows = {str(item.get("sku_id")): item for item in (pricing.get("skus") or []) if isinstance(item, Mapping)}
+    variants = []
+    for item in attributes.get("attributes_by_sku", {}) or {}:
+        row = price_rows.get(str(item)) or {}
+        variants.append(
+            {
+                "sku_id": str(item),
+                "color": (attributes.get("attributes_by_sku", {}).get(item) or [{}])[0].get("value")
+                if attributes.get("attributes_by_sku", {}).get(item)
+                else None,
+                "price_cny": row.get("selling_price_cny"),
+                "price_rub": row.get("selling_price_rub"),
+            }
+        )
+
+    image_urls = urls.get("urls") if isinstance(urls.get("urls"), Mapping) else {}
+    return {
+        "ok": True,
+        "product_id": product_id,
+        "category": category,
+        "title_ru": bundle.get("title_ru") or copy.get("title_ru"),
+        "description_ru": bundle.get("description_ru") or copy.get("description_ru") or "",
+        "description_sections": bundle.get("description_sections") or {},
+        "hashtags": bundle.get("hashtags") or [],
+        "primary_keywords": bundle.get("primary_keywords") or [],
+        "attributes": attributes.get("common_attributes") or [],
+        "required_summary": attributes.get("required_summary") or {},
+        "variants": variants,
+        "images": image_urls,
+        "planned_slots": [
+            str(item.get("slot"))
+            for item in ((plan.get("main_images") or []) + (plan.get("detail_images") or []))
+            if isinstance(item, Mapping)
+        ],
+        "image_qc": {"decision": qc.get("decision"), "score": qc.get("score"), "blocking": qc.get("blocking") or []},
+        "blockers": _blockers_for(directory),
+    }
+
+def _blockers_for(directory: Path) -> list[str]:
+    """复用 doctor 的商品级诊断，给操作台显示"还差什么"。失败时如实返回原因，不吞掉。"""
+    try:
+        from pipeline.doctor import diagnose_product
+        from pipeline.stores import enabled_shop_ids, ensure_registry
+
+        return list(diagnose_product(directory, enabled_store_ids=enabled_shop_ids(ensure_registry(None))).get("blockers") or [])
+    except Exception as error:  # noqa: BLE001
+        return [f"阻断项检查失败：{type(error).__name__}: {error}"]

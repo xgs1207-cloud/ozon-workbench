@@ -49,8 +49,26 @@
     <button onclick="act('preflight')">3. 提交前预检</button>
     <button onclick="act('submit')" class="danger">4. 真实提交（写 Ozon）</button>
     <button onclick="act('verify')">5. 提交后核对</button>
+    <button onclick="showSummary()">看要点（文案/属性/图片）</button>
   </div>
   <pre id="detailOut">（选一个动作）</pre>
+
+  <div id="summaryBox" class="hidden">
+    <h3 style="margin:14px 0 6px">俄文标题</h3>
+    <div id="sumTitle"></div>
+    <h3 style="margin:14px 0 6px">简介</h3>
+    <pre id="sumDesc"></pre>
+    <h3 style="margin:14px 0 6px">标签 / 主关键词</h3>
+    <div id="sumTags" class="muted"></div>
+    <h3 style="margin:14px 0 6px">上架属性（必填填写情况）</h3>
+    <table id="sumAttrs"><thead><tr><th>属性 id</th><th>名称</th><th>值</th><th>来源</th></tr></thead><tbody></tbody></table>
+    <h3 style="margin:14px 0 6px">价格 / 变体</h3>
+    <table id="sumVariants"><thead><tr><th>SKU</th><th>颜色</th><th>CNY</th><th>RUB</th></tr></thead><tbody></tbody></table>
+    <h3 style="margin:14px 0 6px">图片预览（对象存储公网地址）</h3>
+    <div id="sumImages"></div>
+    <h3 style="margin:14px 0 6px">还差什么</h3>
+    <div id="sumBlockers" class="muted"></div>
+  </div>
 </div>
 
 <h2>日志</h2>
@@ -142,6 +160,35 @@ async function act(action) {
   } catch (error) {
     $('detailOut').textContent = JSON.stringify(error.data || { error: error.message }, null, 2);
     log(`${product} → ${action} 失败`, error.data);
+  }
+}
+
+async function showSummary() {
+  if (!state.current) return;
+  $('summaryBox').classList.remove('hidden');
+  try {
+    const { product } = { product: await api('GET', `/api/workbench/products/${state.current}/summary`) };
+    $('sumTitle').textContent = product.title_ru || '（还没有俄文标题：先跑流程）';
+    $('sumDesc').textContent = (product.description_ru || '（还没有简介）').slice(0, 1800);
+    $('sumTags').textContent = `标签：${(product.hashtags || []).join(' ') || '—'}｜主关键词：${(product.primary_keywords || []).join('、') || '—'}`;
+    $('sumAttrs').querySelector('tbody').innerHTML = (product.attributes || []).map((item) => `<tr>
+        <td>${item.attribute_id}</td><td>${item.attribute_name || ''}</td>
+        <td><b>${item.value ?? ''}</b></td><td class="muted">${item.mapping_method || item.source || ''}</td></tr>`).join('')
+      + `<tr><td colspan="4" class="muted">必填：${JSON.stringify(product.required_summary)}</td></tr>`;
+    $('sumVariants').querySelector('tbody').innerHTML = (product.variants || []).map((item) => `<tr>
+        <td>${item.sku_id}</td><td>${item.color ?? ''}</td><td>${item.price_cny ?? ''}</td><td>${item.price_rub ?? ''}</td></tr>`).join('');
+    const images = product.images || {};
+    $('sumImages').innerHTML = Object.keys(images).map((slot) =>
+      `<span style="display:inline-block;margin:0 8px 8px 0;text-align:center">
+         <img src="${images[slot]}" style="height:120px;border:1px solid var(--line);border-radius:6px" loading="lazy" /><br>
+         <span class="muted" style="font-size:12px">${slot}</span></span>`).join('') || '<span class="muted">还没有发布图片</span>';
+    const qc = product.image_qc || {};
+    $('sumBlockers').innerHTML = ((product.blockers || []).length
+      ? (product.blockers || []).map((item) => `<div class="bad">⛔ ${item}</div>`).join('')
+      : '<div class="ok">✅ 没有阻断项</div>')
+      + `<div class="muted">图片质检：${qc.decision || '?'}（分数 ${qc.score ?? '?'}）｜计划槽位 ${(product.planned_slots || []).length} 个｜已发布 ${Object.keys(images).length} 张</div>`;
+  } catch (error) {
+    log('看要点失败', error.data || error.message);
   }
 }
 

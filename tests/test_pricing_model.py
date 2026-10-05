@@ -139,13 +139,23 @@ class ConfigTests(unittest.TestCase):
 
     def test_example_config_is_tracked_by_git(self):
         """踩过的坑：config/ 被 .gitignore 排除 → git archive 部署时示例文件根本没进包，
-        本地测试却因为"文件就在磁盘上"而通过。所以示例文件必须放在被跟踪的目录，并锁一条测试。"""
+        本地测试却因为"文件就在磁盘上"而通过。所以示例文件必须放在被跟踪的目录，并锁一条测试。
+
+        注意：服务器是用 tar 包部署的**非 git 工作区**，这种环境下这条测试要跳过（否则必失败）。
+        """
         import shutil
         import subprocess
 
         if not shutil.which("git"):
             self.skipTest("本机没有 git")
         root = pathlib.Path(__file__).resolve().parents[1]
+        inside = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+            text=True,
+        )
+        if inside.returncode != 0 or inside.stdout.strip() != "true":
+            self.skipTest("当前目录不是 git 工作区（例如 tar 部署的服务器）")
         result = subprocess.run(
             ["git", "-C", str(root), "ls-files", "--error-unmatch", "deploy/pricing.example.json"],
             capture_output=True,

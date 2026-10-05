@@ -1051,21 +1051,21 @@ def publish_images(product_id: str, dry_run: bool = False) -> dict[str, Any]:
 
 
 @app.post("/api/workbench/products/{product_id}/preflight")
-def preflight_product(product_id: str, request: StoreActionRequest) -> dict[str, Any]:
+def preflight_product(product_id: str, request: StoreActionRequest | None = None) -> dict[str, Any]:
     """提交前预检（只读：店铺/凭据 + production 载荷 + 图片匿名可达性 + 币种）。"""
     from pipeline.preflight import preflight
 
     directory = _require_product(product_id)
-    return {"ok": True, "report": preflight(directory, shop=_store_for(directory, request.store))}
+    return {"ok": True, "report": preflight(directory, shop=_store_for(directory, request.store if request else None))}
 
 
 @app.post("/api/workbench/products/{product_id}/verify")
-def verify_product(product_id: str, request: StoreActionRequest) -> dict[str, Any]:
+def verify_product(product_id: str, request: StoreActionRequest | None = None) -> dict[str, Any]:
     """提交后核对（只读）：读回 Ozon 上的 SKU / 属性 / 图片 / 变体合并。"""
     from pipeline.ozon_verify import verify_submitted
 
     directory = _require_product(product_id)
-    return {"ok": True, "report": verify_submitted(directory, store_id=_store_for(directory, request.store))}
+    return {"ok": True, "report": verify_submitted(directory, store_id=_store_for(directory, request.store if request else None))}
 
 
 @app.post("/api/workbench/products/{product_id}/submit")

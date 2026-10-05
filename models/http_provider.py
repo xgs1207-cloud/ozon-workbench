@@ -165,6 +165,41 @@ class OpenAICompatibleTransport:
 # --------------------------------------------------------------------- JSON 提取与修复
 
 
+def looks_truncated(text: str) -> bool:
+    """粗判回复是否被 ``max_tokens`` 截断（花括号没配平 / 结尾不是 ``}``）。
+
+    真机踩坑：copy 任务的回复有 11000+ 字符，撞上 max_tokens 上限后被截断 →
+    ``extract_json`` 直接失败，重试还是同样的长度、同样失败。识别出来后可以让重试
+    **明确要求精简**，而不是机械重复。
+    """
+    body = (text or "").strip()
+    if not body:
+        return False
+    if body.endswith("```"):
+        body = body[:-3].rstrip()
+    if not body.endswith("}"):
+        return True
+    depth = 0
+    in_string = False
+    escaped = False
+    for char in body:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+    return depth != 0
+
+
 def extract_json(text: str) -> dict[str, Any] | None:
     """从模型输出里抠出 JSON 对象：容忍 ```json 围栏、前后废话、嵌套花括号。"""
     if not isinstance(text, str):
@@ -639,7 +674,14 @@ class HttpModelProvider:
             payload = extract_json(text)
             fixes: list[str] = []
             if payload is None:
-                problems = ["输出不是合法 JSON 对象（可能需要去掉解释文字或代码围栏）"]
+                if looks_truncated(text):
+                    problems = [
+                        "输出被截断（超过单次回复上限），JSON 不完整："
+                        "请**精简内容**后重新输出完整 JSON —— 描述正文控制在 1200–2000 字符、"
+                        "每个 section 80–250 字符、bullets_ru 最多 5 条，但所有必填字段一个都不能少"
+                    ]
+                else:
+                    problems = ["输出不是合法 JSON 对象（可能需要去掉解释文字或代码围栏）"]
             else:
                 if schema is not None:
                     payload, fixes = normalize_payload(payload, schema)
@@ -756,10 +798,10 @@ class HttpModelProvider:
             "请基于采集数据、商品分析与已选关键词，产出俄文标题/简介/关键词三份文档 + copy_bundle。\n"
             f"{_schema_hint('title-ru')}\n{_schema_hint('description-ru')}\n{_schema_hint('keywords-ru')}\n"
             f"{copy_bundle_hint()}\n"
-            "要求：标题 25–120 字符且包含核心词；简介至少 300 字符、五个部分都要写；"
-            "标签（hashtags）只能是西里尔字母、形如 #термос（不含空格/数字/拉丁字母）；"
+            "要求：标题 25–120 字符且包含核心词；简介正文 1200–2000 字符（每个 section 80–250 字符）；"
+            "标签（hashtags）5–10 个，只能西里尔字母、形如 #термос（不含空格/数字/拉丁字母）；"
             "`description_ru.source_refs` 至少 3 条、`title_ru.evidence` 至少 1 条，都是字符串数组；"
-            "不要出现中文、拼音或未证实的参数。\n\n"
+            "`bullets_ru` 最多 5 条；不要出现中文、拼音或未证实的参数。\n\n"
             + _context_block(
                 source=request.source,
                 analysis=request.analysis,

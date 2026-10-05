@@ -365,6 +365,22 @@ class ProviderBehaviourTests(unittest.TestCase):
         # 系统字段不该让模型输出
         self.assertIn("不要输出", prompt)
 
+    def test_truncated_reply_is_detected_and_retry_asks_for_shorter_output(self):
+        """真机踩坑：copy 回复 11000+ 字符撞 max_tokens 被截断 → 重试必须要求精简，否则白重试。"""
+        from models.http_provider import looks_truncated
+
+        self.assertTrue(looks_truncated('{"title_ru": {"title_ru": "Простыня'))
+        self.assertTrue(looks_truncated('```json\n{"a": 1}\n```extra'))
+        self.assertFalse(looks_truncated('{"a": {"b": 1}}'))
+        self.assertFalse(looks_truncated('```json\n{"a": {"b": "}"}}\n```'))
+
+        transport = ScriptedTransport(['{"title_ru": {"title_ru": "обрезано', "{}"])
+        provider = HttpModelProvider(transport, max_attempts=2)
+        with self.assertRaises(Exception):
+            provider._call_json(task="russian_copy", user="u", validate=lambda data: ["还是不行"])
+        self.assertIn("输出被截断", transport.calls[1]["user"])
+        self.assertIn("精简内容", transport.calls[1]["user"])
+
     def test_copy_prompt_covers_bundle_rules(self):
         """防漂移：copy_bundle 的形状来自我们自己的规则，必须出现在提示词里。
 

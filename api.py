@@ -1147,11 +1147,16 @@ def product_summary(product_id: str) -> dict[str, Any]:
         "ok": True,
         "product_id": product_id,
         "category": category,
-        "title_ru": bundle.get("title_ru") or copy.get("title_ru"),
-        "description_ru": bundle.get("description_ru") or copy.get("description_ru") or "",
-        "description_sections": bundle.get("description_sections") or {},
-        "hashtags": bundle.get("hashtags") or [],
-        "primary_keywords": bundle.get("primary_keywords") or [],
+        # 文案产物：copy_bundle 里放的是"套件"，标题/简介/标签也可能在顶层（真机实测两种都在）
+        "title_ru": copy.get("title_ru") or bundle.get("title_ru"),
+        "short_title_ru": copy.get("short_title_ru") or bundle.get("short_title_ru"),
+        "description_ru": copy.get("description_ru") or bundle.get("description_ru") or "",
+        "description_sections": copy.get("description_sections") or bundle.get("description_sections") or {},
+        "hashtags": copy.get("hashtags") or copy.get("hashtags_ru") or bundle.get("hashtags") or [],
+        "primary_keywords": copy.get("primary_keywords")
+        or bundle.get("primary_keywords")
+        or copy.get("keywords_ru")
+        or [],
         "attributes": attributes.get("common_attributes") or [],
         "required_summary": attributes.get("required_summary") or {},
         "variants": variants,

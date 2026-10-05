@@ -48,6 +48,43 @@ class ConsoleApiTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_summary_reads_top_level_copy_fields(self):
+        """真机：hashtags/primary_keywords 在 copy-ru.json 顶层（不是 copy_bundle 里），汇总不能读空。"""
+        response = self.client.post(
+            "/api/collector/products",
+            json={
+                "source_url": "https://detail.1688.com/offer/135791357.html",
+                "title_zh": "纯棉床单",
+                "category": {"category_id": "17028731", "type_id": "92612"},
+                "skus": [{"sku_id": "S1", "color_ru": "белый", "purchase_price_cny": 42.0}],
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        product_id = response.json()["product_id"]
+        output = self.root / "products" / product_id / "output"
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "copy-ru.json").write_text(
+            json.dumps(
+                {
+                    "title_ru": "Простыня хлопковая",
+                    "description_ru": "х" * 200,
+                    "hashtags": ["#простыня", "#хлопок"],
+                    "primary_keywords": ["простыня 200х200"],
+                    "description_sections": {"product_value": "…"},
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        (output / "image-public-urls.json").write_text(
+            json.dumps({"urls": {"main-S1": "https://example.com/a.png"}}), encoding="utf-8"
+        )
+        payload = self.client.get(f"/api/workbench/products/{product_id}/summary").json()
+        self.assertEqual(payload["title_ru"], "Простыня хлопковая")
+        self.assertEqual(payload["hashtags"], ["#простыня", "#хлопок"])
+        self.assertEqual(payload["primary_keywords"], ["простыня 200х200"])
+        self.assertEqual(list(payload["images"]), ["main-S1"])
+
     def test_console_page_is_served(self):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)

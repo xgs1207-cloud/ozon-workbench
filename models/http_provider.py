@@ -708,7 +708,7 @@ class HttpModelProvider:
 
     def write_copy_ru(self, request: CopyRequest) -> dict[str, Any]:
         from contracts import validate_contract
-        from rules.validate import validate_copy_bundle
+        from rules.validate import copy_bundle_hint, validate_copy_bundle
 
         def validate(data: dict[str, Any]) -> list[str]:
             problems: list[str] = []
@@ -725,6 +725,7 @@ class HttpModelProvider:
         user = (
             "请基于采集数据、商品分析与已选关键词，产出俄文标题/简介/关键词三份文档 + copy_bundle。\n"
             f"{_schema_hint('title-ru')}\n{_schema_hint('description-ru')}\n{_schema_hint('keywords-ru')}\n"
+            f"{copy_bundle_hint()}\n"
             "要求：标题 25–120 字符且包含核心词；简介至少 300 字符、五个部分都要写；"
             "标签（hashtags）只能是西里尔字母、形如 #термос；不要出现中文、拼音或未证实的参数。\n\n"
             + _context_block(

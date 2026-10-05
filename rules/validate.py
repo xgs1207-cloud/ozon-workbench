@@ -198,6 +198,27 @@ def validate_description_ru(text: Any, *, min_length: int = 80) -> list[str]:
     return problems
 
 
+def copy_bundle_hint() -> str:
+    """``copy_bundle`` 的形状由**本文件的规则**决定，不是契约文件 —— 必须写进模型提示词。
+
+    真机踩坑：提示词没写 copy_bundle 形状时，真模型给出的标题/描述是空的、五个 section 全缺，
+    还写了 ``#простыня200х200`` 这种带数字的标签（规则只允许西里尔字母）。
+    """
+    sections = "、".join(_DESCRIPTION_SECTIONS)
+    return (
+        "输出必须是一个 JSON 对象，同时包含 ``title_ru`` / ``description_ru`` / ``keywords_ru`` 三份文档，"
+        "以及 ``copy_bundle``。**copy_bundle 的形状（硬要求）**：\n"
+        "- `title_ru`：字符串，10–120 字符，必须含核心关键词\n"
+        "- `description_ru`：字符串，至少 300 字符\n"
+        f"- `description_sections`：对象，必须同时包含 {sections}（每个字段至少 10 字符）\n"
+        f"- `hashtags`：数组，最多 {MAX_HASHTAGS} 个，每个形如 `#простыня` —— **只能有西里尔字母**，"
+        "不能含数字、拉丁字母、下划线、连字符\n"
+        "- `primary_keywords`：数组，取自「已选关键词」\n"
+        "- `bullets_ru`：数组（可选），每项 {text_ru, evidence}\n"
+        "禁止：中文/拼音、价格与折扣词、联系方式与外链、最高级绝对化用语（лучший/№1 等）、表情符号。"
+    )
+
+
 def validate_copy_bundle(bundle: Mapping[str, Any]) -> list[str]:
     """把标题/描述/标签的规则串成一个入口，供 handler 调用。"""
     problems: list[str] = []

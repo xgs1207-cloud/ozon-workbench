@@ -365,6 +365,21 @@ class ProviderBehaviourTests(unittest.TestCase):
         # 系统字段不该让模型输出
         self.assertIn("不要输出", prompt)
 
+    def test_copy_prompt_covers_bundle_rules(self):
+        """防漂移：copy_bundle 的形状来自我们自己的规则，必须出现在提示词里。
+
+        真机踩坑：提示词没写形状 → 真模型给的标题/描述为空、五个 section 全缺、
+        标签写成 #простыня200х200（规则只允许西里尔字母）。
+        """
+        from rules.validate import _DESCRIPTION_SECTIONS, copy_bundle_hint
+
+        hint = copy_bundle_hint()
+        for name in _DESCRIPTION_SECTIONS:
+            self.assertIn(name, hint, f"section {name} 没写进提示词")
+        self.assertIn("西里尔字母", hint)
+        self.assertIn("description_sections", hint)
+        self.assertIn("不能含数字", hint)
+
     def test_schema_hint_covers_array_item_required_fields(self):
         """真机踩过：数组元素内部的必填字段没告诉模型 → 模型漏 claim_type，连续 3 次过不了校验。"""
         from models.http_provider import _schema_hint

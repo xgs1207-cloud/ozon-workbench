@@ -69,6 +69,12 @@ def _normalize(value: Any, schema: Mapping[str, Any], *, path: str, notes: list[
             return {}
         return None
 
+    # 契约要数组、模型给了标量字符串 → 包成单元素数组（"материал: хлопок" → ["хлопок"]，无损）
+    if isinstance(value, str) and (declared & _ARRAY_TYPES):
+        notes.append(f"{path}: 字符串 → [字符串]（契约要求 array）")
+        item_schema = schema.get("items")
+        return [_normalize(value, item_schema, path=f"{path}[0]", notes=notes)] if isinstance(item_schema, Mapping) else [value]
+
     if isinstance(value, Mapping) and ("object" in declared or _properties(schema) or not declared):
         properties = _properties(schema)
         if not properties:
@@ -82,6 +88,14 @@ def _normalize(value: Any, schema: Mapping[str, Any], *, path: str, notes: list[
             else:
                 notes.append(f"{path}.{key}: 契约里没有这个字段，已丢弃")
         return cleaned
+
+    # 契约要字符串、模型给了对象 → 取里面唯一的字符串值（例如 {"path": "input/source.json"} → "input/source.json"）
+    if isinstance(value, Mapping) and "string" in declared:
+        candidates = [item for item in value.values() if isinstance(item, str) and item.strip()]
+        if len(candidates) == 1:
+            notes.append(f"{path}: 对象 → 其中的字符串 {candidates[0]!r}（契约要求 string）")
+            return candidates[0]
+        return value
 
     if isinstance(value, list):
         item_schema = schema.get("items")

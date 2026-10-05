@@ -82,6 +82,32 @@ class NormalizeUnitTests(unittest.TestCase):
         self.assertEqual(normalized["facts"], {})
         self.assertTrue(any("facts" in item and "{}" in item for item in notes), notes)
 
+    def test_string_where_array_expected_is_wrapped(self):
+        """真模型会把数组写成字符串（materials/ functions）→ 包成单元素数组是无损修正。"""
+        schema = {
+            "type": "object",
+            "properties": {"materials": {"type": "array", "items": {"type": "string"}}},
+        }
+        normalized, notes = normalize_payload({"materials": "хлопок, полиэстер"}, schema)
+        self.assertEqual(normalized["materials"], ["хлопок, полиэстер"])
+        self.assertTrue(any("字符串 → [字符串]" in item for item in notes), notes)
+
+    def test_object_where_string_expected_takes_inner_string(self):
+        """真模型会把 source_refs 写成 [{'path': 'input/source.json'}] → 取内部字符串。"""
+        schema = {
+            "type": "object",
+            "properties": {"source_refs": {"type": "array", "items": {"type": "string"}}},
+        }
+        normalized, notes = normalize_payload({"source_refs": [{"path": "input/source.json"}]}, schema)
+        self.assertEqual(normalized["source_refs"], ["input/source.json"])
+        self.assertTrue(any("对象 → 其中的字符串" in item for item in notes), notes)
+
+    def test_object_with_several_strings_is_left_alone(self):
+        schema = {"type": "object", "properties": {"ref": {"type": "string"}}}
+        normalized, notes = normalize_payload({"ref": {"a": "x", "b": "y"}}, schema)
+        self.assertIsInstance(normalized["ref"], dict)
+        self.assertEqual(notes, [])
+
     def test_real_product_analysis_contract_is_normalisable(self):
         """用真契约（product-analysis）验证：真模型那种错误形状能被修好。"""
         schema = load_contract("product-analysis")

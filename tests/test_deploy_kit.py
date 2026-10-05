@@ -96,6 +96,44 @@ class DeployKitTests(unittest.TestCase):
         self.assertIn("shops.example.json", text)
 
 
+class ShellSyntaxTests(unittest.TestCase):
+    """有 bash 就做语法检查（部署脚本不该带着语法错误上服务器）。"""
+
+    BASH_CANDIDATES = (
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files\Git\usr\bin\bash.exe",
+        "/bin/bash",
+        "/usr/bin/bash",
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        import shutil as _shutil
+
+        found = next((path for path in cls.BASH_CANDIDATES if pathlib.Path(path).is_file()), None)
+        if not found:
+            found = _shutil.which("bash")
+        cls.bash = found
+
+    def check(self, relative: str) -> None:
+        if not self.bash:
+            self.skipTest("本机没有 bash")
+        import subprocess
+
+        result = subprocess.run(
+            [self.bash, "-n", str(ROOT / relative)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, f"{relative} 语法错误：{result.stderr}")
+
+    def test_install_script_syntax(self):
+        self.check("deploy/install.sh")
+
+    def test_contract_fetcher_syntax(self):
+        self.check("contracts/fetch_contracts.sh")
+
+
 class ObjectStorageCliDocsTests(unittest.TestCase):
     def test_readme_documents_local_storage_option(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

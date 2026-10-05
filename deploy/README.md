@@ -77,7 +77,33 @@ curl -s http://127.0.0.1:8766/health
 
 ---
 
-## 4. 图片存储（你的服务器 + nginx + https）
+## 4. 图片存储（腾讯云 COS ／ 自建 nginx，二选一）
+
+### 方案 A：腾讯云 COS（你选定的方案）
+
+```bash
+# 4.1 在腾讯云控制台建一个 bucket（建议「公有读私有写」，否则 Ozon 抓不到图片）
+#     记下：bucket 名（形如 my-bucket-1250000000）与 region（形如 ap-hongkong）
+
+# 4.2 把凭据写进环境变量文件（不要写进仓库）
+sudo nano /etc/ozon-workbench.env
+#   COS_SECRET_ID=AKIDxxx
+#   COS_SECRET_KEY=xxx
+#   COS_BUCKET=my-bucket-1250000000
+#   COS_REGION=ap-hongkong
+#   COS_KEY_PREFIX=ozon-images
+sudo systemctl restart ozon-workbench-api
+
+# 4.3 ★ 先自检：PUT 探针 → 匿名 GET（模拟 Ozon 抓取）→ DELETE
+cd /opt/ozon-workbench
+.venv/bin/python -m pipeline.oss_cos --check
+#   ok=true 才算通过；anonymous_get=http_403 说明桶/前缀不是公有读
+
+# 4.4 正式上传
+.venv/bin/python -m pipeline.oss_cos --product-dir products/P000001
+```
+
+### 方案 B：自建 nginx + Let's Encrypt
 
 ```bash
 # 4.1 域名解析到本机 IP 后申请证书
@@ -87,16 +113,14 @@ sudo certbot --nginx -d img.example.com
 sudo nginx -t && sudo systemctl reload nginx
 
 # 4.3 把生成的图片同步过去（在商品目录上跑；--dry-run 可以先看要做什么）
-sudo -u ozon /opt/ozon-workbench/.venv/bin/python -m pipeline.oss_local \
+sudo -u ubuntu /opt/ozon-workbench/.venv/bin/python -m pipeline.oss_local \
   --product-dir products/P000001 \
   --root /var/www/ozon-images \
   --base-url https://img.example.com
 ```
 
-它会：把 `output/generated-images/**` 按 `<product_id>/<slot>.png` 复制到 `/var/www/ozon-images`（按 sha256 增量），
-并写出 `output/image-public-urls.json`（slot → https URL）——**上传载荷就读它**。
+两条路都会写出 `output/image-public-urls.json`（slot → https URL）——**上传载荷就读它**。
 
-自检：浏览器打开 `https://img.example.com/<product_id>/main-S1.png` 能看到图 → Ozon 也能抓到。
 
 ---
 

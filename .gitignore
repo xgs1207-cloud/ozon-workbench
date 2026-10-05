@@ -1,0 +1,54 @@
+# ---- 运行时产物（不进仓库）----
+products/
+keyword-library/
+batches/
+output/
+logs/
+*.log
+
+# ---- 本地配置与凭据（绝不提交）----
+config/shops.json
+config/pricing.json
+.env
+.env.*
+*.local.json
+*secret*
+*credential*
+
+# ---- 采集/导出数据（含业务信息，不进仓库）----
+*.xlsx
+*.xls
+*.csv
+!examples/*.csv
+capture/
+exports/
+
+# ---- 上游作者的契约文件（PolyForm Noncommercial 许可，不随本仓库分发）----
+# 用 `powershell -File contracts/fetch_contracts.ps1` 自行拉取
+contracts/original/
+contracts/fixtures/ozon-category-tree.json.orig
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ---- 临时脚本 ----
+tmp_*
+scratch_*
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# ---- 编辑器/系统 ----
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

@@ -1,0 +1,46 @@
+{
+  "_note": "按 Ozon 官方 Seller API 文档字段构造的样例响应（POST /v1/description-category/attribute）。⚠️ 未用真实凭据验证。注意 dictionary_id=0 表示无字典，规范化为 null。",
+  "result": [
+    {
+      "id": 85,
+      "name": "Бренд",
+      "type": "String",
+      "is_collection": false,
+      "is_required": true,
+      "dictionary_id": 28732,
+      "complex_id": 0,
+      "group_name": "Основные"
+    },
+    {
+      "id": 10097,
+      "name": "Название цвета",
+      "type": "String",
+      "is_collection": false,
+      "is_required": true,
+      "dictionary_id": 0,
+      "complex_id": 0,
+      "group_name": "Характеристики"
+    },
+    {
+      "id": 10096,
+      "name": "Объём, мл",
+      "type": "String",
+      "is_collection": false,
+      "is_required": false,
+      "dictionary_id": 0,
+      "complex_id": 0,
+      "group_name": "Характеристики"
+    },
+    {
+      "id": 9048,
+      "name": "Материал",
+      "type": "String",
+      "is_collection": true,
+      "is_required": false,
+      "dictionary_id": 0,
+      "complex_id": 0,
+      "group_name": "Характеристики"
+    }
+  ],
+  "has_next": false
+}

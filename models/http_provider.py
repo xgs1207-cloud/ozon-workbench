@@ -1,0 +1,527 @@
+"""通用模型适配器：OpenAI 兼容 / DeepSeek 风格的 HTTP provider（不绑定任何供应商）。
+
+设计原则（很重要）：
+
+1. **模型负责创意，装配器负责结构** —— 让通用模型直接产出 23KB 设计契约或 20 字段图位，
+   基本不可能一次过契约。所以：
+   * ``analyze_product`` / ``write_copy_ru`` / ``position_product``：模型输出 JSON，我们**严格过契约 + 规则**，
+     不合法就带着"校验问题清单"重试，重试仍不过就**如实失败**（不悄悄降级）；
+   * ``design_listing``：模型只产出**买家可见文案**（listing），结构化部分（SKU 计划、属性决策、
+     visual_system、决策留痕）由 ``models.design`` 的确定性装配器补齐并过契约；
+   * ``plan_images``：槽位/合成方式/叠字规则由技能规则装配器决定，模型只润色提示词（可选）。
+2. **注入式传输层**：``ChatTransport`` 协议 + ``OpenAICompatibleTransport``（urllib），
+   测试/离线演练用脚本化传输层，全程零网络。
+3. **凭据只从环境变量读**：``MODEL_BASE_URL`` / ``MODEL_API_KEY`` / ``MODEL_NAME`` 等，缺了就报清楚缺哪个。
+4. 也可以接 Codex CLI：实现同一个 ``ModelProvider`` 接口（或只用它做 ``ChatTransport``）即可，见 HANDOFF §5.1。
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+from typing import Any, Callable, Mapping, Protocol, Sequence
+
+from .base import (
+    AnalysisRequest,
+    CopyRequest,
+    DesignRequest,
+    ImagePlanRequest,
+    ImageRequest,
+    ModelError,
+    PositionRequest,
+)
+
+DEFAULT_TIMEOUT = 90
+DEFAULT_TEMPERATURE = 0.3
+DEFAULT_MAX_ATTEMPTS = 2
+
+JSON_FENCE = re.compile(r"```(?:json)?\s*(.+?)```", re.DOTALL)
+
+ENV_KEYS = ("MODEL_BASE_URL", "MODEL_API_KEY", "MODEL_NAME")
+
+
+# --------------------------------------------------------------------- 传输层
+
+
+class ChatTransport(Protocol):
+    name: str
+
+    def complete(self, *, system: str, user: str, temperature: float | None = None) -> str: ...
+
+
+def _extract_content(response: Mapping[str, Any]) -> str:
+    """兼容 OpenAI 风格与常见变体（``choices[0].message.content`` / ``output_text`` / ``content``）。"""
+    choices = response.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0] if isinstance(choices[0], Mapping) else {}
+        message = first.get("message") if isinstance(first.get("message"), Mapping) else {}
+        content = message.get("content") or first.get("text")
+        if isinstance(content, str) and content.strip():
+            return content
+    for key in ("output_text", "content", "text", "response"):
+        value = response.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    raise ModelError(f"无法从模型响应里取到文本内容：{list(response)[:6]}")
+
+
+class OpenAICompatibleTransport:
+    """``POST {base_url}/chat/completions``（OpenAI 兼容端点，DeepSeek 等同样适用）。"""
+
+    name = "openai-compatible"
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        model: str,
+        timeout: int = DEFAULT_TIMEOUT,
+        urlopen: Any | None = None,
+        response_format: bool = True,
+        extra_headers: Mapping[str, str] | None = None,
+    ) -> None:
+        cleaned = str(base_url).strip().rstrip("/")
+        if not cleaned.startswith(("http://", "https://")):
+            raise ModelError(f"MODEL_BASE_URL 必须是 http(s) 地址：{base_url!r}")
+        self.base_url = cleaned
+        self.api_key = api_key
+        self.model = model
+        self.timeout = timeout
+        self._urlopen = urlopen or urllib.request.urlopen
+        self.response_format = response_format
+        self.extra_headers = dict(extra_headers or {})
+
+    @property
+    def endpoint(self) -> str:
+        return f"{self.base_url}/chat/completions"
+
+    def build_request(self, *, system: str, user: str, temperature: float | None = None) -> urllib.request.Request:
+        body: dict[str, Any] = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        }
+        if temperature is not None:
+            body["temperature"] = temperature
+        if self.response_format:
+            body["response_format"] = {"type": "json_object"}
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+            **self.extra_headers,
+        }
+        return urllib.request.Request(
+            self.endpoint,
+            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+
+    def complete(self, *, system: str, user: str, temperature: float | None = None) -> str:
+        request = self.build_request(system=system, user=user, temperature=temperature)
+        try:
+            with self._urlopen(request, timeout=self.timeout) as response:
+                raw = response.read().decode("utf-8")
+        except urllib.error.HTTPError as error:
+            detail = ""
+            try:
+                detail = error.read().decode("utf-8")[:300]
+            except Exception:  # noqa: BLE001
+                detail = ""
+            raise ModelError(f"模型接口返回 HTTP {error.code}：{detail or error.reason}") from error
+        except urllib.error.URLError as error:
+            raise ModelError(f"无法连接模型接口：{error.reason}") from error
+        try:
+            payload = json.loads(raw)
+        except ValueError as error:
+            raise ModelError(f"模型接口返回的不是 JSON：{raw[:200]}") from error
+        if not isinstance(payload, Mapping):
+            raise ModelError("模型接口返回的不是 JSON 对象")
+        return _extract_content(payload)
+
+
+# --------------------------------------------------------------------- JSON 提取与修复
+
+
+def extract_json(text: str) -> dict[str, Any] | None:
+    """从模型输出里抠出 JSON 对象：容忍 ```json 围栏、前后废话、嵌套花括号。"""
+    if not isinstance(text, str):
+        return None
+    candidate = text.strip()
+    fenced = JSON_FENCE.search(candidate)
+    if fenced:
+        candidate = fenced.group(1).strip()
+    try:
+        value = json.loads(candidate)
+        return value if isinstance(value, dict) else None
+    except ValueError:
+        pass
+
+    start = candidate.find("{")
+    while start != -1:
+        depth = 0
+        in_string = False
+        escaped = False
+        for index in range(start, len(candidate)):
+            char = candidate[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    snippet = candidate[start : index + 1]
+                    try:
+                        value = json.loads(snippet)
+                    except ValueError:
+                        break
+                    return value if isinstance(value, dict) else None
+        start = candidate.find("{", start + 1)
+    return None
+
+
+# --------------------------------------------------------------------- 提示词
+
+
+SYSTEM_JSON = (
+    "你是跨境电商（Ozon 俄罗斯站）的资深上品运营与俄语内容专家。"
+    "只输出一个 JSON 对象，不要输出解释、Markdown 代码围栏或任何多余文字。"
+    "所有面向买家的文本必须是俄语；严禁编造采集数据里没有的材质、认证、承重、尺寸或品牌。"
+    "拿不准的字段写 null 或省略，不要猜测。"
+)
+
+
+def _context_block(**parts: Any) -> str:
+    lines = []
+    for key, value in parts.items():
+        if value in (None, {}, []):
+            continue
+        lines.append(f"### {key}\n{json.dumps(value, ensure_ascii=False)[:6000]}")
+    return "\n\n".join(lines)
+
+
+def _keywords_of(request: Any) -> list[Any]:
+    """已选关键词可能在 request.selected_keywords / extra / source 里（不同请求类型不一样）。"""
+    direct = getattr(request, "selected_keywords", None)
+    if direct:
+        return list(direct)
+    extra = getattr(request, "extra", None)
+    if isinstance(extra, Mapping) and extra.get("selected_keywords"):
+        return list(extra["selected_keywords"])
+    source = getattr(request, "source", None)
+    if isinstance(source, Mapping) and source.get("selected_keywords"):
+        return list(source["selected_keywords"])
+    return []
+
+
+def _schema_hint(contract: str) -> str:
+    try:
+        from contracts import load_contract
+
+        schema = load_contract(contract)
+    except Exception:  # noqa: BLE001 - 没有契约时也给个提示
+        return f"（请严格产出 {contract} 契约形状）"
+    return (
+        f"输出必须满足 {contract} 契约：顶层必填 {schema.get('required')}。"
+        "字段名、类型、枚举值必须完全一致。"
+    )
+
+
+# --------------------------------------------------------------------- provider
+
+
+@dataclass
+class ProviderConfig:
+    base_url: str
+    api_key: str
+    model: str
+    timeout: int = DEFAULT_TIMEOUT
+    temperature: float = DEFAULT_TEMPERATURE
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS
+    fallback_to_deterministic: bool = False
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> "ProviderConfig":
+        source = env if env is not None else os.environ
+        missing = [key for key in ENV_KEYS if not str(source.get(key) or "").strip()]
+        if missing:
+            raise ModelError(
+                "模型层配置不完整，缺少环境变量：" + ", ".join(missing)
+                + "（示例：MODEL_BASE_URL=https://api.deepseek.com/v1 MODEL_API_KEY=sk-xxx MODEL_NAME=deepseek-chat）"
+            )
+        def number(key: str, fallback: Any, cast: Callable[[str], Any]) -> Any:
+            raw = str(source.get(key) or "").strip()
+            if not raw:
+                return fallback
+            try:
+                return cast(raw)
+            except ValueError:
+                return fallback
+
+        return cls(
+            base_url=str(source["MODEL_BASE_URL"]).strip(),
+            api_key=str(source["MODEL_API_KEY"]).strip(),
+            model=str(source["MODEL_NAME"]).strip(),
+            timeout=number("MODEL_TIMEOUT", DEFAULT_TIMEOUT, int),
+            temperature=number("MODEL_TEMPERATURE", DEFAULT_TEMPERATURE, float),
+            max_attempts=max(1, number("MODEL_MAX_ATTEMPTS", DEFAULT_MAX_ATTEMPTS, int)),
+            fallback_to_deterministic=str(source.get("MODEL_FALLBACK_TO_DETERMINISTIC") or "").strip().lower()
+            in {"1", "true", "yes", "on"},
+        )
+
+
+class HttpModelProvider:
+    """把 OpenAI 兼容端点接到 ``ModelProvider`` 接口上（含契约校验与修复重试）。"""
+
+    name = "http"
+
+    def __init__(
+        self,
+        transport: ChatTransport,
+        *,
+        temperature: float = DEFAULT_TEMPERATURE,
+        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        fallback_to_deterministic: bool = False,
+    ) -> None:
+        self.transport = transport
+        self.temperature = temperature
+        self.max_attempts = max(1, int(max_attempts))
+        self.fallback_to_deterministic = fallback_to_deterministic
+        #: 每次调用的记录（供排查：第几次、是否修复成功、问题清单）
+        self.calls: list[dict[str, Any]] = []
+        #: 不适合写进契约对象的说明（契约多为 additionalProperties:false）
+        self.last_notes: list[str] = []
+
+    # ---------------------------------------------------------------- 基础设施
+
+    def _call_json(
+        self,
+        *,
+        task: str,
+        user: str,
+        validate: Callable[[dict[str, Any]], list[str]],
+        system: str = SYSTEM_JSON,
+        attempts: int | None = None,
+    ) -> tuple[dict[str, Any], list[str]]:
+        """调模型 → 抠 JSON → 校验 → 失败带问题清单重试。返回 (payload, 修复提示)。"""
+        warnings: list[str] = []
+        problems: list[str] = []
+        prompt = user
+        for attempt in range(1, (attempts or self.max_attempts) + 1):
+            text = self.transport.complete(system=system, user=prompt, temperature=self.temperature)
+            payload = extract_json(text)
+            if payload is None:
+                problems = ["输出不是合法 JSON 对象（可能需要去掉解释文字或代码围栏）"]
+            else:
+                problems = list(validate(payload))
+            self.calls.append(
+                {"task": task, "attempt": attempt, "ok": not problems, "problems": problems[:6], "chars": len(text)}
+            )
+            if not problems:
+                if attempt > 1:
+                    warnings.append(f"{task}: 第 {attempt} 次尝试通过校验（前一次输出不合法）")
+                return payload, warnings
+            if attempt < (attempts or self.max_attempts):
+                prompt = (
+                    f"{user}\n\n### 上一次输出不合法，请修正后重新只输出 JSON\n"
+                    + "\n".join(f"- {item}" for item in problems[:12])
+                )
+        raise ModelError(f"{task} 连续 {attempts or self.max_attempts} 次未通过校验：" + "；".join(problems[:6]))
+
+    def _deterministic(self) -> Any:
+        """降级用的确定性实现（仅在 fallback_to_deterministic 打开时使用）。"""
+        from .fake import FakeProvider
+
+        return FakeProvider()
+
+    # ---------------------------------------------------------------- 五个方法
+
+    def analyze_product(self, request: AnalysisRequest) -> dict[str, Any]:
+        from contracts import validate_contract
+
+        user = (
+            "请基于下面的采集数据与已选关键词，产出商品分析 JSON。\n"
+            f"{_schema_hint('product-analysis')}\n"
+            "要求：facts 只写采集里确实存在的字段；unknowns 列出缺失但影响上架的关键信息；"
+            "decision 取 continue 或 needs_review（有高风险缺失时取后者）。\n\n"
+            + _context_block(
+                source=request.source,
+                selected_keywords=_keywords_of(request),
+                positioning=getattr(request, "positioning", None),
+            )
+        )
+        try:
+            payload, warnings = self._call_json(
+                task="product_analysis",
+                user=user,
+                validate=lambda data: validate_contract("product-analysis", data),
+            )
+        except ModelError:
+            if not self.fallback_to_deterministic:
+                raise
+            fallback = self._deterministic().analyze_product(request)
+            return fallback
+        # 契约是 additionalProperties:false，不能塞额外字段；修复提示只在 calls 轨迹里留痕
+        return payload
+
+    def write_copy_ru(self, request: CopyRequest) -> dict[str, Any]:
+        from contracts import validate_contract
+        from rules.validate import validate_copy_bundle
+
+        def validate(data: dict[str, Any]) -> list[str]:
+            problems: list[str] = []
+            bundle = data.get("copy_bundle") if isinstance(data.get("copy_bundle"), Mapping) else {}
+            for key, contract in (("title_ru", "title-ru"), ("description_ru", "description-ru"), ("keywords_ru", "keywords-ru")):
+                document = data.get(key)
+                if not isinstance(document, Mapping):
+                    problems.append(f"缺少 {key}（{contract} 契约要求的对象）")
+                    continue
+                problems.extend(f"{key}: {item}" for item in validate_contract(contract, document))
+            problems.extend(f"copy_bundle: {item}" for item in validate_copy_bundle(bundle))
+            return problems
+
+        user = (
+            "请基于采集数据、商品分析与已选关键词，产出俄文标题/简介/关键词三份文档 + copy_bundle。\n"
+            f"{_schema_hint('title-ru')}\n{_schema_hint('description-ru')}\n{_schema_hint('keywords-ru')}\n"
+            "要求：标题 25–120 字符且包含核心词；简介至少 300 字符、五个部分都要写；"
+            "标签（hashtags）只能是西里尔字母、形如 #термос；不要出现中文、拼音或未证实的参数。\n\n"
+            + _context_block(
+                source=request.source,
+                analysis=request.analysis,
+                selected_keywords=request.selected_keywords,
+                positioning=request.positioning,
+            )
+        )
+        payload, warnings = self._call_json(task="russian_copy", user=user, validate=validate)
+        bundle = dict(payload.get("copy_bundle") or {})
+        bundle.setdefault("generated_by", getattr(self.transport, "name", self.name))
+        bundle["generated_by"] = f"{bundle['generated_by']}+http"
+        bundle["warnings"] = list(bundle.get("warnings") or []) + warnings
+        payload["copy_bundle"] = bundle
+        return payload
+
+    def position_product(self, request: PositionRequest) -> dict[str, Any]:
+        from contracts import validate_contract
+
+        user = (
+            "请产出商品定位 JSON（product-positioning 契约）。\n"
+            f"{_schema_hint('product-positioning')}\n"
+            "要求：定位、买家画像、动机等必须能从数据推断；推断类写 claim_type=supported_inference；"
+            "没有依据的字段写 null 并列入 unknowns；positioning_evidence 每条都要带 source_refs。\n\n"
+            + _context_block(
+                source=request.source,
+                analysis=request.analysis,
+                copy_bundle=request.copy_bundle,
+                pricing=request.pricing,
+            )
+        )
+        payload, _ = self._call_json(
+            task="product_positioning",
+            user=user,
+            validate=lambda data: validate_contract("product-positioning", data),
+        )
+        return payload
+
+    def design_listing(self, request: DesignRequest) -> dict[str, Any]:
+        """模型出买家可见文案，结构化部分交给确定性装配器（见模块 docstring）。"""
+        from models.design import build_design_document
+
+        copy_bundle = request.copy_bundle
+        warnings: list[str] = []
+        if not copy_bundle:
+            copy = self.write_copy_ru(
+                CopyRequest(
+                    product_id=request.product_id,
+                    product_dir=request.product_dir,
+                    source=request.source,
+                    source_refs=request.source_refs,
+                    analysis=request.analysis,
+                    selected_keywords=list(_keywords_of(request)),
+                    positioning=request.positioning,
+                )
+            )
+            copy_bundle = dict(copy.get("copy_bundle") or {})
+            warnings.append("设计步骤内联调模型生成文案")
+
+        design = build_design_document(
+            product_id=request.product_id,
+            source=request.source,
+            analysis=request.analysis,
+            copy_bundle=copy_bundle,
+            image_plan=request.image_plan,
+            attributes_final=request.attributes_final,
+            positioning=request.positioning,
+            source_refs=request.source_refs,
+            generated_by=f"{getattr(self.transport, 'name', self.name)}+assembler",
+        )
+        processing = design.setdefault("processing", {})
+        processing["validation_warnings"] = list(processing.get("validation_warnings") or []) + warnings
+        self.last_notes.extend(warnings)
+        return design
+
+    def plan_images(self, request: ImagePlanRequest) -> dict[str, Any]:
+        from models.image_plan import build_image_plan
+
+        plan = build_image_plan(
+            product_dir=request.product_dir,
+            source=request.source,
+            copy_bundle=request.copy_bundle,
+            analysis=request.analysis,
+            source_refs=request.source_refs,
+        )
+        self.last_notes.append(
+            "图片计划由规则装配器生成（槽位/合成方式/叠字规则来自技能约束）；"
+            "如需模型润色提示词，可在本 adapter 里接 prompt enrichment"
+        )
+        return plan
+
+    def generate_image(self, request: ImageRequest) -> dict[str, Any]:
+        raise ModelError(
+            "HTTP provider 不负责生图：请接入生图后端（见 HANDOFF §5.2），"
+            "本 provider 只做文本类模型步骤"
+        )
+
+
+# --------------------------------------------------------------------- 入口
+
+
+def build_provider_from_env(env: Mapping[str, str] | None = None) -> HttpModelProvider:
+    config = ProviderConfig.from_env(env)
+    transport = OpenAICompatibleTransport(
+        base_url=config.base_url,
+        api_key=config.api_key,
+        model=config.model,
+        timeout=config.timeout,
+    )
+    return HttpModelProvider(
+        transport,
+        temperature=config.temperature,
+        max_attempts=config.max_attempts,
+        fallback_to_deterministic=config.fallback_to_deterministic,
+    )
+
+
+__all__ = [
+    "ChatTransport",
+    "HttpModelProvider",
+    "OpenAICompatibleTransport",
+    "ProviderConfig",
+    "build_provider_from_env",
+    "extract_json",
+]

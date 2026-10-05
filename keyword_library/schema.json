@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local/ozon-workbench/keyword-library.schema.json",
+  "title": "关键词库记录与采集入库载荷",
+  "schema_version": "1.0.0",
+  "$defs": {
+    "storedKeyword": {
+      "type": "object",
+      "required": ["key", "keyword", "normalized_keyword", "category_id", "type_id", "status"],
+      "additionalProperties": true,
+      "properties": {
+        "key": {
+          "type": "string",
+          "description": "去重主键：<category_id>:<type_id>:<归一化关键词>"
+        },
+        "keyword": { "type": "string", "description": "原始关键词（保留大小写与原始写法）" },
+        "normalized_keyword": { "type": "string", "description": "NFKC + 去空白 + casefold 后的形式" },
+        "category_id": { "type": "string", "description": "Ozon 真实类目 category_id" },
+        "type_id": { "type": "string", "description": "Ozon 类目 type_id（与 category_id 共同构成类目主键）" },
+        "category_path_zh": { "type": ["string", "null"], "description": "中文类目路径，仅用于界面展示" },
+        "source": { "type": "string", "description": "采集来源，如 seerfar / manual / csv" },
+        "status": {
+          "type": "string",
+          "enum": ["candidate", "qualified", "in_library", "used", "rejected"]
+        },
+        "search_volume": { "type": ["number", "null"], "description": "热度指标：搜索量" },
+        "competitor_count": { "type": ["number", "null"], "description": "竞争指标：竞品数" },
+        "ads_count": { "type": ["number", "null"], "description": "可选：广告位数量" },
+        "cpc": { "type": ["number", "null"], "description": "可选：点击成本" },
+        "trend": { "type": ["number", "null"], "description": "可选：趋势/增长率（百分比或指数，按数据源）" },
+        "extra": { "type": "object", "description": "数据源其它字段原样保留，不参与打分" },
+        "score": { "type": ["number", "null"], "description": "heat_percentile - lam * competition_percentile" },
+        "heat_percentile": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "competition_percentile": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "score_notes": { "type": "array", "items": { "type": "string" }, "description": "打分诊断说明" },
+        "selected_for": { "type": "array", "items": { "type": "string" }, "description": "已选用该词的 product_id" },
+        "first_seen_at": { "type": "string" },
+        "last_seen_at": { "type": "string" },
+        "history": { "type": "array", "items": { "type": "object" } }
+      }
+    },
+    "ingestPayload": {
+      "type": "object",
+      "required": ["keywords"],
+      "additionalProperties": false,
+      "properties": {
+        "source": { "type": "string", "default": "seerfar" },
+        "category": {
+          "type": "object",
+          "required": ["category_id", "type_id"],
+          "additionalProperties": false,
+          "properties": {
+            "category_id": { "type": "string" },
+            "type_id": { "type": "string" },
+            "category_path_zh": { "type": ["string", "null"] }
+          }
+        },
+        "keywords": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["keyword"],
+            "additionalProperties": true,
+            "properties": {
+              "keyword": { "type": "string", "minLength": 1 },
+              "search_volume": { "type": ["number", "string", "null"] },
+              "competitor_count": { "type": ["number", "string", "null"] },
+              "ads_count": { "type": ["number", "string", "null"] },
+              "cpc": { "type": ["number", "string", "null"] },
+              "trend": { "type": ["number", "string", "null"] },
+              "extra": { "type": "object" },
+              "category_id": { "type": ["string", "null"], "description": "可选：逐条覆盖顶层类目" },
+              "type_id": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    }
+  }
+}

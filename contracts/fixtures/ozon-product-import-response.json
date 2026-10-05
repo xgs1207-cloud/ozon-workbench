@@ -1,0 +1,24 @@
+{
+  "_note": "按 Ozon 官方 Seller API 文档字段构造的样例响应（POST /v3/product/import）。⚠️ 未用真实凭据验证；拿到凭据后请先 --show-request 检查请求体，再小批量 --send 试单。",
+  "result": {
+    "task_id": 1785432199,
+    "items": [
+      {
+        "offer_id": "P000001-S1",
+        "product_id": 0,
+        "errors": []
+      },
+      {
+        "offer_id": "P000001-S2",
+        "product_id": 0,
+        "errors": [
+          {
+            "code": "VALUE_MUST_BE_DICTIONARY",
+            "message": "Атрибут «Название цвета» должен быть заполнен значением из справочника",
+            "attribute_id": 10097
+          }
+        ]
+      }
+    ]
+  }
+}

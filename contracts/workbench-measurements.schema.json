@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local/ozon-workbench/workbench-measurements.schema.json",
+  "title": "Workbench Measurements（商品/包装尺寸重量，只接受确认值）",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "product_id", "source", "source_refs", "product", "package", "sku_measurements", "hierarchy_ok", "warnings", "generated_at"],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "product_id": { "type": "string", "pattern": "^P[0-9]{6}$" },
+    "source": { "enum": ["user_confirmed", "capture_structured", "mixed", "missing"] },
+    "source_refs": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "product": { "$ref": "#/$defs/dimensionsOrNull" },
+    "package": { "$ref": "#/$defs/dimensionsOrNull" },
+    "sku_measurements": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/skuDimensions" }
+    },
+    "hierarchy_ok": { "type": "boolean" },
+    "warnings": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "generated_at": { "type": "string", "minLength": 1 }
+  },
+  "$defs": {
+    "dimensions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["length_mm", "width_mm", "height_mm", "weight_g"],
+      "properties": {
+        "length_mm": { "type": "integer", "exclusiveMinimum": 0 },
+        "width_mm": { "type": "integer", "exclusiveMinimum": 0 },
+        "height_mm": { "type": "integer", "exclusiveMinimum": 0 },
+        "weight_g": { "type": "integer", "exclusiveMinimum": 0 }
+      }
+    },
+    "dimensionsOrNull": {
+      "oneOf": [
+        { "$ref": "#/$defs/dimensions" },
+        { "type": "null" }
+      ]
+    },
+    "skuDimensions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["product", "package"],
+      "properties": {
+        "product": { "$ref": "#/$defs/dimensionsOrNull" },
+        "package": { "$ref": "#/$defs/dimensionsOrNull" }
+      }
+    }
+  }
+}

@@ -1,0 +1,480 @@
+"""定价与尺寸重量（``measurements`` 步骤）：把采购价算成可提交的卢布售价，并整理确认过的尺寸重量。
+
+**为什么不用上游的 pricing-result 契约**：那份契约绑死了作者本机的 Excel 运费表
+（``worksheet`` 常量 ``RETS``、``exchange_rate.source`` 常量 ``RETS!P2``、``workbook_sha256``），
+我们没有那张表 —— 与其编一个 sha256 假装读过，不如定义自己的明确契约
+（``contracts/workbench-pricing-result.schema.json``），并保留"以后接上游运费表"的位置。
+
+**尺寸重量只接受确认值**：来自 ``input/workbench-sku-overrides.json``（人工在界面里填的）
+或采集里明确存在的结构化字段；两者都没有就是"缺"，如实报出来（上传门禁会拦住），**绝不估算**。
+"""
+
+from __future__ import annotations
+
+import json
+import math
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+from contracts import format_problems, validate_contract
+from parsing import parse_number
+
+from .context import PipelineGateError, StepContext
+
+SCHEMA_VERSION = "1.0.0"
+PRICING_FILE = "output/pricing-result.json"
+MEASUREMENTS_FILE = "output/measurements.json"
+PROFIT_FILE = "output/profit-analysis.json"
+OVERRIDES_FILE = "input/workbench-sku-overrides.json"
+CONFIG_PATH = Path("config") / "pricing.json"
+
+DEFAULT_CONFIG: dict[str, Any] = {
+    "rub_per_cny": 11.6,
+    "commission_rate": 0.15,
+    "logistics_commission_rate": 0.05,
+    "acquiring_fee_rate": 0.015,
+    "withdrawal_fee_rate": 0.01,
+    "shipping_cost_cny_per_kg": 45.0,
+    "shipping_min_cny": 15.0,
+    "packing_fee_cny": 1.5,
+    "other_fixed_cost_cny": 0.0,
+    "volumetric_divisor": 6000,
+    "target_margin_rate": 0.25,
+    "min_margin_rate": 0.10,
+    "round_to_rub": 10,
+    "price_ends_with": 90,
+    #: 价格上限（RUB）；0 表示不限制。超过上限会降级为 WARNING（竞争力风险）
+    "max_price_rub": 0,
+}
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def load_pricing_config(path: Path | str | None = None) -> tuple[dict[str, Any], list[str]]:
+    """读 ``config/pricing.json``，缺项用默认值补齐；返回 (配置, 警告)。"""
+    target = Path(path) if path else CONFIG_PATH
+    warnings: list[str] = []
+    config = dict(DEFAULT_CONFIG)
+    if target.is_file():
+        try:
+            loaded = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            warnings.append(f"pricing.json 解析失败，使用默认配置：{error}")
+            loaded = {}
+        if isinstance(loaded, Mapping):
+            for key, value in loaded.items():
+                if key in DEFAULT_CONFIG:
+                    config[key] = value
+            config["config_file"] = str(target)
+    else:
+        warnings.append(f"没有 {target}：使用内置默认费率（建议按自己的物流/佣金实际值配置一份）")
+    return config, warnings
+
+
+# --------------------------------------------------------------------- 尺寸重量
+
+
+def _positive_int(value: Any) -> int | None:
+    number = parse_number(value)
+    if number is None or number <= 0:
+        return None
+    return int(math.ceil(number))
+
+
+def _dimensions_from_block(block: Mapping[str, Any] | None, *, prefix: str) -> dict[str, Any] | None:
+    """从 overrides 的一条记录里取尺寸重量；键名兼容 ``length_mm`` 与 ``product_length_mm`` 两种写法。"""
+    if not isinstance(block, Mapping):
+        return None
+    def pick(*names: str) -> Any:
+        for name in names:
+            if block.get(name) is not None:
+                return block.get(name)
+        return None
+
+    length = _positive_int(pick(f"{prefix}length_mm", "length_mm"))
+    width = _positive_int(pick(f"{prefix}width_mm", "width_mm"))
+    height = _positive_int(pick(f"{prefix}height_mm", "height_mm"))
+    weight = _positive_int(pick(f"{prefix}weight_g", "weight_g"))
+    if None in (length, width, height, weight):
+        return None
+    return {"length_mm": length, "width_mm": width, "height_mm": height, "weight_g": weight}
+
+
+def collect_measurements(
+    *,
+    product_id: str,
+    source: Mapping[str, Any],
+    overrides: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """整理商品/包装/各 SKU 的尺寸重量（只认确认值）；返回 workbench-measurements 形状。"""
+    overrides = dict(overrides or {})
+    overrides_by_sku = overrides.get("sku_overrides") if isinstance(overrides.get("sku_overrides"), Mapping) else {}
+    product_block = overrides.get("product") if isinstance(overrides.get("product"), Mapping) else None
+
+    warnings: list[str] = []
+    source_refs = ["input/source.json"]
+    if overrides:
+        source_refs.append(OVERRIDES_FILE)
+    source_refs.append("output/pricing-result.json")
+
+    product_dims = _dimensions_from_block(product_block, prefix="product_") or _dimensions_from_block(
+        product_block, prefix=""
+    )
+    package_dims = _dimensions_from_block(product_block, prefix="package_")
+
+    sku_measurements: dict[str, Any] = {}
+    skus = [item for item in (source.get("skus") or []) if isinstance(item, Mapping)]
+    for index, sku in enumerate(skus, start=1):
+        sku_id = str(sku.get("sku_id") or f"S{index}")
+        block = overrides_by_sku.get(sku_id) if isinstance(overrides_by_sku, Mapping) else None
+        sku_product = _dimensions_from_block(block, prefix="product_") or _dimensions_from_block(block, prefix="")
+        sku_package = _dimensions_from_block(block, prefix="package_")
+        sku_measurements[sku_id] = {"product": sku_product, "package": sku_package}
+        if sku_product is None and product_dims is None:
+            warnings.append(f"SKU {sku_id} 缺商品尺寸重量（需要人工确认，不估算）")
+        if sku_package is None and package_dims is None:
+            warnings.append(f"SKU {sku_id} 缺包装尺寸重量（需要人工确认，不估算）")
+
+    hierarchy_ok = True
+    if product_dims and package_dims:
+        hierarchy_ok = all(
+            package_dims[axis] >= product_dims[axis] for axis in ("length_mm", "width_mm", "height_mm")
+        ) and package_dims["weight_g"] >= product_dims["weight_g"]
+        if not hierarchy_ok:
+            warnings.append("包装尺寸/重量小于商品本体：请检查填写值（上传门禁要求包装 ≥ 商品）")
+
+    if product_dims and package_dims:
+        origin = "user_confirmed" if overrides else "capture_structured"
+    elif product_dims or package_dims or any(item["product"] or item["package"] for item in sku_measurements.values()):
+        origin = "mixed"
+    else:
+        origin = "missing"
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "product_id": product_id,
+        "source": origin,
+        "source_refs": source_refs,
+        "product": product_dims,
+        "package": package_dims,
+        "sku_measurements": sku_measurements,
+        "hierarchy_ok": hierarchy_ok,
+        "warnings": warnings,
+        "generated_at": now_iso(),
+    }
+
+
+def load_measurements(product_dir: Path | str) -> dict[str, Any]:
+    """读 ``output/measurements.json``（没有就返回空结构），也兼容旧的 cost-analysis.json。"""
+    directory = Path(product_dir)
+    path = directory / MEASUREMENTS_FILE
+    if path.is_file():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            payload = {}
+        if isinstance(payload, Mapping):
+            return dict(payload)
+    legacy = directory / "output" / "cost-analysis.json"
+    if legacy.is_file():
+        try:
+            payload = json.loads(legacy.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            payload = {}
+        if isinstance(payload, Mapping):
+            product = payload.get("product_dimensions") or payload.get("dimensions")
+            package = payload.get("package_dimensions")
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "product_id": directory.name,
+                "source": "legacy_cost_analysis",
+                "source_refs": payload.get("source_refs") or ["output/cost-analysis.json"],
+                "product": _normalize_legacy(product),
+                "package": _normalize_legacy(package),
+                "sku_measurements": {},
+                "hierarchy_ok": bool((payload.get("measurement_hierarchy") or {}).get("valid", True)),
+                "warnings": ["尺寸重量来自旧的 cost-analysis.json（建议改用 measurements.json）"],
+                "generated_at": payload.get("generated_at") or now_iso(),
+            }
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "product_id": directory.name,
+        "source": "missing",
+        "source_refs": ["input/source.json"],
+        "product": None,
+        "package": None,
+        "sku_measurements": {},
+        "hierarchy_ok": False,
+        "warnings": ["没有 measurements.json：尺寸重量未确认"],
+        "generated_at": now_iso(),
+    }
+
+
+def _normalize_legacy(block: Any) -> dict[str, Any] | None:
+    """把旧 cost-analysis 的 cm/g 或 mm 写法统一成我们的 mm/g 整数。"""
+    if not isinstance(block, Mapping):
+        return None
+    if all(block.get(key) for key in ("length_mm", "width_mm", "height_mm", "weight_g")):
+        return {
+            "length_mm": int(block["length_mm"]),
+            "width_mm": int(block["width_mm"]),
+            "height_mm": int(block["height_mm"]),
+            "weight_g": int(block["weight_g"]),
+        }
+    unit = str(block.get("unit") or "").casefold()
+    if unit in {"cm", "см"} and all(block.get(key) for key in ("length", "width", "height")):
+        weight = block.get("weight_g") or block.get("value_g") or (block.get("weight") or {}).get("value")
+        return {
+            "length_mm": int(round(float(block["length"]) * 10)),
+            "width_mm": int(round(float(block["width"]) * 10)),
+            "height_mm": int(round(float(block["height"]) * 10)),
+            "weight_g": int(round(float(weight or 0))),
+        }
+    return None
+
+
+# --------------------------------------------------------------------- 定价
+
+
+def volumetric_weight_g(dimensions: Mapping[str, Any] | None, *, divisor: float) -> int | None:
+    if not dimensions:
+        return None
+    volume_cm3 = (dimensions["length_mm"] / 10) * (dimensions["width_mm"] / 10) * (dimensions["height_mm"] / 10)
+    return int(round(volume_cm3 / float(divisor) * 1000))
+
+
+def nice_price(raw_rub: float, *, ends_with: int, step: int) -> int:
+    """把裸价抬到"好看"的整数价（例如 1478 → 1490），只向上取。"""
+    base = math.floor(raw_rub / 100) * 100
+    candidate = int(base + ends_with)
+    while candidate < raw_rub:
+        candidate += 100
+    if step > 1 and candidate % step != 0:
+        candidate += step - (candidate % step)
+    return candidate
+
+
+def compute_sku_pricing(
+    *,
+    sku: Mapping[str, Any],
+    sku_id: str,
+    config: Mapping[str, Any],
+    dimensions: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    purchase = parse_number(sku.get("purchase_price_cny") or sku.get("cost_cny") or sku.get("purchase_price"))
+    errors: list[str] = []
+    missing_purchase = purchase is None or purchase <= 0
+    if missing_purchase:
+        errors.append("缺少采购价（purchase_price_cny）")
+
+    actual_weight = (dimensions or {}).get("weight_g") if dimensions else _positive_int(sku.get("weight_g"))
+    volumetric = volumetric_weight_g(dimensions, divisor=config["volumetric_divisor"])
+    candidates = [value for value in (actual_weight, volumetric) if value]
+    billable_weight = max(candidates) if candidates else 0
+    shipping_from_weight = billable_weight / 1000 * float(config["shipping_cost_cny_per_kg"])
+    shipping = max(float(config["shipping_min_cny"]), shipping_from_weight)
+
+    base_cost = (purchase or 0) + shipping + float(config["packing_fee_cny"]) + float(config["other_fixed_cost_cny"])
+    fee_rate = (
+        float(config["commission_rate"])
+        + float(config["logistics_commission_rate"])
+        + float(config["acquiring_fee_rate"])
+        + float(config["withdrawal_fee_rate"])
+    )
+    denominator = 1 - float(config["target_margin_rate"]) - fee_rate
+    selling_cny = None
+    if missing_purchase:
+        # 成本未知时不报价：给一个"价格"会误导（宁可 REJECT 让人补资料）
+        selling_cny = None
+    elif denominator <= 0.05:
+        errors.append("费率与目标利润率之和过高，无法定价（请调小 target_margin_rate 或费率）")
+        selling_cny = None
+    else:
+        selling_cny = base_cost / denominator
+
+    selling_rub = None
+    profit_rub = None
+    margin_rate = None
+    if selling_cny is not None:
+        raw_rub = selling_cny * float(config["rub_per_cny"])
+        selling_rub = nice_price(
+            raw_rub, ends_with=int(config["price_ends_with"]), step=int(config["round_to_rub"])
+        )
+        revenue_after_fees = selling_rub * (1 - fee_rate)
+        cost_rub = base_cost * float(config["rub_per_cny"])
+        profit_rub = round(revenue_after_fees - cost_rub, 2)
+        margin_rate = round(profit_rub / selling_rub, 4) if selling_rub else None
+
+    status = "REJECT"
+    max_price = parse_number(config.get("max_price_rub")) or 0
+    if errors:
+        status = "REJECT"
+    elif margin_rate is not None and margin_rate >= float(config["min_margin_rate"]):
+        status = "UPLOAD"
+    elif margin_rate is not None and margin_rate >= float(config["min_margin_rate"]) * 0.5:
+        status = "WARNING"
+        errors.append(f"利润率 {margin_rate:.1%} 低于目标下限 {float(config['min_margin_rate']):.1%}")
+    else:
+        status = "REJECT"
+        if margin_rate is not None:
+            errors.append(f"利润率 {margin_rate:.1%} 过低（低于下限的一半）")
+
+    if status == "UPLOAD" and max_price and selling_rub and selling_rub > max_price:
+        status = "WARNING"
+        errors.append(f"价格 {selling_rub} RUB 超过上限 {int(max_price)}：成本加成定价会失去竞争力，建议换 SKU 或压物流")
+
+    return {
+        "sku_id": sku_id,
+        "sku_name": sku.get("name_zh") or sku.get("spec_zh"),
+        "purchase_cost_cny": purchase,
+        "purchase_cost_source": "input/source.json",
+        "shipping_cost_cny": round(shipping, 2),
+        "actual_weight_g": actual_weight,
+        "volumetric_weight_g": volumetric,
+        "billable_weight_g": billable_weight,
+        "base_cost_cny": round(base_cost, 2),
+        "total_fee_rate": round(fee_rate, 4),
+        "selling_price_cny": round(selling_cny, 2) if selling_cny is not None else None,
+        "selling_price_rub": selling_rub,
+        "estimated_profit_rub": profit_rub,
+        "margin_rate": margin_rate,
+        "status": status,
+        "errors": errors,
+    }
+
+
+def compute_pricing(
+    *,
+    product_id: str,
+    source: Mapping[str, Any],
+    config: Mapping[str, Any],
+    measurements: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    skus = [item for item in (source.get("skus") or []) if isinstance(item, Mapping)]
+    if not skus:
+        raise ValueError("没有已选 SKU，无法定价")
+    warnings: list[str] = []
+
+    package = (measurements or {}).get("package")
+    if not package:
+        warnings.append("缺包装尺寸重量：运费只能按最低运费估算（上传门禁仍会拦住缺尺寸的商品）")
+
+    rows: list[dict[str, Any]] = []
+    for index, sku in enumerate(skus, start=1):
+        sku_id = str(sku.get("sku_id") or f"S{index}")
+        sku_dims = None
+        sku_block = ((measurements or {}).get("sku_measurements") or {}).get(sku_id) or {}
+        sku_dims = sku_block.get("package") or (measurements or {}).get("package")
+        rows.append(compute_sku_pricing(sku=sku, sku_id=sku_id, config=config, dimensions=sku_dims))
+
+    statuses = {row["status"] for row in rows}
+    if "REJECT" in statuses:
+        recommendation = "REJECT"
+    elif "WARNING" in statuses:
+        recommendation = "WARNING"
+    else:
+        recommendation = "UPLOAD"
+    warnings.extend(
+        f"{row['sku_id']}: {item}" for row in rows for item in row["errors"] if row["status"] != "UPLOAD"
+    )
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "product_id": product_id,
+        "pricing_source": "workbench-pricing-engine",
+        "config": {
+            key: config[key]
+            for key in (
+                "rub_per_cny",
+                "commission_rate",
+                "logistics_commission_rate",
+                "acquiring_fee_rate",
+                "withdrawal_fee_rate",
+                "shipping_cost_cny_per_kg",
+                "shipping_min_cny",
+                "packing_fee_cny",
+                "other_fixed_cost_cny",
+                "volumetric_divisor",
+                "target_margin_rate",
+                "min_margin_rate",
+                "round_to_rub",
+                "price_ends_with",
+                "max_price_rub",
+            )
+        }
+        | ({"config_file": config["config_file"]} if config.get("config_file") else {}),
+        "skus": rows,
+        "recommendation": recommendation,
+        "warnings": warnings,
+        "generated_at": now_iso(),
+    }
+
+
+# --------------------------------------------------------------------- handler
+
+
+def handle_measurements(ctx: StepContext) -> dict[str, Any]:
+    """定价 + 尺寸重量：写 pricing-result.json / measurements.json / profit-analysis.json。"""
+    source = ctx.require_json("input/source.json")
+    overrides = ctx.read_json(OVERRIDES_FILE)
+    config, config_warnings = load_pricing_config(ctx.path("config/pricing.json"))
+
+    measurements = collect_measurements(product_id=ctx.product_dir.name, source=source, overrides=overrides)
+    problems = validate_contract("workbench-measurements", measurements)
+    if problems:
+        raise PipelineGateError(
+            ctx.step,
+            "尺寸重量结果不符合 workbench-measurements 契约",
+            {"problems": problems[:8], "summary": format_problems(problems)},
+        )
+    ctx.write_json(MEASUREMENTS_FILE, measurements)
+
+    pricing = compute_pricing(
+        product_id=ctx.product_dir.name, source=source, config=config, measurements=measurements
+    )
+    problems = validate_contract("workbench-pricing-result", pricing)
+    if problems:
+        raise PipelineGateError(
+            ctx.step,
+            "定价结果不符合 workbench-pricing-result 契约",
+            {"problems": problems[:8], "summary": format_problems(problems)},
+        )
+    ctx.write_json(PRICING_FILE, pricing)
+
+    ctx.write_json(
+        PROFIT_FILE,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "product_id": ctx.product_dir.name,
+            "generated_at": pricing["generated_at"],
+            "config_file": config.get("config_file"),
+            "skus": [
+                {
+                    "sku_id": row["sku_id"],
+                    "selling_price_rub": row["selling_price_rub"],
+                    "estimated_profit_rub": row["estimated_profit_rub"],
+                    "margin_rate": row["margin_rate"],
+                    "status": row["status"],
+                }
+                for row in pricing["skus"]
+            ],
+            "recommendation": pricing["recommendation"],
+        },
+    )
+
+    warnings = [*config_warnings, *measurements["warnings"], *pricing["warnings"]]
+    if pricing["recommendation"] == "REJECT":
+        warnings.append("存在无法定价或利润过低的 SKU：建议调价或换 SKU（上传门禁会拦住）")
+    return {
+        "warnings": warnings,
+        "artifacts": [PRICING_FILE, MEASUREMENTS_FILE, PROFIT_FILE],
+        "recommendation": pricing["recommendation"],
+        "priced_skus": len([row for row in pricing["skus"] if row["selling_price_rub"]]),
+        "measurement_source": measurements["source"],
+    }
+
+
+MEASUREMENT_HANDLERS = {"measurements": handle_measurements}

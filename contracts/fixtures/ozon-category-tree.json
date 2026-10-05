@@ -1,0 +1,32 @@
+{
+  "_note": "按 Ozon 官方 Seller API 文档字段构造的样例响应（POST /v1/description-category/tree）。⚠️ 未用真实凭据验证；拿到凭据后请用 pipeline.ozon_http --check 对齐一次。",
+  "result": [
+    {
+      "description_category_id": 1001,
+      "category_name": "Дом и сад",
+      "children": [
+        {
+          "type_id": 2001,
+          "type_name": "Термосы",
+          "children": []
+        },
+        {
+          "type_id": 2002,
+          "type_name": "Термокружки",
+          "children": []
+        }
+      ]
+    },
+    {
+      "description_category_id": 1002,
+      "category_name": "Спорт и отдых",
+      "children": [
+        {
+          "type_id": 3001,
+          "type_name": "Термосы для походов",
+          "children": []
+        }
+      ]
+    }
+  ]
+}

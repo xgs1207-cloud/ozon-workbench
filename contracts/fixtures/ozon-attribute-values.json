@@ -1,0 +1,9 @@
+{
+  "_note": "按 Ozon 官方 Seller API 文档字段构造的样例响应（POST /v1/description-category/attribute/values）。⚠️ 未用真实凭据验证。",
+  "result": [
+    { "id": 126745801, "value": "Нет бренда" },
+    { "id": 126745802, "value": "JLC GLOBAL" },
+    { "id": 126745803, "value": "Без бренда" }
+  ],
+  "has_next": false
+}

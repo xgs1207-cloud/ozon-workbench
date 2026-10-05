@@ -1,0 +1,19 @@
+{
+  "source": "seerfar-sample",
+  "category": {
+    "category_id": "1001",
+    "type_id": "2001",
+    "category_path_zh": "示例类目（占位，请替换成 Ozon 真实类目）"
+  },
+  "keywords": [
+    { "keyword": "термос 500 мл", "search_volume": 12400, "competitor_count": 830 },
+    { "keyword": "термос для чая", "search_volume": 3100, "competitor_count": 120 },
+    { "keyword": "термос стальной", "search_volume": 8800, "competitor_count": 1900 },
+    { "keyword": "термос с кружкой", "search_volume": 2400, "competitor_count": 95 },
+    { "keyword": "термос детский", "search_volume": 5400, "competitor_count": 2600 },
+    { "keyword": "термос 1 литр", "search_volume": 6700, "competitor_count": 410 },
+    { "keyword": "термокружка", "search_volume": 15200, "competitor_count": 3300 },
+    { "keyword": "термос подарочный", "search_volume": 1300, "competitor_count": 60 },
+    { "keyword": "термос без данных" }
+  ]
+}

@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local/ozon-workbench/workbench-pricing-result.schema.json",
+  "title": "Workbench Pricing Result（本工作台的定价结果契约）",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "product_id",
+    "pricing_source",
+    "config",
+    "skus",
+    "recommendation",
+    "warnings",
+    "generated_at"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "product_id": { "type": "string", "pattern": "^P[0-9]{6}$" },
+    "pricing_source": { "const": "workbench-pricing-engine" },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rub_per_cny", "commission_rate", "target_margin_rate", "min_margin_rate"],
+      "properties": {
+        "rub_per_cny": { "type": "number", "exclusiveMinimum": 0 },
+        "commission_rate": { "type": "number", "minimum": 0, "maximum": 0.6 },
+        "logistics_commission_rate": { "type": "number", "minimum": 0, "maximum": 0.3 },
+        "acquiring_fee_rate": { "type": "number", "minimum": 0, "maximum": 0.1 },
+        "withdrawal_fee_rate": { "type": "number", "minimum": 0, "maximum": 0.1 },
+        "shipping_cost_cny_per_kg": { "type": "number", "minimum": 0 },
+        "shipping_min_cny": { "type": "number", "minimum": 0 },
+        "packing_fee_cny": { "type": "number", "minimum": 0 },
+        "other_fixed_cost_cny": { "type": "number", "minimum": 0 },
+        "volumetric_divisor": { "type": "number", "exclusiveMinimum": 0 },
+        "target_margin_rate": { "type": "number", "minimum": 0, "maximum": 0.9 },
+        "min_margin_rate": { "type": "number", "minimum": 0, "maximum": 0.9 },
+        "round_to_rub": { "type": "integer", "minimum": 1 },
+        "price_ends_with": { "type": "integer", "minimum": 0, "maximum": 99 },
+        "max_price_rub": { "type": "number", "minimum": 0 },
+        "config_file": { "type": "string" }
+      }
+    },
+    "skus": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/skuPricing" }
+    },
+    "recommendation": { "enum": ["UPLOAD", "WARNING", "REJECT"] },
+    "warnings": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "generated_at": { "type": "string", "minLength": 1 }
+  },
+  "$defs": {
+    "nullableMoney": { "type": ["number", "null"], "minimum": 0 },
+    "skuPricing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sku_id",
+        "purchase_cost_cny",
+        "purchase_cost_source",
+        "shipping_cost_cny",
+        "billable_weight_g",
+        "base_cost_cny",
+        "total_fee_rate",
+        "selling_price_cny",
+        "selling_price_rub",
+        "estimated_profit_rub",
+        "margin_rate",
+        "status",
+        "errors"
+      ],
+      "properties": {
+        "sku_id": { "type": "string", "minLength": 1 },
+        "sku_name": { "type": ["string", "null"] },
+        "purchase_cost_cny": { "$ref": "#/$defs/nullableMoney" },
+        "purchase_cost_source": { "type": "string", "minLength": 1 },
+        "shipping_cost_cny": { "type": "number", "minimum": 0 },
+        "actual_weight_g": { "type": ["number", "null"], "minimum": 1 },
+        "volumetric_weight_g": { "type": ["number", "null"], "minimum": 0 },
+        "billable_weight_g": { "type": "number", "minimum": 0 },
+        "base_cost_cny": { "type": "number", "minimum": 0 },
+        "total_fee_rate": { "type": "number", "minimum": 0, "maximum": 1 },
+        "selling_price_cny": { "$ref": "#/$defs/nullableMoney" },
+        "selling_price_rub": { "$ref": "#/$defs/nullableMoney" },
+        "estimated_profit_rub": { "$ref": "#/$defs/nullableMoney" },
+        "margin_rate": { "type": ["number", "null"], "minimum": -1, "maximum": 1 },
+        "status": { "enum": ["UPLOAD", "WARNING", "REJECT"] },
+        "errors": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      }
+    }
+  }
+}

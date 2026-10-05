@@ -212,9 +212,11 @@ def copy_bundle_hint() -> str:
         "- `description_ru`：字符串，至少 300 字符\n"
         f"- `description_sections`：对象，必须同时包含 {sections}（每个字段至少 10 字符）\n"
         f"- `hashtags`：数组，最多 {MAX_HASHTAGS} 个，每个形如 `#простыня` —— **只能有西里尔字母**，"
-        "不能含数字、拉丁字母、下划线、连字符\n"
+        "不能含数字、拉丁字母、下划线、连字符，也不能有空格（一个标签一个词）\n"
         "- `primary_keywords`：数组，取自「已选关键词」\n"
         "- `bullets_ru`：数组（可选），每项 {text_ru, evidence}\n"
+        "证据字段（`evidence` / `source_refs` / `basis`）一律是**字符串数组**，"
+        "元素写成来源路径或字段名（例如 `input/source.json`、`facts.materials`），**不要写成对象**。\n"
         "禁止：中文/拼音、价格与折扣词、联系方式与外链、最高级绝对化用语（лучший/№1 等）、表情符号。"
     )
 

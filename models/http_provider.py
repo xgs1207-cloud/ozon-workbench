@@ -757,7 +757,9 @@ class HttpModelProvider:
             f"{_schema_hint('title-ru')}\n{_schema_hint('description-ru')}\n{_schema_hint('keywords-ru')}\n"
             f"{copy_bundle_hint()}\n"
             "要求：标题 25–120 字符且包含核心词；简介至少 300 字符、五个部分都要写；"
-            "标签（hashtags）只能是西里尔字母、形如 #термос；不要出现中文、拼音或未证实的参数。\n\n"
+            "标签（hashtags）只能是西里尔字母、形如 #термос（不含空格/数字/拉丁字母）；"
+            "`description_ru.source_refs` 至少 3 条、`title_ru.evidence` 至少 1 条，都是字符串数组；"
+            "不要出现中文、拼音或未证实的参数。\n\n"
             + _context_block(
                 source=request.source,
                 analysis=request.analysis,

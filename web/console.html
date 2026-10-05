@@ -6,10 +6,8 @@
 <title>上品工序台</title>
 <style>
   /* ---------------------------------------------------------------- tokens
-     题材：中俄双语的 Ozon 上品工序台（一次采集 → 十六道工序 → 上架）。
-     配色取冷石墨（工作台面）+ Ozon 自家蓝作唯一强调色；语义色只用于状态。
-     刻意避开的通用套路：米色+陶土、近黑+荧光、等高圆角卡片墙、渐变装饰、
-     全大写小标签、圆点分隔的元信息、按钮后加箭头。 */
+     冷石墨台面 + Ozon 蓝唯一强调色；语义色只用于状态。
+     避开：米色+陶土、近黑+荧光、等高圆角卡片墙、渐变装饰、全大写小标签、圆点分隔元信息、按钮加箭头。 */
   :root {
     --paper: #f1f4f8;
     --plate: #ffffff;
@@ -23,9 +21,9 @@
     --hold: #8a5a00;
     --display: Georgia, "Songti SC", "Noto Serif SC", serif;
     --ui: "Segoe UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
-    --radius: 3px;            /* 统一小圆角：这是"台面"，不是卡片墙 */
+    --radius: 3px;
     --rail-w: 300px;
-    --index-w: 280px;
+    --index-w: 260px;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -45,52 +43,103 @@
   :focus-visible { outline: 2px solid var(--ozon); outline-offset: 2px; }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 
-  /* ---------------------------------------------------------------- shell */
-  .shell { display: grid; grid-template-columns: var(--index-w) minmax(0, 1fr); min-height: 100vh; }
-  .index { border-right: 1px solid var(--rule); background: var(--plate); padding: 20px 16px 40px; }
-  .stage-area { padding: 22px 30px 60px; max-width: 1180px; }
+  /* ---------------------------------------------------------------- 顶部导航 */
+  .topbar {
+    position: sticky; top: 0; z-index: 100;
+    display: flex; align-items: center; gap: 28px;
+    background: var(--plate); border-bottom: 1px solid var(--rule);
+    padding: 0 30px; height: 52px;
+  }
+  .topbar .brand { font: 600 17px/1 var(--display); letter-spacing: -0.01em; white-space: nowrap; }
+  .topbar nav { display: flex; gap: 4px; flex: 1; }
+  .nav-btn {
+    border: 0; background: transparent; padding: 0 14px; height: 52px;
+    cursor: pointer; color: var(--steel); font-size: 14px;
+    border-bottom: 2px solid transparent; margin-bottom: -1px;
+  }
+  .nav-btn:hover { color: var(--ink); }
+  .nav-btn[aria-current="true"] { color: var(--ozon); border-bottom-color: var(--ozon); font-weight: 600; }
+  .topbar .health { color: var(--steel); font-size: 13px; white-space: nowrap; }
+  .topbar .health.ok { color: var(--pass); }
 
-  /* 台头：衬线显示体，字距收紧，不用全大写小标签 */
-  .masthead { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
-  .masthead h1 { font: 600 26px/1.15 var(--display); letter-spacing: -0.01em; }
-  .masthead p { margin: 0; color: var(--steel); }
-  .vitals { margin: 16px 0 22px; display: flex; gap: 26px; flex-wrap: wrap; }
-  .vital { min-width: 92px; }
-  .vital b { display: block; font: 600 24px/1.1 var(--display); }
-  .vital span { color: var(--steel); }
+  /* ---------------------------------------------------------------- 视图容器 */
+  .view { display: none; }
+  .view.active { display: block; }
+  .page { padding: 24px 30px 60px; max-width: 1400px; margin: 0 auto; }
+  .page-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 18px; }
+  .page-head h2 { font: 600 22px/1.2 var(--display); letter-spacing: -0.01em; }
+  .page-head .sub { color: var(--steel); }
 
   .rule { height: 1px; background: var(--rule); margin: 18px 0; border: 0; }
 
-  /* ---------------------------------------------------------------- 左侧：按功能分段 */
-  .index-section { margin-bottom: 22px; }
-  .index-section > h2 {
-    font: 600 13px/1.4 var(--ui); color: var(--steel); text-transform: none;
-    letter-spacing: 0.02em; padding-bottom: 6px; border-bottom: 1px solid var(--rule); margin-bottom: 10px;
+  /* ---------------------------------------------------------------- 通用组件 */
+  .btn {
+    border: 1px solid var(--rule-strong); background: var(--plate); border-radius: var(--radius);
+    padding: 8px 14px; cursor: pointer;
   }
-  .index .hint { color: var(--steel); margin: 4px 0 12px; font-size: 12.5px; }
+  .btn:hover:not(:disabled) { border-color: var(--ink); }
+  .btn[disabled] { opacity: .55; cursor: progress; }
+  .btn.primary { background: var(--ozon); border-color: var(--ozon); color: #fff; font-weight: 600; }
+  .btn.danger { border-color: color-mix(in srgb, var(--stop) 55%, var(--rule)); color: var(--stop); font-weight: 600; }
+  .btn.quiet { border-color: transparent; color: var(--steel); text-decoration: underline; text-underline-offset: 3px; }
+  .spin { display: inline-block; width: 11px; height: 11px; margin-right: 7px; border: 2px solid currentColor;
+          border-right-color: transparent; border-radius: 50%; animation: turn .7s linear infinite; vertical-align: -1px; }
+  @keyframes turn { to { transform: rotate(360deg); } }
 
-  /* 采集指引：紧凑的步骤卡，这是新品入库的入口 */
+  .input {
+    border: 1px solid var(--rule-strong); border-radius: var(--radius); padding: 8px 12px;
+    font: inherit; background: var(--plate); color: var(--ink); min-width: 200px;
+  }
+  .input:focus { border-color: var(--ozon); outline: none; }
+
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { color: var(--steel); font-weight: 600; font-size: 13px; white-space: nowrap; }
+  td.num, .mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12.5px; }
+  .table-wrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: var(--radius); background: var(--plate); }
+
+  .chip { font-size: 12px; padding: 1px 8px; border: 1px solid var(--rule-strong); border-radius: 999px; white-space: nowrap; }
+  .chip.pass { color: var(--pass); border-color: color-mix(in srgb, var(--pass) 45%, var(--rule)); }
+  .chip.stop { color: var(--stop); border-color: color-mix(in srgb, var(--stop) 45%, var(--rule)); }
+  .chip.hold { color: var(--hold); border-color: color-mix(in srgb, var(--hold) 45%, var(--rule)); }
+
+  .vitals { display: flex; gap: 32px; flex-wrap: wrap; margin: 4px 0 18px; }
+  .vital { min-width: 80px; }
+  .vital b { display: block; font: 600 26px/1.1 var(--display); }
+  .vital span { color: var(--steel); font-size: 13px; }
+
+  .toast {
+    position: fixed; right: 20px; bottom: 20px; max-width: 420px; background: var(--plate);
+    border: 1px solid var(--rule-strong); border-left: 3px solid var(--ozon); border-radius: var(--radius);
+    padding: 10px 14px; box-shadow: 0 6px 20px rgb(16 23 32 / 12%); z-index: 200;
+  }
+  .toast.stop { border-left-color: var(--stop); }
+  .toast[hidden] { display: none; }
+
+  /* ---------------------------------------------------------------- 工序台视图 */
+  .workbench-shell { display: grid; grid-template-columns: var(--index-w) minmax(0, 1fr); min-height: calc(100vh - 52px); }
+  .wb-sidebar { border-right: 1px solid var(--rule); background: var(--plate); padding: 20px 16px 40px; }
+  .wb-main { padding: 22px 30px 60px; max-width: 1180px; }
+
+  .side-section { margin-bottom: 22px; }
+  .side-section > h3 {
+    font: 600 13px/1.4 var(--ui); color: var(--steel);
+    padding-bottom: 6px; border-bottom: 1px solid var(--rule); margin-bottom: 10px; letter-spacing: 0.02em;
+  }
+  .side-section .hint { color: var(--steel); margin: 4px 0 12px; font-size: 12.5px; }
+
   .capture-guide {
     border: 1px solid var(--rule); border-radius: var(--radius); padding: 12px 13px;
     background: color-mix(in srgb, var(--ozon) 3%, var(--plate)); margin-bottom: 12px;
   }
-  .capture-guide h3 { font: 600 13px/1.4 var(--ui); margin-bottom: 6px; }
-  .capture-guide ol { margin: 0; padding-left: 18px; color: var(--steel); font-size: 12.5px; }
+  .capture-guide h4 { font: 600 13px/1.4 var(--ui); margin-bottom: 6px; }
+  .capture-guide ol { margin: 0; padding-left: 18px; color: var(--steel); font-size: 12px; }
   .capture-guide ol li { margin: 3px 0; }
   .capture-guide code {
-    font-family: ui-monospace, Consolas, monospace; font-size: 11.5px;
+    font-family: ui-monospace, Consolas, monospace; font-size: 11px;
     background: var(--paper); padding: 1px 4px; border-radius: 2px;
   }
 
-  .side-actions { display: flex; flex-direction: column; gap: 6px; }
-  .side-btn {
-    border: 1px solid var(--rule); background: var(--plate); border-radius: var(--radius);
-    padding: 7px 10px; cursor: pointer; text-align: left; font-size: 13px; color: var(--ink);
-  }
-  .side-btn:hover:not(:disabled) { border-color: var(--ink); }
-  .side-btn .sub { display: block; color: var(--steel); font-size: 11.5px; margin-top: 1px; }
-
-  /* ---------------------------------------------------------------- 商品索引 */
   .rows { display: flex; flex-direction: column; }
   .row {
     display: grid; grid-template-columns: 1fr auto; gap: 6px 10px; align-items: center;
@@ -101,12 +150,8 @@
   .row[aria-current="true"] { background: color-mix(in srgb, var(--ozon) 10%, transparent); box-shadow: inset 2px 0 0 var(--ozon); }
   .row .pid { font: 600 14px/1.3 var(--ui); }
   .row .meta { grid-column: 1 / -1; color: var(--steel); font-size: 12.5px; }
-  .chip { font-size: 12px; padding: 1px 7px; border: 1px solid var(--rule-strong); border-radius: 999px; white-space: nowrap; }
-  .chip.pass { color: var(--pass); border-color: color-mix(in srgb, var(--pass) 45%, var(--rule)); }
-  .chip.stop { color: var(--stop); border-color: color-mix(in srgb, var(--stop) 45%, var(--rule)); }
-  .chip.hold { color: var(--hold); border-color: color-mix(in srgb, var(--hold) 45%, var(--rule)); }
 
-  /* ---------------------------------------------------------------- 工序导轨（记忆点） */
+  /* 工序导轨 */
   .workbench { display: grid; grid-template-columns: var(--rail-w) minmax(0, 1fr); gap: 34px; align-items: start; }
   .rail { position: relative; padding-left: 22px; }
   .rail::before { content: ""; position: absolute; left: 6px; top: 6px; bottom: 6px; width: 1px; background: var(--rule-strong); }
@@ -121,14 +166,13 @@
   .step.current::before { background: var(--ozon); border-color: var(--ozon); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ozon) 22%, transparent); }
   .step .n { font: 400 12px/1 var(--display); color: var(--steel); margin-right: 8px; }
   .step.current .n { color: var(--ozon); }
-  /* 唯一的编排动效：选中商品时，标记滑到它当前所在工序 */
   .marker {
     position: absolute; left: 0; width: 13px; height: 13px; margin-top: -6px;
     border-left: 2px solid var(--ozon); border-top: 2px solid var(--ozon);
     transform: rotate(45deg); transition: top 320ms cubic-bezier(.22,.61,.36,1); opacity: 0;
   }
 
-  /* ---------------------------------------------------------------- 校样区 */
+  /* 校样区 */
   .sheet-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
   .sheet-head h2 { font: 600 19px/1.3 var(--display); }
   .sheet-head .sub { color: var(--steel); }
@@ -150,11 +194,6 @@
   .keys { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
   .key { border: 1px solid var(--rule-strong); border-radius: 999px; padding: 1px 9px; font-size: 12.5px; color: var(--steel); }
 
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--rule); vertical-align: top; }
-  th { color: var(--steel); font-weight: 600; }
-  td.num, .mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12.5px; }
-
   .plates { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 12px; }
   .plate { border: 1px solid var(--rule); border-radius: var(--radius); overflow: hidden; background: var(--plate); }
   .plate img { display: block; width: 100%; height: 168px; object-fit: cover; background: var(--paper); }
@@ -165,14 +204,12 @@
   .notes li.stop { color: var(--stop); }
   .notes li.pass { color: var(--pass); }
 
-  /* 采集源：1688 原始信息 */
   .source-meta { display: grid; grid-template-columns: 120px 1fr; gap: 6px 14px; margin-bottom: 14px; }
   .source-meta dt { color: var(--steel); font-size: 12.5px; }
   .source-meta dd { margin: 0; font-size: 13px; }
   .source-meta a { color: var(--ozon); text-decoration: none; word-break: break-all; }
   .source-meta a:hover { text-decoration: underline; }
 
-  /* SKU 选择 */
   .sku-row { display: grid; grid-template-columns: auto 1fr auto auto; gap: 10px; align-items: center; padding: 8px 4px; border-bottom: 1px solid var(--rule); }
   .sku-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--ozon); }
   .sku-name { font-size: 13px; }
@@ -182,192 +219,256 @@
   .sku-state.selected { color: var(--pass); }
   .sku-state.excluded { color: var(--stop); }
 
-  /* ---------------------------------------------------------------- 动作条：按阶段分组 */
   .actions { margin: 22px 0 0; }
   .action-group { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
-  .action-group-label { font-size: 11.5px; color: var(--steel); width: 64px; flex-shrink: 0; }
-  .btn {
-    border: 1px solid var(--rule-strong); background: var(--plate); border-radius: var(--radius);
-    padding: 8px 14px; cursor: pointer;
-  }
-  .btn:hover:not(:disabled) { border-color: var(--ink); }
-  .btn[disabled] { opacity: .55; cursor: progress; }
-  .btn.primary { background: var(--ozon); border-color: var(--ozon); color: #fff; font-weight: 600; }
-  .btn.danger { border-color: color-mix(in srgb, var(--stop) 55%, var(--rule)); color: var(--stop); font-weight: 600; }
-  .btn.quiet { border-color: transparent; color: var(--steel); text-decoration: underline; text-underline-offset: 3px; }
-  .spin { display: inline-block; width: 11px; height: 11px; margin-right: 7px; border: 2px solid currentColor;
-          border-right-color: transparent; border-radius: 50%; animation: turn .7s linear infinite; vertical-align: -1px; }
-  @keyframes turn { to { transform: rotate(360deg); } }
+  .action-group-label { font-size: 11.5px; color: var(--steel); width: 56px; flex-shrink: 0; }
 
   .out { margin-top: 14px; }
-  details { border-top: 1px solid var(--rule); padding: 12px 0; }
-  summary { cursor: pointer; color: var(--steel); }
-  .toast {
-    position: fixed; right: 20px; bottom: 20px; max-width: 420px; background: var(--plate);
-    border: 1px solid var(--rule-strong); border-left: 3px solid var(--ozon); border-radius: var(--radius);
-    padding: 10px 14px; box-shadow: 0 6px 20px rgb(16 23 32 / 12%);
-  }
-  .toast.stop { border-left-color: var(--stop); }
-  .toast[hidden] { display: none; }
 
-  /* ---------------------------------------------------------------- 空状态：工序流程图 */
-  .flow-overview { margin-top: 8px; }
-  .flow-phases { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0; margin: 20px 0; }
+  /* 空状态：六阶段流程 */
+  .flow-phases { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 0; margin: 20px 0; }
   .flow-phase {
     border: 1px solid var(--rule); border-right: 0; padding: 14px 14px 16px; background: var(--plate);
-    position: relative;
   }
   .flow-phase:last-child { border-right: 1px solid var(--rule); }
   .flow-phase .phase-num { font: 400 11px/1 var(--display); color: var(--steel); }
   .flow-phase h3 { font: 600 14px/1.3 var(--ui); margin: 4px 0 6px; }
   .flow-phase p { margin: 0; color: var(--steel); font-size: 12px; line-height: 1.5; }
-  .flow-phase .count { margin-top: 8px; font: 600 20px/1 var(--display); color: var(--ink); }
+  .flow-phase .count { margin-top: 8px; font: 600 22px/1 var(--display); color: var(--ink); }
   .flow-cta { margin-top: 16px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
   .flow-cta .note { color: var(--steel); font-size: 12.5px; }
 
+  /* 店铺卡片 */
+  .store-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
+  .store-card {
+    border: 1px solid var(--rule); border-radius: var(--radius); padding: 16px 18px; background: var(--plate);
+  }
+  .store-card h3 { font: 600 16px/1.3 var(--ui); margin-bottom: 4px; }
+  .store-card .store-id { color: var(--steel); font-size: 12.5px; font-family: ui-monospace, Consolas, monospace; margin-bottom: 10px; }
+  .store-card dl { margin: 0; display: grid; grid-template-columns: 80px 1fr; gap: 4px 10px; font-size: 13px; }
+  .store-card dt { color: var(--steel); }
+  .store-card dd { margin: 0; }
+
   @media (max-width: 1020px) {
-    .shell { grid-template-columns: 1fr; }
-    .index { border-right: 0; border-bottom: 1px solid var(--rule); }
+    .workbench-shell { grid-template-columns: 1fr; }
+    .wb-sidebar { border-right: 0; border-bottom: 1px solid var(--rule); }
     .workbench { grid-template-columns: 1fr; }
-    .stage-area { padding: 18px 18px 48px; }
+    .wb-main { padding: 18px 18px 48px; }
     .flow-phase { border-right: 1px solid var(--rule); border-bottom: 0; }
     .flow-phase:last-child { border-bottom: 1px solid var(--rule); }
+    .topbar { padding: 0 16px; gap: 12px; }
+    .page { padding: 18px 16px 48px; }
   }
 </style>
 </head>
 <body>
-<div class="shell">
-  <!-- 左：按功能分段 -->
-  <aside class="index">
 
-    <!-- 第一段：采集与选词（新品入库的起点） -->
-    <div class="index-section">
-      <h2>采集与选词</h2>
-      <div class="capture-guide">
-        <h3>新品怎么入库</h3>
-        <ol>
-          <li>开隧道：<code>ssh -L 8766:127.0.0.1:8766 …</code></li>
-          <li>Edge 加载 <code>collector/edge-extension/</code></li>
-          <li>打开 1688 商品页 → 插件采集 → 选 SKU + 类目</li>
-          <li>自动入库，商品出现在下方列表</li>
-        </ol>
+<!-- 顶部导航 -->
+<header class="topbar">
+  <div class="brand">上品工序台</div>
+  <nav>
+    <button class="nav-btn" data-view="workbench" aria-current="true" onclick="switchView('workbench')">工序台</button>
+    <button class="nav-btn" data-view="keywords" onclick="switchView('keywords')">关键词库</button>
+    <button class="nav-btn" data-view="sourcing" onclick="switchView('sourcing')">选品与采集</button>
+    <button class="nav-btn" data-view="stores" onclick="switchView('stores')">店铺</button>
+  </nav>
+  <div class="health" id="health">检查服务状态…</div>
+</header>
+
+<!-- ================================================================ 工序台视图 -->
+<div class="view active" id="view-workbench">
+  <div class="workbench-shell">
+    <!-- 左侧栏：只放采集指引 + 商品列表 -->
+    <aside class="wb-sidebar">
+      <div class="side-section">
+        <h3>新品入库</h3>
+        <div class="capture-guide">
+          <h4>四步上新</h4>
+          <ol>
+            <li>开隧道：<code>ssh -L 8766:…</code></li>
+            <li>Edge 加载 <code>collector/edge-extension/</code></li>
+            <li>1688 商品页 → 插件采集 → 选 SKU + 类目</li>
+            <li>自动入库，出现在下方列表</li>
+          </ol>
+        </div>
       </div>
-      <div class="side-actions">
-        <button class="side-btn" onclick="keywords.load()">看关键词库<span class="sub">Seerfar 采词，按热度/竞争筛选</span></button>
-        <button class="side-btn" onclick="keywords.sourcing()">生成选品清单<span class="sub">Ozon 复核链接 + 1688 找货链接</span></button>
-        <button class="side-btn" onclick="keywords.collection()">生成采集清单<span class="sub">哪些词还没采集，按优先级排</span></button>
+
+      <div class="side-section">
+        <h3>商品</h3>
+        <p class="hint" id="indexHint">正在读取…</p>
+        <div class="rows" id="rows" role="listbox" aria-label="商品列表"></div>
       </div>
-      <div class="out" id="keywordOut" style="margin-top:10px;"></div>
+    </aside>
+
+    <!-- 主区域 -->
+    <main class="wb-main">
+      <div class="vitals">
+        <div class="vital"><b id="vProducts">—</b><span>个商品</span></div>
+        <div class="vital"><b id="vReady">—</b><span>个可提交</span></div>
+        <div class="vital"><b id="vKeywords">—</b><span>个达标词</span></div>
+        <div class="vital"><b id="vShops">—</b><span>家可用店铺</span></div>
+      </div>
+
+      <hr class="rule" />
+
+      <div class="workbench">
+        <nav class="rail" id="rail" aria-label="上品工序">
+          <div class="marker" id="marker" aria-hidden="true"></div>
+        </nav>
+
+        <section>
+          <div class="sheet-head">
+            <div>
+              <h2 id="sheetTitle">选一个商品</h2>
+              <div class="sub" id="sheetSub">左边点一个商品，这里显示它的校样与工序进度。</div>
+              <div class="sheet-vitals" id="sheetVitals" hidden>
+                <span class="sheet-vital">当前工序 <b id="vCurrentStep">—</b></span>
+                <span class="sheet-vital">已完成 <b id="vCompleted">—</b></span>
+                <span class="sheet-vital">状态 <b id="vStatus">—</b></span>
+              </div>
+            </div>
+            <button class="btn quiet" onclick="products.refresh()">刷新</button>
+          </div>
+
+          <!-- 空状态 -->
+          <div id="flowOverview">
+            <p style="color:var(--steel);margin:0 0 4px;">从选词到上架，六个阶段。新品从左上角「新品入库」开始，或去顶部「选品与采集」生成清单。</p>
+            <div class="flow-phases" id="flowPhases"></div>
+            <div class="flow-cta">
+              <button class="btn primary" onclick="switchView('sourcing')">去生成采集清单</button>
+              <span class="note">或直接在 1688 商品页用 Edge 插件采集。</span>
+            </div>
+          </div>
+
+          <div id="sheetBody" hidden>
+            <div class="tabs" role="tablist" aria-label="校样">
+              <button class="tab" role="tab" aria-selected="true"  onclick="sheet.tab('source')">采集源</button>
+              <button class="tab" role="tab" aria-selected="false" onclick="sheet.tab('sku')">SKU</button>
+              <button class="tab" role="tab" aria-selected="false" onclick="sheet.tab('copy')">文案</button>
+              <button class="tab" role="tab" aria-selected="false" onclick="sheet.tab('attrs')">属性</button>
+              <button class="tab" role="tab" aria-selected="false" onclick="sheet.tab('images')">图片</button>
+              <button class="tab" role="tab" aria-selected="false" onclick="sheet.tab('gates')">载荷与阻断</button>
+            </div>
+
+            <div class="panel" id="panel-source">（还没有采集源数据）</div>
+            <div class="panel" id="panel-sku" hidden></div>
+            <div class="panel" id="panel-copy" hidden>（还没有文案）</div>
+            <div class="panel" id="panel-attrs" hidden></div>
+            <div class="panel" id="panel-images" hidden></div>
+            <div class="panel" id="panel-gates" hidden></div>
+
+            <div class="actions">
+              <div class="action-group">
+                <span class="action-group-label">工序</span>
+                <button class="btn primary" id="btn-run" onclick="actions.run()">跑流程（干跑）</button>
+              </div>
+              <div class="action-group">
+                <span class="action-group-label">上架</span>
+                <button class="btn" id="btn-publish" onclick="actions.publish()">发布图片</button>
+                <button class="btn" id="btn-pre" onclick="actions.preflight()">提交前预检</button>
+                <button class="btn" id="btn-verify" onclick="actions.verify()">提交后核对</button>
+                <button class="btn danger" id="btn-submit" onclick="actions.submit()">真实提交</button>
+              </div>
+            </div>
+
+            <div class="out" id="out">操作结果会显示在这里。</div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+</div>
+
+<!-- ================================================================ 关键词库视图 -->
+<div class="view" id="view-keywords">
+  <div class="page">
+    <div class="page-head">
+      <div>
+        <h2>关键词库</h2>
+        <div class="sub">Seerfar 采词 → 按热度/竞争筛选 → 按类目存储。达标词可用于选品与文案。</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <input class="input" id="kwSearch" placeholder="搜索关键词…" oninput="keywords.render()" />
+        <select class="input" id="kwLimit" onchange="keywords.load()" style="min-width:100px;">
+          <option value="50">50 条</option>
+          <option value="100" selected>100 条</option>
+          <option value="200">200 条</option>
+          <option value="500">500 条</option>
+        </select>
+        <button class="btn" onclick="keywords.load()">刷新</button>
+      </div>
     </div>
-
-    <hr class="rule" style="margin:14px 0;" />
-
-    <!-- 第二段：商品（核心操作对象） -->
-    <div class="index-section">
-      <h2>商品</h2>
-      <p class="hint" id="indexHint">正在读取…</p>
-      <div class="rows" id="rows" role="listbox" aria-label="商品列表"></div>
-    </div>
-
-    <hr class="rule" style="margin:14px 0;" />
-
-    <!-- 第三段：店铺（提交目的地） -->
-    <div class="index-section">
-      <h2>店铺</h2>
-      <div class="out" id="stores">读取中…</div>
-    </div>
-  </aside>
-
-  <!-- 右：工序台 -->
-  <main class="stage-area">
-    <header class="masthead">
-      <h1>上品工序台</h1>
-      <p id="health">检查服务状态…</p>
-    </header>
 
     <div class="vitals">
-      <div class="vital"><b id="vProducts">—</b><span>个商品</span></div>
-      <div class="vital"><b id="vReady">—</b><span>个可提交</span></div>
-      <div class="vital"><b id="vKeywords">—</b><span>个达标词</span></div>
-      <div class="vital"><b id="vShops">—</b><span>家可用店铺</span></div>
+      <div class="vital"><b id="kwTotal">—</b><span>总词数</span></div>
+      <div class="vital"><b id="kwShown">—</b><span>当前显示</span></div>
+      <div class="vital"><b id="kwCats">—</b><span>类目数</span></div>
     </div>
 
-    <hr class="rule" />
-
-    <div class="workbench">
-      <!-- 工序导轨：这是本页唯一"用力"的地方（工序是真序列，编号才有意义） -->
-      <nav class="rail" id="rail" aria-label="上品工序">
-        <div class="marker" id="marker" aria-hidden="true"></div>
-      </nav>
-
-      <section>
-        <div class="sheet-head">
-          <div>
-            <h2 id="sheetTitle">选一个商品</h2>
-            <div class="sub" id="sheetSub">左边点一个商品，这里显示它的校样与工序进度。</div>
-            <div class="sheet-vitals" id="sheetVitals" hidden>
-              <span class="sheet-vital">当前工序 <b id="vCurrentStep">—</b></span>
-              <span class="sheet-vital">已完成 <b id="vCompleted">—</b></span>
-              <span class="sheet-vital">状态 <b id="vStatus">—</b></span>
-            </div>
-          </div>
-          <button class="btn quiet" onclick="products.refresh()">刷新</button>
-        </div>
-
-        <!-- 空状态：工序流程图 -->
-        <div id="flowOverview" class="flow-overview">
-          <p style="color:var(--steel);margin:0 0 4px;">从选词到上架，六个阶段。新品从左上角「采集与选词」开始。</p>
-          <div class="flow-phases" id="flowPhases"></div>
-          <div class="flow-cta">
-            <button class="btn primary" onclick="keywords.collection()">生成采集清单，开始新品</button>
-            <span class="note">或直接在 1688 商品页用 Edge 插件采集。</span>
-          </div>
-        </div>
-
-        <div id="sheetBody" hidden>
-          <div class="tabs" role="tablist" aria-label="校样">
-            <button class="tab" role="tab" aria-selected="true"  onclick="sheet.tab('source')">采集源</button>
-            <button class="tab" role="tab" aria-selected="false" onclick="sheet.tab('sku')">SKU</button>
-            <button class="tab" role="tab" aria-selected="false" onclick="sheet.tab('copy')">文案</button>
-            <button class="tab" role="tab" aria-selected="false" onclick="sheet.tab('attrs')">属性</button>
-            <button class="tab" role="tab" aria-selected="false" onclick="sheet.tab('images')">图片</button>
-            <button class="tab" role="tab" aria-selected="false" onclick="sheet.tab('gates')">载荷与阻断</button>
-          </div>
-
-          <div class="panel" id="panel-source">（还没有采集源数据）</div>
-          <div class="panel" id="panel-sku" hidden></div>
-          <div class="panel" id="panel-copy" hidden>（还没有文案）</div>
-          <div class="panel" id="panel-attrs" hidden></div>
-          <div class="panel" id="panel-images" hidden></div>
-          <div class="panel" id="panel-gates" hidden></div>
-
-          <!-- 动作条：按阶段分组 -->
-          <div class="actions">
-            <div class="action-group">
-              <span class="action-group-label">工序</span>
-              <button class="btn primary" id="btn-run" onclick="actions.run()">跑流程（干跑）</button>
-            </div>
-            <div class="action-group">
-              <span class="action-group-label">上架</span>
-              <button class="btn" id="btn-publish" onclick="actions.publish()">发布图片</button>
-              <button class="btn" id="btn-pre" onclick="actions.preflight()">提交前预检</button>
-              <button class="btn" id="btn-verify" onclick="actions.verify()">提交后核对</button>
-              <button class="btn danger" id="btn-submit" onclick="actions.submit()">真实提交</button>
-            </div>
-          </div>
-
-          <div class="out" id="out">操作结果会显示在这里。</div>
-        </div>
-      </section>
+    <div class="table-wrap">
+      <table id="kwTable">
+        <thead><tr><th>关键词</th><th>归一化词</th><th>类目</th><th>搜索量</th><th>竞争度</th><th>状态</th></tr></thead>
+        <tbody><tr><td colspan="6">加载中…</td></tr></tbody>
+      </table>
     </div>
-  </main>
+  </div>
+</div>
+
+<!-- ================================================================ 选品与采集视图 -->
+<div class="view" id="view-sourcing">
+  <div class="page">
+    <div class="page-head">
+      <div>
+        <h2>选品与采集</h2>
+        <div class="sub">从关键词库生成选品清单（Ozon 复核 + 1688 找货），或生成采集清单（哪些词还没采集）。</div>
+      </div>
+    </div>
+
+    <div class="tabs" style="margin-bottom:18px;">
+      <button class="tab" aria-selected="true" onclick="sourcing.tab('plan')">选品清单</button>
+      <button class="tab" aria-selected="false" onclick="sourcing.tab('collect')">采集清单</button>
+    </div>
+
+    <div id="sourcingPanel">
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:14px;flex-wrap:wrap;">
+        <label style="color:var(--steel);font-size:13px;">Top</label>
+        <select class="input" id="srcTop" style="min-width:80px;">
+          <option value="10">10</option>
+          <option value="20" selected>20</option>
+          <option value="50">50</option>
+        </select>
+        <button class="btn primary" id="srcGenBtn" onclick="sourcing.generate()">生成清单</button>
+        <span class="sub" id="srcHint" style="color:var(--steel);font-size:12.5px;"></span>
+      </div>
+      <div class="table-wrap" id="srcResult">
+        <table><tbody><tr><td>还没有生成清单，点上方按钮。</td></tr></tbody></table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================================================================ 店铺视图 -->
+<div class="view" id="view-stores">
+  <div class="page">
+    <div class="page-head">
+      <div>
+        <h2>店铺</h2>
+        <div class="sub">Ozon 店铺注册表。启用且凭据就绪的店铺才能真实提交。</div>
+      </div>
+      <button class="btn" onclick="stores.load()">刷新</button>
+    </div>
+    <div class="store-grid" id="storeGrid">加载中…</div>
+  </div>
 </div>
 
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
 <script>
 const $ = (id) => document.getElementById(id);
-const state = { products: [], current: null, store: null, steps: [], summary: null, source: null, skuState: null };
+const state = {
+  products: [], current: null, store: null, steps: [], summary: null, source: null,
+  currentView: 'workbench', sourcingTab: 'plan',
+};
 
 async function api(method, path, body) {
   const response = await fetch(path, {
@@ -398,9 +499,19 @@ function busy(button, on) {
   else if (button.dataset.label) { button.textContent = button.dataset.label; }
 }
 
-/* ------------------------------------------------------------------ 引导：服务状态 / 工序 / 店铺 */
+/* ------------------------------------------------------------------ 视图切换 */
+function switchView(name) {
+  state.currentView = name;
+  document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-' + name));
+  document.querySelectorAll('.nav-btn').forEach((b) => b.setAttribute('aria-current', String(b.dataset.view === name)));
+  if (name === 'keywords') keywords.load();
+  if (name === 'stores') stores.load();
+  if (name === 'sourcing') { sourcing.tab(state.sourcingTab); }
+}
+
+/* ------------------------------------------------------------------ 引导 */
 async function boot() {
-  try { await api('GET', '/health'); $('health').textContent = '服务正常'; }
+  try { await api('GET', '/health'); $('health').textContent = '服务正常'; $('health').classList.add('ok'); }
   catch { $('health').textContent = '服务不可用'; }
   try {
     const data = await api('GET', '/api/workbench/steps');
@@ -412,12 +523,7 @@ async function boot() {
     const usable = shops.filter((shop) => shop.enabled && shop.credentials_ready);
     state.store = usable.length ? usable[0].id : (shops[0] || {}).id || null;
     $('vShops').textContent = usable.length;
-    $('stores').innerHTML = shops.map((shop) => {
-      const state_ = !shop.enabled ? '未启用'
-        : shop.credentials_ready ? '可用' : '缺凭据 ' + (shop.missing_env || []).join('、');
-      return `<div style="padding:4px 0;border-bottom:1px solid var(--rule);">${shop.id}｜${state_}｜${shop.default_currency_code || ''}</div>`;
-    }).join('') || '还没有店铺';
-  } catch { $('stores').textContent = '读取店铺失败'; }
+  } catch {}
   await products.refresh();
   renderFlowPhases();
 }
@@ -434,7 +540,7 @@ const products = {
       $('vReady').textContent = ready;
       $('indexHint').textContent = state.products.length
         ? `${state.products.length} 个商品，${ready} 个可直接提交`
-        : '还没有商品：用 Edge 插件在 1688 页面采集，或生成采集清单';
+        : '还没有商品：用 Edge 插件在 1688 页面采集';
       $('rows').innerHTML = state.products.map((item) => {
         const chip = item.ready_to_submit ? 'pass' : 'hold';
         const text = item.ready_to_submit ? '可提交' : (item.status || '进行中');
@@ -454,17 +560,16 @@ const products = {
   },
 };
 
-/* ------------------------------------------------------------------ 空状态：六阶段流程 */
+/* ------------------------------------------------------------------ 六阶段统计 */
 function renderFlowPhases() {
   const phases = [
-    { num: '01', title: '选词选品', desc: 'Seerfar 采词 → 热度筛选 → 选品清单 + 采集清单', key: 'keywords' },
-    { num: '02', title: '采集入库', desc: 'Edge 插件抓 1688 → 选 SKU + 类目 → 服务端下载图片入库', key: 'collected' },
-    { num: '03', title: '文案生图', desc: 'AI 产品分析 → 选词 → 俄文标题/简介 → 图片规划 → 豆包生图', key: 'images' },
-    { num: '04', title: '类目属性', desc: '真实 Ozon 类目 + 43 个属性填值 + 变体合并 + 型号名称', key: 'attrs' },
-    { num: '05', title: '预检提交', desc: '发布图片到 COS → 币种/凭据/图片可达预检 → 真实提交 Ozon', key: 'submit' },
-    { num: '06', title: '提交核对', desc: '轮询终态 → 回读 SKU/属性/图片转存/变体合并 → 台账回填', key: 'verify' },
+    { num: '01', title: '选词选品', desc: 'Seerfar 采词 → 热度筛选 → 选品/采集清单', key: 'keywords' },
+    { num: '02', title: '采集入库', desc: 'Edge 插件抓 1688 → 选 SKU + 类目 → 入库', key: 'collected' },
+    { num: '03', title: '文案生图', desc: 'AI 分析 → 选词 → 俄文文案 → 生图', key: 'images' },
+    { num: '04', title: '类目属性', desc: '真实 Ozon 类目 + 属性填值 + 变体合并', key: 'attrs' },
+    { num: '05', title: '预检提交', desc: '发布图片 → 币种/凭据/图片预检 → 真提交', key: 'submit' },
+    { num: '06', title: '提交核对', desc: '轮询终态 → 回读 SKU/属性/图片 → 台账回填', key: 'verify' },
   ];
-  // 统计各阶段商品数（按 status 粗分）
   const counts = { keywords: 0, collected: 0, images: 0, attrs: 0, submit: 0, verify: 0 };
   for (const p of state.products) {
     const s = p.status || '';
@@ -517,7 +622,7 @@ const sheet = {
     for (const name of ['source', 'sku', 'copy', 'attrs', 'images', 'gates']) {
       $('panel-' + name).hidden = name !== which;
     }
-    document.querySelectorAll('.tab').forEach((button) => {
+    document.querySelectorAll('#sheetBody .tab').forEach((button) => {
       const order = ['采集源', 'SKU', '文案', '属性', '图片', '载荷与阻断'];
       const index = ['source', 'sku', 'copy', 'attrs', 'images', 'gates'].indexOf(which);
       button.setAttribute('aria-selected', String(button.textContent.trim() === order[index]));
@@ -647,7 +752,7 @@ const sku = {
           const isEx = excluded.has(id);
           const opts = (row.option_values || []).map((o) => `${o.name_cn || o.name || ''}:${o.value_cn || o.value || ''}`).join(' / ');
           return `<div class="sku-row">
-            <input type="checkbox" data-sku-id="${id}" ${isSel ? 'checked' : ''} onchange="sku.toggle()" />
+            <input type="checkbox" data-sku-id="${id}" ${isSel ? 'checked' : ''} />
             <div class="sku-name">${row.sku_name || id}<span class="opts">${opts || ''}</span></div>
             <span class="sku-price">¥${row.purchase_price_cny ?? row.purchase_price ?? ''}</span>
             <span class="sku-state ${isSel ? 'selected' : isEx ? 'excluded' : ''}">${isSel ? '已选' : isEx ? '排除' : '未选'}</span>
@@ -663,7 +768,6 @@ const sku = {
       $('panel-sku').textContent = '读取 SKU 失败：' + (error.data?.detail || error.message);
     }
   },
-  toggle() { /* 仅更新 UI 状态，保存时统一提交 */ },
   selectAll() {
     document.querySelectorAll('#panel-sku input[type="checkbox"]').forEach((cb) => { cb.checked = true; });
   },
@@ -689,7 +793,7 @@ const sku = {
 async function select(productId) {
   state.current = productId;
   document.querySelectorAll('.row').forEach((row) => row.setAttribute('aria-current', 'false'));
-  await products.refresh();          // 先刷新索引（导轨要读 completed_steps）
+  await products.refresh();
   try {
     const data = await api('GET', `/api/workbench/products/${productId}/summary`);
     state.summary = { ...data, status: state.products.find((item) => item.product_id === productId) };
@@ -742,36 +846,121 @@ const actions = {
   },
 };
 
-/* ------------------------------------------------------------------ 关键词与选品 */
-function table(rows) {
-  if (!Array.isArray(rows) || !rows.length) return '<p class="sub">没有数据</p>';
-  const keys = Array.from(new Set(rows.flatMap((row) => Object.keys(row || {})))).slice(0, 6);
-  return `<table><thead><tr>${keys.map((key) => `<th>${key}</th>`).join('')}</tr></thead><tbody>
-    ${rows.slice(0, 20).map((row) => `<tr>${keys.map((key) => {
-      const value = row[key];
-      const text = value && typeof value === 'object' ? JSON.stringify(value) : (value ?? '');
-      return `<td>${String(text).slice(0, 90)}</td>`;
-    }).join('')}</tr>`).join('')}</tbody></table>`;
-}
-
+/* ------------------------------------------------------------------ 关键词库 */
 const keywords = {
+  data: [],
+  async load() {
+    const limit = $('kwLimit').value;
+    try {
+      const data = await api('GET', `/api/keywords?limit=${limit}`);
+      this.data = data.items || [];
+      $('kwTotal').textContent = data.count ?? this.data.length;
+      const cats = new Set(this.data.map((item) => item.category_id || item.category || '').filter(Boolean));
+      $('kwCats').textContent = cats.size;
+      this.render();
+    } catch (error) {
+      $('kwTable').querySelector('tbody').innerHTML = `<tr><td colspan="6">加载失败：${error.message}</td></tr>`;
+    }
+  },
+  render() {
+    const q = ($('kwSearch').value || '').toLowerCase().trim();
+    const filtered = q
+      ? this.data.filter((item) => JSON.stringify(item).toLowerCase().includes(q))
+      : this.data;
+    $('kwShown').textContent = filtered.length;
+    if (!filtered.length) {
+      $('kwTable').querySelector('tbody').innerHTML = `<tr><td colspan="6">没有匹配的关键词</td></tr>`;
+      return;
+    }
+    // 动态取列（前 8 个字段）
+    const keys = Array.from(new Set(filtered.flatMap((row) => Object.keys(row || {})))).slice(0, 8);
+    $('kwTable').querySelector('thead').innerHTML = '<tr>' + keys.map((k) => `<th>${k}</th>`).join('') + '</tr>';
+    $('kwTable').querySelector('tbody').innerHTML = filtered.slice(0, 200).map((row) => {
+      return '<tr>' + keys.map((key) => {
+        const value = row[key];
+        const text = value && typeof value === 'object' ? JSON.stringify(value) : (value ?? '');
+        return `<td>${String(text).slice(0, 80)}</td>`;
+      }).join('') + '</tr>';
+    }).join('');
+  },
+};
+
+/* ------------------------------------------------------------------ 选品与采集 */
+const sourcing = {
+  tab(which) {
+    state.sourcingTab = which;
+    document.querySelectorAll('#view-sourcing .tab').forEach((b) => {
+      b.setAttribute('aria-selected', String(b.textContent.trim() === (which === 'plan' ? '选品清单' : '采集清单')));
+    });
+    $('srcHint').textContent = which === 'plan'
+      ? '从关键词库 Top N 生成选品清单（含 Ozon 复核链接 + 1688 找货链接）'
+      : '从关键词库生成采集清单（哪些词还没采集，按优先级排）';
+    $('srcResult').innerHTML = '<table><tbody><tr><td>还没有生成清单，点上方按钮。</td></tr></tbody></table>';
+  },
+  async generate() {
+    const btn = $('srcGenBtn');
+    const top = $('srcTop').value;
+    busy(btn, true);
+    $('srcResult').innerHTML = '<table><tbody><tr><td>生成中…</td></tr></tbody></table>';
+    try {
+      const path = state.sourcingTab === 'plan'
+        ? '/api/workbench/sourcing-plan'
+        : '/api/workbench/collection-plan';
+      const body = state.sourcingTab === 'plan' ? { top: parseInt(top) } : { top: parseInt(top), from_library: true };
+      const data = await api('POST', path, body);
+      const rows = (data.plan?.rows || data.plan?.tasks || []);
+      if (!rows.length) {
+        $('srcResult').innerHTML = '<table><tbody><tr><td>清单为空</td></tr></tbody></table>';
+        toast('清单已生成（为空）');
+        return;
+      }
+      const keys = Array.from(new Set(rows.flatMap((row) => Object.keys(row || {})))).slice(0, 8);
+      $('srcResult').innerHTML = `<div class="table-wrap"><table>
+        <thead><tr>${keys.map((k) => `<th>${k}</th>`).join('')}</tr></thead>
+        <tbody>${rows.slice(0, 100).map((row) => '<tr>' + keys.map((key) => {
+          const value = row[key];
+          const text = value && typeof value === 'object' ? JSON.stringify(value) : (value ?? '');
+          return `<td>${String(text).slice(0, 90)}</td>`;
+        }).join('') + '</tr>').join('')}</tbody></table></div>`;
+      toast(`已生成 ${rows.length} 条`);
+    } catch (error) {
+      $('srcResult').innerHTML = `<table><tbody><tr><td>生成失败：${error.data?.detail || error.message}</td></tr></tbody></table>`;
+      toast('生成失败', 'stop');
+    } finally {
+      busy(btn, false);
+    }
+  },
+};
+
+/* ------------------------------------------------------------------ 店铺 */
+const stores = {
   async load() {
     try {
-      const data = await api('GET', '/api/keywords?limit=15');
-      $('keywordOut').innerHTML = `<p class="sub">共 ${data.count ?? 0} 条</p>` + table(data.items || []);
-    } catch (error) { $('keywordOut').textContent = '读取失败：' + error.message; }
-  },
-  async sourcing() {
-    $('keywordOut').textContent = '生成中…';
-    try { const data = await api('POST', '/api/workbench/sourcing-plan', { top: 10 });
-      $('keywordOut').innerHTML = table((data.plan || {}).rows || []); toast('选品清单已生成'); }
-    catch (error) { $('keywordOut').textContent = '生成失败：' + (error.data?.detail || error.message); }
-  },
-  async collection() {
-    $('keywordOut').textContent = '生成中…';
-    try { const data = await api('POST', '/api/workbench/collection-plan', { top: 10, from_library: true });
-      $('keywordOut').innerHTML = table((data.plan || {}).tasks || []); toast('采集清单已生成'); }
-    catch (error) { $('keywordOut').textContent = '生成失败：' + (error.data?.detail || error.message); }
+      const data = await api('GET', '/api/workbench/stores');
+      const shops = data.shops || [];
+      if (!shops.length) {
+        $('storeGrid').innerHTML = '<p style="color:var(--steel);">还没有店铺，先在 config/shops.json 配置。</p>';
+        return;
+      }
+      $('storeGrid').innerHTML = shops.map((shop) => {
+        const ready = shop.enabled && shop.credentials_ready;
+        const statusChip = ready ? '<span class="chip pass">可用</span>'
+          : shop.enabled ? '<span class="chip hold">缺凭据</span>'
+          : '<span class="chip">未启用</span>';
+        const missing = (shop.missing_env || []).join('、') || '—';
+        return `<div class="store-card">
+          <h3>${shop.name || shop.id} ${statusChip}</h3>
+          <div class="store-id">${shop.id}</div>
+          <dl>
+            <dt>合同币种</dt><dd>${shop.default_currency_code || '—'}</dd>
+            <dt>启用</dt><dd>${shop.enabled ? '是' : '否'}</dd>
+            <dt>凭据</dt><dd>${shop.credentials_ready ? '就绪' : `缺少：${missing}`}</dd>
+          </dl>
+        </div>`;
+      }).join('');
+    } catch (error) {
+      $('storeGrid').innerHTML = `<p style="color:var(--stop);">加载失败：${error.message}</p>`;
+    }
   },
 };
 

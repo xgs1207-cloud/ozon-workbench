@@ -444,6 +444,30 @@ Ozon 的 import 只给任务号，最终结果要另查一次。所以提交之�
   **绝不估算**；包装 < 商品本体会被判 `hierarchy_ok=false` 并阻断上传；
 - 产物：`output/pricing-result.json`、`output/measurements.json`、`output/profit-analysis.json`（都过契约）。
 
+### 1688 采集（浏览器抓 URL → 本机下载 → 推服务器）
+
+零手工三步，数据全程只在自己机器/服务器上：
+
+```powershell
+# ① 在 1688 商品页的控制台粘贴 collector/capture_1688.js（或存成书签）
+#    → 它会下载 capture-<offerId>.json（标题 / SKU / 主图 / SKU 图 / 详情图 URL）
+#    抓不到的字段会明确告诉你（1688 改版时选择器要调整），不会编数据
+
+# ② 本机把图片下载成可入库的文件夹（自动带 Referer，去重，按内容魔数判类型）
+python -m collector.fetch_images --json capture-808080808.json --out D:\capture\p1
+python -m collector.fetch_images --json capture-808080808.json --out D:\capture\p1 --dry-run  # 只看计划
+
+# ③ 推到服务器入库（带上你选的关键词与 Ozon 类目）
+python -m collector.push_capture --folder D:\capture\p1 `
+    --keyword "простынь на резинке 160х200" --category-id 17028922 --type-id 91875
+```
+
+- **为什么分两步**：浏览器不能任意写磁盘，而 1688 图片 CDN 会校验 `Referer`；
+  用本机 Python 带正确请求头下载最稳（也便于重试、去重、失败可查）；
+- 下载器**只认真实图片**：按内容魔数判类型（不看 URL 后缀），非图片/403/超限/重复内容都会记进 `skipped` 并说明原因；
+- 下完会写出 `product.json`（source_url / 标题 / SKU / 关键词），所以第 ③ 步直接可用；
+- 也支持你手动存图：只要按 `main-images/ sku-images/ detail-images/` 放好，直接跳到第 ③ 步。
+
 ### 一键跑一个商品 / 一批商品（`pipeline.launch`）
 
 后半条链原本要手工敲两条命令（先 `runner` 跑到质检、再发布图片、再 `runner` 提交），容易漏、也容易顺序搞错。
@@ -563,6 +587,12 @@ python -m pipeline.doctor --products-root products --json      # 机器读
 | `GET /api/workbench/products/{id}/artifacts` | 产物清单 + 质检/属性/图片摘要 |
 | `GET /api/workbench/products/{id}/publications` | 发布台账 + 分发计划（幂等状态） |
 | `POST /api/workbench/products/{id}/run` | 跑流水线（默认干跑 + fake + 占位生图，绝不真提交） |
+| `POST /api/workbench/products/{id}/launch` | **一键跑**：授权→生图→发布图片→质检→载荷→提交（界面用；**拒绝真实提交**，真提交走 CLI） |
+| `POST /api/collector/products/capture` | 远程采集入库（图片 base64；配 `collector.push_capture`） |
+| `POST /api/workbench/sourcing-plan` | 生成选品清单（写 `output/sourcing-plan.{json,md}`） |
+| `POST /api/workbench/collection-plan` | 生成采集清单（带"哪些词已采集"） |
+| `POST /api/workbench/collection-plan/mark` | 把关键词补记到已有商品 |
+| `GET /api/workbench/keyword-products` | 关键词 → 商品 汇总 |
 | `GET /api/workbench/doctor` | 预检报告 |
 
 ### M1：采集入库与素材文件夹

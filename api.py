@@ -435,6 +435,82 @@ def collector_capture_upload(request: CaptureUploadRequest) -> dict[str, Any]:
     return {"ok": True, "via": "capture-upload", **summary}
 
 
+class LaunchRequest(BaseModel):
+    """一键跑一个商品（默认干跑：fake 模型 + 占位生图，绝不碰 Ozon）。"""
+
+    provider: str | None = Field(None, description="模型层：fake（默认）/ ark / http / none")
+    image_generator: str | None = Field(None, description="生图后端：placeholder / doubao / none")
+    uploader: str | None = Field(None, description="上传器：dry-run（默认）/ simulated / ozon-api")
+    stores: list[str] = Field(default_factory=list, description="目标店铺；不填则用商品上已记录的")
+    oss: str = Field("none", description="图片发布：cos / local / none")
+    oss_root: str | None = None
+    oss_base_url: str | None = None
+    execute_upload: bool = False
+    step_budget: int = Field(30, ge=1, le=60)
+
+
+@app.post("/api/workbench/products/{product_id}/launch")
+def workbench_launch(product_id: str, request: LaunchRequest) -> dict[str, Any]:
+    """在界面上点一下就能跑：授权 → 生图 → 发布图片 → 质检 → 载荷 → 提交（默认干跑）。"""
+    from models import ModelError, load_image_generator, load_provider
+    from pipeline.launch import launch_product
+    from pipeline.upload import DryRunUploader, SimulatedUploader
+
+    directory = _require_product(product_id)
+
+    provider = None
+    if str(request.provider or "fake").lower() not in {"none", "off"}:
+        try:
+            provider = load_provider(request.provider)
+        except ModelError as error:
+            raise HTTPException(status_code=422, detail=f"模型层不可用：{error}") from error
+
+    image_generator = None
+    if request.image_generator and request.image_generator.lower() not in {"none", "off"}:
+        try:
+            image_generator = load_image_generator(request.image_generator)
+        except ModelError as error:
+            raise HTTPException(status_code=422, detail=f"生图后端不可用：{error}") from error
+
+    uploader = None
+    kind = str(request.uploader or "dry-run").lower()
+    if kind not in {"none", "off"}:
+        if kind in {"ozon", "ozon-api", "real"}:
+            raise HTTPException(
+                status_code=409,
+                detail="界面上不允许真实提交：请用 CLI（pipeline.launch --uploader ozon-api --execute-upload）",
+            )
+        uploader = SimulatedUploader() if kind in {"simulated", "sim"} else DryRunUploader()
+
+    publisher = None
+    oss = str(request.oss or "none").lower()
+    if oss == "cos":
+        from pipeline.oss_cos import CosError, _storage_from_env
+
+        try:
+            publisher = _storage_from_env()
+        except CosError as error:
+            raise HTTPException(status_code=422, detail=f"COS 不可用：{error}") from error
+    elif oss == "local":
+        if not (request.oss_root and request.oss_base_url):
+            raise HTTPException(status_code=422, detail="oss=local 需要 oss_root 与 oss_base_url")
+        from pipeline.oss_local import LocalObjectStorage
+
+        publisher = LocalObjectStorage(request.oss_root, request.oss_base_url)
+
+    report = launch_product(
+        directory,
+        provider=provider,
+        image_generator=image_generator,
+        uploader=uploader,
+        publisher=publisher,
+        store_ids=request.stores,
+        execute_upload=bool(request.execute_upload),
+        step_budget=request.step_budget,
+    )
+    return {"ok": bool(report.get("ok")), "report": report}
+
+
 @app.get("/api/collector/products")
 def collector_list(status: str | None = None) -> dict[str, Any]:
     items = [_product_summary(product_id) for product_id in _list_product_ids()]

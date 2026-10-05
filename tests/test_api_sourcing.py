@@ -206,6 +206,55 @@ class SourcingApiTests(unittest.TestCase):
         response = self.client.get("/api/workbench/collection-plan")
         self.assertEqual(response.status_code, 404)
 
+    def test_launch_endpoint_defaults_to_dry_run(self):
+        """界面上点一下：默认 fake + 占位生图 + 干跑，绝不真提交。"""
+        import io
+        import json as _json
+        import shutil
+
+        # 先采集一个商品（带关键词与类目）
+        folder = self.root / "capture-launch"
+        for role in ("main-images", "sku-images", "detail-images"):
+            (folder / role).mkdir(parents=True, exist_ok=True)
+            (folder / role / "01.png").write_bytes(b"\x89PNG\r\n\x1a\n" + role.encode())
+        (folder / "product.json").write_text(
+            _json.dumps(
+                {
+                    "source_url": "https://detail.1688.com/offer/515151515.html",
+                    "title_zh": "纯棉床单",
+                    "category": {"category_id": CATEGORY_ID, "type_id": TYPE_ID},
+                    "skus": [{"sku_id": "S1", "purchase_price_cny": 18.0}],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        ingest = self.client.post("/api/collector/products/import-folder", json={"folder": str(folder)})
+        self.assertEqual(ingest.status_code, 200, ingest.text)
+        product_id = ingest.json()["product_id"]
+
+        response = self.client.post(
+            f"/api/workbench/products/{product_id}/launch",
+            json={"image_generator": "placeholder", "oss": "none", "step_budget": 6},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        report = response.json()["report"]
+        self.assertFalse(report["ok"])  # 没发布图片 / 没跑完，如实报有阻断
+        self.assertEqual(report["product_id"], product_id)
+
+    def test_launch_endpoint_refuses_real_upload(self):
+        response = self.client.post(
+            "/api/workbench/products/P000001/launch", json={"uploader": "ozon-api"}
+        )
+        # 商品不存在 → 404；商品存在时 → 409 且说明只能用 CLI
+        self.assertIn(response.status_code, (404, 409))
+
+    def test_launch_endpoint_local_oss_requires_paths(self):
+        response = self.client.post(
+            "/api/workbench/products/P000001/launch", json={"oss": "local"}
+        )
+        self.assertIn(response.status_code, (404, 422))
+
 
 if __name__ == "__main__":
     unittest.main()

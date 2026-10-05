@@ -527,6 +527,36 @@ class HttpModelProvider:
         )
         return plan
 
+    def translate_terms(
+        self,
+        keywords: Sequence[str],
+        context: Mapping[str, Any] | None = None,
+    ) -> dict[str, str]:
+        """俄文关键词 → 中文找货词（给 1688 搜索用）。只接受输入里出现过的键。"""
+        wanted = [str(item).strip() for item in keywords if str(item).strip()]
+        if not wanted:
+            return {}
+
+        def validate(data: dict[str, Any]) -> list[str]:
+            terms = data.get("terms") if isinstance(data.get("terms"), Mapping) else data
+            if not isinstance(terms, Mapping):
+                return ["必须是 {俄文关键词: 中文找货词} 的对象"]
+            unknown = [key for key in terms if str(key) not in wanted]
+            problems = [f"出现了未要求的键：{item}" for item in unknown[:5]]
+            empty = [key for key, value in terms.items() if not str(value or "").strip()]
+            problems.extend(f"{item} 的中文词为空" for item in empty[:5])
+            return problems
+
+        user = (
+            "把下面的俄文电商关键词逐个翻成**适合在 1688 搜索的中文词**（简洁的品类/材质/规格词，不要句子）。\n"
+            '只输出 JSON：{"terms": {"<原俄文关键词>": "<中文找货词>"}}\n'
+            "键必须与给定关键词完全一致，不要新增或遗漏。\n\n"
+            + _context_block(keywords=wanted, context=dict(context or {}))
+        )
+        payload, _ = self._call_json(task="translate_terms", user=user, validate=validate)
+        terms = payload.get("terms") if isinstance(payload.get("terms"), Mapping) else payload
+        return {str(key): str(value).strip() for key, value in (terms or {}).items() if str(value).strip()}
+
     def generate_image(self, request: ImageRequest) -> dict[str, Any]:
         raise ModelError(
             "HTTP provider 不负责生图：请接入生图后端（见 HANDOFF §5.2），"

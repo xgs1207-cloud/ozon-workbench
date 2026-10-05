@@ -264,6 +264,50 @@ python -m collector.seerfar_xlsx --xlsx <同上> --category-id 1001 --type-id 20
 | 0.911 | 0.968 | 0.095 | `шуйские ситцы постельное белье` | 7,830 | 30 |
 | 0.898 | 0.933 | 0.058 | `озон хоум` | 3,118 | 10 |
 
+### 选品清单（关键词库 → Ozon 复核 + 1688 找货）
+
+```powershell
+python -m collector.sourcing --library keyword-library --top 20              # 生成 output/sourcing-plan.{json,md}
+python -m collector.sourcing --library keyword-library --top 20 --csv plan.csv
+python -m collector.sourcing --library keyword-library --top 20 --translate --provider ark   # 让模型给中文找货词
+```
+
+每个词给出三件事：**Ozon 市场复核链接**（俄文词直接搜）、**1688 找货链接**（中文词，1688 搜俄文搜不到）、
+**打分依据**（score / 热度分位 / 竞争分位 / 月搜热度 / 竞对数）。
+
+- **中文找货词**默认取 Seerfar 表里的中文类目名（`床单`），`--translate` 时让模型翻译（模型不可用就回收类目名并告警，不猜）；
+- **疑似品牌词会被标出来**：含拉丁字母/®™ 的词单列一节提醒"按品类找货、不要照抄品牌"，
+  避免侵权与被 Ozon 下架（你的真实数据里前 5 名有 2 个属于这类）；
+- 清单**不发任何网络请求**：只生成链接与优先级；市场数据仍由你在 Ozon 页面人工复核。
+
+**实测（你的 773 条词）**：默认门槛下达标 121 条，清单前 5 名见下表（`--top 5`）：
+
+| # | score | 关键词 | 类型 | 1688 找货词 |
+|---|---|---|---|---|
+| 1 | 0.937 | `yerrna` | 品牌? | 床单 |
+| 2 | 0.928 | `yerrna постельное белье` | 品牌? | 床单 |
+| 3 | 0.916 | `шуйские ситцы` | 品类 | 床单 |
+| 4 | 0.911 | `шуйские ситцы постельное белье` | 品类 | 床单 |
+| 5 | 0.898 | `озон хоум` | 品类 | 床单 |
+
+### 类目绑定（类目名 → 真实 category_id/type_id）
+
+Seerfar 表只有类目**名称**（`床单` / `Простыня`），没有 Ozon 的 id，而关键词库与商品都要用真实类目：
+
+```powershell
+# 离线演练（用 contracts/fixtures 的类目树）
+python -m pipeline.category --name "Термосы" --fixture-dir contracts/fixtures
+# 真实模式（需要 Ozon 凭据）
+python -m pipeline.category --name "Простыня" --name "Наволочка" --shop shop-a
+python -m pipeline.category --from-library keyword-library          # 一次解析库里所有类目名
+# 把绑定套用到 Seerfar 导入（真实 id 进关键词库）
+python -m collector.seerfar_xlsx --xlsx "<表>" --library keyword-library --bindings config/category-bindings.json
+```
+
+- 只读、按名字匹配（精确 > 前缀 > 包含），**找不到就如实报 unmatched**，不猜一个 id；
+- `--auto-pick-unique`：只有唯一精确匹配时才自动选定，歧义则留给人判断；
+- 结果写 `config/category-bindings.json`（本地配置，已在 .gitignore 里）。
+
 ### 模型层（fake / http）
 
 ```powershell

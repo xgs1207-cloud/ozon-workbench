@@ -352,26 +352,65 @@ def import_xlsx(
     competition_field: str = "竞对数",
     max_rows: int | None = None,
     rescore: bool = True,
+    bindings_path: Path | str | None = None,
 ) -> dict[str, Any]:
-    """读表 → 入库（按类目分组）→ 重算分数 → 返回摘要。"""
+    """读表 → 入库（按类目分组）→ 重算分数 → 返回摘要。
+
+    ``bindings_path`` 给出时，会用 ``config/category-bindings.json`` 里按类目名的绑定
+    （由 ``python -m pipeline.category`` 生成）把**真实 Ozon category_id/type_id** 套到每条记录上。
+    """
     from keyword_library import store as keyword_store
 
     parsed = read_seerfar_xlsx(
         path, sheet=sheet, competition_field=competition_field, max_rows=max_rows
     )
-    payload = to_ingest_payload(parsed["records"], category_id=category_id, type_id=type_id)
-    grouped = payload.pop("_grouped")
+
+    bindings: dict[str, Any] = {}
+    if bindings_path:
+        from pipeline.category import binding_for, load_bindings
+
+        bindings = load_bindings(bindings_path)
+
+    def resolve(record: Mapping[str, Any]) -> tuple[str, str, bool]:
+        extra = record.get("extra") if isinstance(record.get("extra"), Mapping) else {}
+        if bindings:
+            from pipeline.category import binding_for as _lookup
+
+            found = _lookup(bindings, extra.get("category_name_zh"), extra.get("category_name_ru"))
+            if found:
+                return found["category_id"], found["type_id"], True
+        if category_id and type_id:
+            return str(category_id), str(type_id), True
+        synthetic = synthetic_category_key(extra.get("category_name_ru"), extra.get("category_name_zh"))
+        return synthetic, synthetic, False
+
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    bound_hits = 0
+    for record in parsed["records"]:
+        resolved_category, resolved_type, matched = resolve(record)
+        bound_hits += 1 if matched and bindings else 0
+        grouped.setdefault((resolved_category, resolved_type), []).append(
+            {
+                "keyword": record.get("keyword"),
+                "category_id": resolved_category,
+                "type_id": resolved_type,
+                "search_volume": record.get("search_volume"),
+                "competitor_count": record.get("competitor_count"),
+                "trend": record.get("trend"),
+                "extra": dict(record.get("extra") or {}),
+            }
+        )
 
     imported = 0
     created = 0
     updated = 0
     categories: dict[str, int] = {}
     for key, entries in grouped.items():
-        result = keyword_store.upsert(library_root, entries, source=payload["source"])
+        result = keyword_store.upsert(library_root, entries, source="seerfar")
         imported += len(entries)
         created += int(result.get("created") or 0)
         updated += int(result.get("updated") or 0)
-        categories[key] = len(entries)
+        categories[f"{key[0]}:{key[1]}"] = len(entries)
 
     rescored: dict[str, Any] = {}
     if rescore:
@@ -392,9 +431,13 @@ def import_xlsx(
             rescored[key] = {**result, "qualified": qualified}
 
     warnings: list[str] = []
-    if not (category_id and type_id):
+    if bindings:
+        warnings.append(f"已按类目绑定套用真实 Ozon 类目（命中 {bound_hits}/{len(parsed['records'])} 条）")
+        if bound_hits < len(parsed["records"]):
+            warnings.append("部分记录的类目名没有绑定：这些记录仍用合成主键，建议补跑 pipeline.category")
+    if not (category_id and type_id) and not bindings:
         warnings.append(
-            "未提供 --category-id/--type-id：按类目名生成了合成主键（seerfar-<hash>）。"
+            "未提供 --category-id/--type-id 或 --bindings：按类目名生成了合成主键（seerfar-<hash>）。"
             "关键词库只用于选词；真正上架的类目来自 Ozon Seller API。"
         )
     if parsed["skipped_rows"]:
@@ -410,6 +453,7 @@ def import_xlsx(
         "created": created,
         "updated": updated,
         "categories": categories,
+        "bound_records": bound_hits,
         "competition_field": parsed["competition_field"],
         "columns": parsed["columns"],
         "unmapped_columns": parsed["unmapped_columns"],
@@ -438,6 +482,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--sheet", default=None)
     parser.add_argument("--competition-field", default="竞对数", choices=COMPETITION_FIELDS)
     parser.add_argument("--max-rows", type=int, default=None, help="只读前 N 行（试跑用）")
+    parser.add_argument(
+        "--bindings",
+        default=None,
+        help="类目绑定文件（pipeline.category 生成）；给了就用真实 Ozon category_id/type_id",
+    )
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
@@ -450,6 +499,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             sheet=args.sheet,
             competition_field=args.competition_field,
             max_rows=args.max_rows,
+            bindings_path=args.bindings,
         )
     except (SeerfarError, OSError) as error:
         print(json.dumps({"ok": False, "error": str(error)}, ensure_ascii=False, indent=2))

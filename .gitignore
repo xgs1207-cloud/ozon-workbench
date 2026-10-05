@@ -7,8 +7,7 @@ logs/
 *.log
 
 # ---- 本地配置与凭据（绝不提交）----
-config/shops.json
-config/pricing.json
+config/
 .env
 .env.*
 *.local.json

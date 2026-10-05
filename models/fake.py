@@ -213,6 +213,10 @@ class FakeProvider:
             generated_by=self.name,
         )
 
+    def translate_terms(self, keywords: Sequence[str], context: Mapping[str, Any] | None = None) -> dict[str, str]:
+        """确定性 fake **不做翻译**：返回空表，让调用方用 Seerfar 中文类目名兜底（不猜）。"""
+        return {}
+
     # ------------------------------------------------------------- 文案
 
     def write_copy_ru(self, request: CopyRequest) -> dict[str, Any]:

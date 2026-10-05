@@ -97,6 +97,22 @@
     document.querySelectorAll("[class*=detail] img, [class*=desc] img, #detail-content img")
   ).slice(0, 30);
 
+  // ---- 详情页属性表：材质 / 包装数量 / 认证 / 克重 / 品牌（真模型曾因缺这些要求人工确认）
+  const attributes = {};
+  document.querySelectorAll("table tr, .offer-attr-item, [class*=attribute] li, [class*=attr] li").forEach((row) => {
+    const cells = Array.from(row.querySelectorAll("td, th, .attr-name, .attr-value, span"))
+      .map((cell) => (cell.textContent || "").trim())
+      .filter(Boolean);
+    if (cells.length >= 2) {
+      const name = cells[0].replace(/[:：]\s*$/, "");
+      const value = cells[1];
+      if (name && value && name.length <= 12 && value.length <= 120 && !attributes[name]) {
+        attributes[name] = value;
+      }
+    }
+  });
+  result.attributes_zh = attributes;
+
   const missing = [];
   if (!result.title_zh) missing.push("title_zh");
   if (!result.skus.length) missing.push("skus");

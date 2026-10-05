@@ -154,7 +154,7 @@ def fetch_folder(
             index += 1
 
     descriptor: dict[str, Any] = {"source_url": capture.get("source_url")}
-    for key in ("title_zh", "skus", "category", "keywords", "keyword_source", "keyword_category"):
+    for key in ("title_zh", "skus", "category", "keywords", "keyword_source", "keyword_category", "attributes_zh"):
         if capture.get(key):
             descriptor[key] = capture[key]
     if not dry_run:

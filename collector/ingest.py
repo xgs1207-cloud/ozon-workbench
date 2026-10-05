@@ -263,7 +263,58 @@ def normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         "keywords": _normalize_keywords(payload),
         "keyword_category": dict(keyword_category) if isinstance(keyword_category, Mapping) else None,
         "keyword_source": payload.get("keyword_source"),
+        # 1688 详情页的规格/属性：材质、包装数量、认证等（真模型曾因缺这些要求人工确认）
+        "attributes_zh": _normalize_attributes(payload),
     }
+
+
+#: 详情页属性表里我们关心的键（中文原文，用于属性填值与 facts 补全）
+ATTRIBUTE_ALIASES: dict[str, tuple[str, ...]] = {
+    "material": ("材质", "材料", "面料", "成分", "材质成分", "材质说明"),
+    "package_quantity": ("包装数量", "每包数量", "件数", "数量", "规格数量", "装箱数量"),
+    "certifications": ("认证", "证书", "检测报告", "资质", "认证证书"),
+    "weight_g": ("克重", "重量", "单品重量", "毛重"),
+    "brand": ("品牌", "商标"),
+}
+
+
+def _normalize_attributes(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """把采集到的详情页属性规整成 ``{material, package_quantity, certifications, ...}``。
+
+    兼容两种来源：① 浏览器脚本抓的 ``attributes_zh``（原样键值表）；
+    ② 显式字段（``material_zh`` / ``package_quantity`` / ``certifications``）。
+    """
+    raw: dict[str, str] = {}
+    source = payload.get("attributes_zh") or payload.get("attributes") or {}
+    if isinstance(source, Mapping):
+        for key, value in source.items():
+            text = str(value or "").strip()
+            if text:
+                raw[str(key).strip()] = text
+
+    resolved: dict[str, Any] = {"raw": raw}
+    for field, aliases in ATTRIBUTE_ALIASES.items():
+        for alias in aliases:
+            if alias in raw:
+                resolved[field] = raw[alias]
+                break
+        if field in resolved:
+            continue
+        explicit = payload.get(f"{field}_zh") or payload.get({"weight_g": "weight_g"}.get(field, field))
+        if explicit not in (None, "", []):
+            resolved[field] = explicit
+
+    quantity = resolved.get("package_quantity")
+    if quantity is not None:
+        try:
+            resolved["package_quantity"] = int(float(str(quantity).replace(",", "").strip()))
+        except (TypeError, ValueError):
+            pass
+    certifications = resolved.get("certifications")
+    if isinstance(certifications, str):
+        parts = [item.strip() for item in re.split(r"[、,，;；/|]+", certifications) if item.strip()]
+        resolved["certifications"] = parts
+    return resolved
 
 
 def _normalize_keywords(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -410,6 +461,9 @@ def ingest_capture(
         "stored_images": stored_images,
         "extra": normalized["extra"],
     }
+    attributes = normalized.get("attributes_zh") or {}
+    if attributes.get("raw") or len(attributes) > 1:
+        source_payload["attributes_zh"] = attributes
     keywords = normalized.get("keywords") or []
     if keywords:
         source_payload["keywords"] = keywords

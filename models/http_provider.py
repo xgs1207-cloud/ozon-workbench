@@ -270,6 +270,23 @@ def enrich_facts_from_inputs(payload: dict[str, Any], request: Any) -> list[str]
 
     overrides = read_json("input/workbench-sku-overrides.json")
     product_block = overrides.get("product") if isinstance(overrides.get("product"), Mapping) else {}
+
+    # 1688 详情页属性（材质/包装数量/认证）——真模型曾因缺这些而要求人工确认
+    attributes = source.get("attributes_zh") if isinstance(source.get("attributes_zh"), Mapping) else {}
+    material = str(attributes.get("material") or source.get("material_zh") or "").strip()
+    if material and not facts.get("materials"):
+        facts["materials"] = [material]
+        notes.append(f"materials 由采集属性补全：{material}")
+    quantity = attributes.get("package_quantity") or source.get("package_quantity")
+    if quantity not in (None, "", 0) and str(facts.get("package_quantity") or "") == "unknown":
+        facts["package_quantity"] = {"value": quantity, "source": "input/source.json（1688 详情页属性）"}
+        notes.append(f"package_quantity 由采集属性补全：{quantity}")
+    certifications = attributes.get("certifications") or source.get("certifications_zh")
+    if isinstance(certifications, str):
+        certifications = [item for item in (item.strip() for item in certifications.split("、")) if item]
+    if certifications and not facts.get("certifications"):
+        facts["certifications"] = list(certifications)
+        notes.append(f"certifications 由采集属性补全：{list(certifications)}")
     length, width, height = (
         product_block.get("product_length_mm"),
         product_block.get("product_width_mm"),

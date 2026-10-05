@@ -112,6 +112,13 @@ def build_capture_payload(
         payload["keyword_source"] = keyword_source
     if resolved_keyword_category:
         payload["keyword_category"] = resolved_keyword_category
+    attributes = descriptor.get("attributes_zh")
+    if isinstance(attributes, Mapping) and attributes:
+        payload["attributes_zh"] = dict(attributes)
+    else:
+        explicit = {key: descriptor[key] for key in ("material_zh", "package_quantity", "certifications_zh", "attributes_zh") if descriptor.get(key)}
+        if explicit:
+            payload.update(explicit)
     payload["_stats"] = {
         "images": sum(len(items) for items in images.values()),
         "bytes": total,

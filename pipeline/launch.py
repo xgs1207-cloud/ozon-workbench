@@ -50,7 +50,12 @@ def _runner_summary(report: Mapping[str, Any]) -> dict[str, Any]:
             "ozon_upload": "没有配置 uploader：加 --uploader dry-run|simulated|ozon-api",
         },
         "missing_inputs": {"measurements": "缺人工确认的尺寸重量（input/workbench-sku-overrides.json）"},
-        "gate_failed": {"ecommerce_design": "文案/设计没过校验，看 output/run-report.json 里的 problems"},
+        "gate_failed": {
+            "product_analysis": "采集时没有选 Ozon 类目：补 input/category-selection.json，或采集时带 --category-id/--type-id",
+            "ecommerce_design": "文案/设计没过校验，看 output/run-report.json 里的 problems",
+            "measurements": "尺寸重量缺失或包装小于商品本体（改 input/workbench-sku-overrides.json）",
+            "image_qc": "图片技术质检不通过（比例/格式/分辨率），看 output/image-qc-report.json",
+        },
     }
     hint = (hints.get(str(stop_reason)) or {}).get(str(stopped_at))
     return {

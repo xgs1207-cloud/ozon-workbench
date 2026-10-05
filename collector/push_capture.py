@@ -151,6 +151,11 @@ def push_capture(
     except urllib.error.URLError as error:
         raise PushError(f"连不上工作台 API（{api}）：{error.reason}；隧道开了吗？") from error
     body["_stats"] = stats
+    if not payload.get("category") and not payload.get("keyword_category"):
+        body["_warning"] = (
+            "这次采集没有带 Ozon 类目：入库后会停在 product_analysis（不猜类目）。"
+            "建议加 --category-id/--type-id，或采集后在 input/category-selection.json 里补。"
+        )
     return body
 
 

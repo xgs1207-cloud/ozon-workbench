@@ -114,14 +114,35 @@ def planned_slots(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
 # --------------------------------------------------------------------- 载荷构建
 
 
+def _price_for_currency(row: Mapping[str, Any], currency: str) -> Any:
+    """按**店铺合同币种**取价（真机踩坑：店铺合同是 CNY，我们提交了 RUB → Ozon 拒收
+    ``currency_differs_from_contract``）。"""
+    mapping = {
+        "CNY": ("selling_price_cny", "breakdown_cny"),
+        "RUB": ("selling_price_rub", "breakdown_rub"),
+    }
+    for key in mapping.get(currency, ()):  # 首选同币种字段
+        value = row.get(key)
+        if isinstance(value, Mapping):
+            value = value.get("selling_price")
+        if value not in (None, ""):
+            return value
+    return None
+
+
 def build_upload_payload(
     product_dir: Path | str,
     *,
     shop_name: str,
     upload_mode: str = UPLOAD_MODE_DRY_RUN,
     image_urls: Mapping[str, str] | None = None,
+    currency_code: str | None = None,
 ) -> dict[str, Any]:
-    """构建单个店铺的上传载荷（并列出所有 production_blockers，不在这里抛错）。"""
+    """构建单个店铺的上传载荷（并列出所有 production_blockers，不在这里抛错）。
+
+    ``currency_code``：店铺合同币种（来自 ``config/shops.json`` 的 ``default_currency_code``）。
+    真机踩坑：不传就会用默认 RUB，而店铺合同是 CNY → Ozon 报 ``currency_differs_from_contract``。
+    """
     directory = Path(product_dir)
     product_id = directory.name
     blockers: list[str] = []
@@ -244,14 +265,14 @@ def build_upload_payload(
     if not grouping:
         blockers.append("没有变体规则结果（先跑 variant_rules）")
 
-    currency = str((category.get("default_currency_code") or "RUB"))
+    currency = str(currency_code or category.get("default_currency_code") or "RUB").upper()
 
     variants: list[dict[str, Any]] = []
     by_sku = attributes.get("attributes_by_sku") if isinstance(attributes.get("attributes_by_sku"), Mapping) else {}
     for index, sku in enumerate(skus, start=1):
         sku_id = str(sku.get("sku_id") or f"S{index}")
         row = price_rows.get(sku_id) or {}
-        price_value = row.get("selling_price_rub")
+        price_value = _price_for_currency(row, currency)
         try:
             price_text = f"{float(price_value):.2f}"
         except (TypeError, ValueError):
@@ -546,6 +567,16 @@ def upload_product(
     results: dict[str, dict[str, Any]] = {}
     submitted = skipped = failed = 0
 
+    # 每个店铺的**合同币种**（config/shops.json 的 default_currency_code）：
+    # 真机踩坑：用默认 RUB 提交给 CNY 合同店铺 → Ozon 报 currency_differs_from_contract
+    from .stores import ensure_registry, list_shops
+
+    shop_currencies = {
+        str(item.get("id")): str(item.get("default_currency_code") or "").upper()
+        for item in list_shops(ensure_registry(None))
+        if isinstance(item, Mapping)
+    }
+
     for row in plan:
         store_id = str(row["store_id"])
         if row["action"] == ACTION_SKIP:
@@ -553,7 +584,8 @@ def upload_product(
             results[store_id] = {"action": "skip", "status": "skipped", "reason": row["reason"]}
             continue
 
-        payload = build_upload_payload(directory, shop_name=store_id, upload_mode=upload_mode)
+        payload = build_upload_payload(directory, shop_name=store_id, upload_mode=upload_mode,
+                                       currency_code=shop_currencies.get(store_id) or None)
         problems = payload_problems(payload, upload_mode=upload_mode)
         run_dir = directory / "output" / "store-runs" / store_id
         _write_json(run_dir / "payload.json", payload)

@@ -222,6 +222,29 @@ class UploadFixture(unittest.TestCase):
 
 @unittest.skipUnless(HAS_CONTRACTS, "contracts/original 尚未拉取")
 class PayloadTests(UploadFixture):
+    def test_currency_follows_the_shop_contract(self):
+        """真机踩坑：店铺合同币种是 CNY，用默认 RUB 提交被 Ozon 拒（currency_differs_from_contract）。"""
+        (self.product_dir / "output" / "pricing-result.json").write_text(
+            json.dumps(
+                {
+                    "skus": [
+                        {"sku_id": "S1", "selling_price_rub": 1290, "selling_price_cny": 111.2},
+                        {"sku_id": "S2", "selling_price_rub": 1390, "selling_price_cny": 119.8},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        cny = build_upload_payload(self.product_dir, shop_name="default", currency_code="CNY")
+        self.assertEqual({item["currency_code"] for item in cny["variants"]}, {"CNY"})
+        self.assertEqual([item["price"] for item in cny["variants"]], ["111.20", "119.80"])
+        rub = build_upload_payload(self.product_dir, shop_name="default", currency_code="RUB")
+        self.assertEqual({item["currency_code"] for item in rub["variants"]}, {"RUB"})
+        self.assertEqual([item["price"] for item in rub["variants"]], ["1290.00", "1390.00"])
+        # 不给币种时退回默认 RUB（老行为，但 preflight 会拦下与合同不一致的情况）
+        default = build_upload_payload(self.product_dir, shop_name="default")
+        self.assertEqual({item["currency_code"] for item in default["variants"]}, {"RUB"})
+
     def test_payload_is_contract_valid_without_blockers(self):
         payload = build_upload_payload(self.product_dir, shop_name="shop-a")
         self.assertEqual(validate_contract("ozon-upload-payload", payload), [])

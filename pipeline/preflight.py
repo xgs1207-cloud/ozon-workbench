@@ -93,6 +93,7 @@ def preflight(
         shop_name=shop,
         upload_mode="production",
         image_urls=image_urls or {},
+        currency_code=str((shop_entry or {}).get("default_currency_code") or "").upper() or None,
     )
     payload_blockers = list(payload.get("production_blockers") or [])
     contract_problems = [
@@ -100,6 +101,21 @@ def preflight(
         if not item.startswith("production 模式下存在阻断项")
     ]
     problems.extend(f"载荷：{item}" for item in contract_problems)
+
+    # 币种一致性：真机踩坑——店铺合同是 CNY，我们提交了 RUB，Ozon 直接拒收
+    shop_currency = str((shop_entry or {}).get("default_currency_code") or "").upper()
+    variant_currencies = sorted(
+        {
+            str(item.get("currency_code") or "").upper()
+            for item in (payload.get("variants") or [])
+            if isinstance(item, Mapping) and item.get("currency_code")
+        }
+    )
+    if shop_currency and variant_currencies and shop_currency not in variant_currencies:
+        problems.append(
+            f"载荷币种 {variant_currencies} 与店铺合同币种 {shop_currency} 不一致"
+            "（Ozon 会报 currency_differs_from_contract）"
+        )
 
     attributes = payload.get("attributes") or []
     variants = payload.get("variants") or []
@@ -127,6 +143,14 @@ def preflight(
         "image_upload_gate": gate,
         "attributes": len(attributes),
         "variants": len(variants),
+        "currency": sorted(
+            {
+                str(item.get("currency_code") or "").upper()
+                for item in variants
+                if isinstance(item, Mapping) and item.get("currency_code")
+            }
+        ),
+        "shop_currency": shop_currency,
         "images": len(payload.get("images") or []),
         "url_checks": url_checks,
         "api_endpoint": (payload.get("api_request_template") or {}).get("api"),

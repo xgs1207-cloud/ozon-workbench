@@ -411,7 +411,11 @@ def build_narrative_prompt(request: Any, *, facts: Mapping[str, Any] | None = No
 
 
 def _schema_hint(contract: str) -> str:
-    """给模型一份**够精确**的字段表：真实模型光看"必填顶层字段"仍会加字段、给 null。"""
+    """给模型一份**够精确**的字段表（含数组元素的必填字段与枚举、并解析 ``$ref``）。
+
+    真机踩坑记录：只列顶层必填时，模型会漏掉数组元素内部的必填字段
+    （例如 ``product-positioning.buyer_selling_points[].claim_type``）→ 连续 3 次过不了校验。
+    """
     try:
         from contracts import load_contract
 
@@ -419,33 +423,64 @@ def _schema_hint(contract: str) -> str:
     except Exception:  # noqa: BLE001 - 没有契约时也给个提示
         return f"（请严格产出 {contract} 契约形状）"
 
+    defs = schema.get("$defs") or schema.get("definitions") or {}
+
+    def resolve(node: Any) -> Mapping[str, Any]:
+        seen = 0
+        while isinstance(node, Mapping) and node.get("$ref") and seen < 4:
+            name = str(node["$ref"]).split("/")[-1]
+            node = defs.get(name) or {}
+            seen += 1
+        return node if isinstance(node, Mapping) else {}
+
     lines: list[str] = []
 
-    def describe(node: Mapping[str, Any], path: str, depth: int) -> None:
-        if depth > 2 or not isinstance(node, Mapping):
+    def enums_of(node: Mapping[str, Any]) -> str:
+        values = node.get("enum")
+        return f"（取值：{'|'.join(str(item) for item in values)}）" if isinstance(values, list) and values else ""
+
+    def describe(node: Any, path: str, depth: int) -> None:
+        node = resolve(node)
+        if depth > 2 or not node:
             return
-        declared = node.get("type")
-        types = ", ".join(declared) if isinstance(declared, list) else str(declared or "?")
         properties = node.get("properties") if isinstance(node.get("properties"), Mapping) else {}
-        required = set(node.get("required") or [])
         if properties:
-            names = "、".join(f"{key}{'*' if key in required else ''}" for key in list(properties)[:24])
+            required = set(node.get("required") or [])
+            names = "、".join(f"{key}{'*' if key in required else ''}" for key in list(properties)[:20])
             if path:
-                lines.append(f"- `{path}`（{types}）包含字段：{names}")
-            for key, child in list(properties.items())[:24]:
-                if isinstance(child, Mapping) and (child.get("properties") or child.get("items")):
-                    describe(child.get("items") if child.get("items") else child, f"{path}.{key}".lstrip("."), depth + 1)
-        elif node.get("items") and isinstance(node["items"], Mapping):
+                lines.append(f"- `{path}` 包含字段：{names}")
+            for key, child in list(properties.items())[:20]:
+                child = resolve(child)
+                if isinstance(child.get("items"), Mapping):
+                    item = resolve(child["items"])
+                    item_required = item.get("required") or []
+                    detail = ""
+                    if item.get("properties"):
+                        detail = "；每项必填 " + "、".join(str(name) for name in item_required)
+                        extra = [
+                            f"{name}{enums_of(resolve(item['properties'][name]))}"
+                            for name in list(item["properties"])[:8]
+                            if resolve(item["properties"][name]).get("enum")
+                        ]
+                        if extra:
+                            detail += "；枚举：" + "，".join(extra)
+                    lines.append(f"- `{path}.{key}[]`：数组{detail}")
+                    if not item_required:
+                        describe(item, f"{path}.{key}[]", depth + 1)
+                elif child.get("properties"):
+                    describe(child, f"{path}.{key}".lstrip("."), depth + 1)
+        elif isinstance(node.get("items"), Mapping):
             describe(node["items"], path, depth + 1)
 
     describe(schema, "", 0)
     top = "、".join(f"{key}*" for key in (schema.get("required") or [])) or "（无）"
     return (
         f"输出必须满足 {contract} 契约。带 * 的是必填。顶层必填：{top}。\n"
-        + ("\n".join(lines[:14]) + "\n" if lines else "")
-        + "硬规则：① 只能出现上面列出的键，多一个键都不行（additionalProperties=false）；"
+        + ("\n".join(lines[:20]) + "\n" if lines else "")
+        + "硬规则：① 只能出现契约里列出的键，多一个键都不行（additionalProperties=false）；"
         "② 数组字段不能是 null，没内容就给 []；对象字段不能是 null，没内容就给 {}；"
-        "③ 类型必须一致（字符串就是字符串，不要给数组或对象）；④ 不要输出解释文字或代码围栏。"
+        "③ 类型必须一致（字符串就是字符串，不要给数组或对象），枚举只能取列出的值；"
+        "④ 数组元素内部的必填字段一个都不能少；⑤ 不要输出解释文字或代码围栏。"
     )
 
 

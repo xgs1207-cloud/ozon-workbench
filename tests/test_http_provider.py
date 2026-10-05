@@ -365,6 +365,20 @@ class ProviderBehaviourTests(unittest.TestCase):
         # 系统字段不该让模型输出
         self.assertIn("不要输出", prompt)
 
+    def test_schema_hint_covers_array_item_required_fields(self):
+        """真机踩过：数组元素内部的必填字段没告诉模型 → 模型漏 claim_type，连续 3 次过不了校验。"""
+        from models.http_provider import _schema_hint
+
+        hint = _schema_hint("product-positioning")
+        self.assertIn("buyer_selling_points", hint)
+        for field in ("text", "claim_type", "source_refs"):
+            self.assertIn(field, hint, f"{field} 没写进 schema 提示")
+        self.assertIn("fact", hint)
+        self.assertIn("supported_inference", hint)
+        analysis_hint = _schema_hint("product-analysis")
+        self.assertIn("inferences", analysis_hint)
+        self.assertIn("confidence", analysis_hint)
+
     def test_thinking_toggle_and_max_tokens_are_sent(self):
         """省钱快捷：默认关掉方舟思考链，并给单次回复设上限（实测 13.1s/527token → 4.5s/83token）。"""
         import json as _json

@@ -328,6 +328,8 @@ test('user-started popup capture uploads two pages and obeys the configured cap'
         URL, TextEncoder, btoa, chrome,
         document: { getElementById: element },
         fetch: async (_url, options) => {
+            if (!options.body)
+                return { ok: true, json: async () => ({ ok: true }) };
             const body = JSON.parse(options.body);
             uploaded.push(body);
             return { ok: true, json: async () => ({ inserted: body.records.length }) };
@@ -347,4 +349,107 @@ test('user-started popup capture uploads two pages and obeys the configured cap'
     assert.equal(element('market-rolling-period').hidden, false);
     assert.match(element('progress').textContent, /采集结束：2 页，接收 2 行，新入库 2 行/);
     assert.equal(element('stop-market').disabled, true);
+});
+
+function popupTokenHarness({ baseUrl = 'http://127.0.0.1:8766', savedToken, verifyResponse,
+    verifyError } = {}) {
+    const elements = new Map();
+    const element = (id) => {
+        if (!elements.has(id))
+            elements.set(id, {
+                value: '', textContent: '', hidden: false, disabled: false, handlers: {},
+                addEventListener(name, callback) { this.handlers[name] = callback; },
+            });
+        return elements.get(id);
+    };
+    const stored = { factoryBaseUrl: baseUrl, factoryDeviceId: 'test-device' };
+    if (savedToken)
+        stored.marketIngestToken = savedToken;
+    const requests = [];
+    const chrome = {
+        storage: { local: {
+            get: async (keys) => Object.fromEntries(keys.map((key) => [key, stored[key]])),
+            set: async (values) => Object.assign(stored, values),
+            remove: async (key) => { delete stored[key]; },
+        } },
+        tabs: {
+            query: async () => [{ id: 1, url: 'https://www.seerfar.cn/admin/market' }],
+            sendMessage: (_tabId, _message, callback) => callback({ records: [], reason: '未识别表格' }),
+        },
+        runtime: { lastError: null },
+    };
+    const context = vm.createContext({
+        URL, TextEncoder, btoa, chrome, document: { getElementById: element },
+        fetch: async (url, options) => {
+            requests.push({ url, options });
+            if (verifyError)
+                throw verifyError;
+            return verifyResponse || { ok: true, status: 200, json: async () => ({ ok: true }) };
+        },
+        window: { close: () => {} },
+    });
+    vm.runInContext(read('popup.js'), context);
+    return { element, stored, requests };
+}
+
+test('market token can be verified, saved, restored and cleared independently of capture', async () => {
+    const popup = popupTokenHarness();
+    await new Promise((resolve) => setImmediate(resolve));
+    popup.element('market-token').value = 'test-secret';
+    await popup.element('save-market-token').handlers.click();
+    assert.equal(popup.stored.marketIngestToken, 'test-secret');
+    assert.equal(popup.requests.length, 1);
+    assert.equal(popup.requests[0].url, 'http://127.0.0.1:8766/api/market-data/stats');
+    assert.equal(popup.requests[0].options.headers['X-Market-Ingest-Token'], 'test-secret');
+    assert.match(popup.element('market-token-status').textContent, /已验证并保存/);
+    assert.doesNotMatch(popup.element('market-token-status').textContent, /test-secret/);
+    await popup.element('clear-market-token').handlers.click();
+    assert.equal(popup.stored.marketIngestToken, undefined);
+    assert.equal(popup.stored.factoryBaseUrl, 'http://127.0.0.1:8766');
+    assert.equal(popup.stored.factoryDeviceId, 'test-device');
+    assert.equal(popup.element('market-token').value, '');
+    const reopened = popupTokenHarness({ savedToken: 'previously-saved' });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(reopened.element('market-token').value, 'previously-saved');
+    assert.equal(reopened.requests.length, 0);
+});
+
+test('capture saves a verified token even when the Seerfar table cannot be parsed', async () => {
+    const popup = popupTokenHarness();
+    await new Promise((resolve) => setImmediate(resolve));
+    popup.element('market-token').value = 'test-secret';
+    popup.element('market-max-pages').value = '1';
+    await popup.element('capture-market').handlers.click();
+    assert.equal(popup.stored.marketIngestToken, 'test-secret');
+    assert.equal(popup.requests.length, 1);
+    assert.match(popup.element('result').textContent, /未识别表格/);
+    assert.doesNotMatch(popup.element('result').textContent, /test-secret/);
+});
+
+test('invalid token, malformed response, and failed connection never save or echo token', async () => {
+    for (const config of [
+        { verifyResponse: { ok: false, status: 401 } },
+        { verifyResponse: { ok: false, status: 503 } },
+        { verifyResponse: { ok: true, status: 200, json: async () => ({ ok: false }) } },
+        { verifyError: new Error('network test-secret') },
+    ]) {
+        const popup = popupTokenHarness(config);
+        await new Promise((resolve) => setImmediate(resolve));
+        popup.element('market-token').value = 'test-secret';
+        await popup.element('save-market-token').handlers.click();
+        assert.equal(popup.stored.marketIngestToken, undefined);
+        assert.equal(popup.requests.length, 1);
+        assert.doesNotMatch(popup.element('market-token-status').textContent, /test-secret/);
+        assert.match(popup.element('market-token-status').textContent, /令牌|连接/);
+    }
+});
+
+test('market token verification refuses public HTTP before any request', async () => {
+    const popup = popupTokenHarness({ baseUrl: 'http://43.132.190.110:8088' });
+    await new Promise((resolve) => setImmediate(resolve));
+    popup.element('market-token').value = 'test-secret';
+    await popup.element('save-market-token').handlers.click();
+    assert.equal(popup.stored.marketIngestToken, undefined);
+    assert.equal(popup.requests.length, 0);
+    assert.match(popup.element('market-token-status').textContent, /公网 HTTP/);
 });

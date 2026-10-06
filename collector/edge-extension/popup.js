@@ -163,6 +163,9 @@ const els = {
     marketCaptureMonth: document.getElementById("market-capture-month"),
     marketPeriod: document.getElementById("market-period"),
     marketToken: document.getElementById("market-token"),
+    saveMarketToken: document.getElementById("save-market-token"),
+    clearMarketToken: document.getElementById("clear-market-token"),
+    marketTokenStatus: document.getElementById("market-token-status"),
     marketMaxPages: document.getElementById("market-max-pages"),
     captureMarket: document.getElementById("capture-market"),
     stopMarket: document.getElementById("stop-market")
@@ -172,6 +175,51 @@ let duplicateProductId = null;
 let activePageKind = "unsupported";
 let marketCaptureRunning = false;
 let marketStopRequested = false;
+function safeMarketTokenError(error, verifiedToken = "") {
+    let message = String(error?.message || error);
+    for (const token of new Set([verifiedToken, els.marketToken.value.trim()])) {
+        if (token)
+            message = message.split(token).join("[已隐藏令牌]");
+    }
+    return message;
+}
+async function verifyAndSaveMarketToken() {
+    const token = els.marketToken.value.trim();
+    if (!token)
+        throw new Error("请填写市场数据写入令牌");
+    await loadFactoryConfig();
+    if (!isSafeMarketDestination(factoryConfig.baseUrl))
+        throw new Error("令牌不能通过公网 HTTP 传输：请配置 HTTPS 工作台或本机 SSH 隧道");
+    els.marketTokenStatus.textContent = "正在验证工作台令牌…";
+    let response;
+    try {
+        response = await factoryFetch("/api/market-data/stats", {
+            headers: { "X-Market-Ingest-Token": token }
+        });
+    }
+    catch {
+        throw new Error("无法连接工作台验证令牌，请检查地址与 SSH 隧道");
+    }
+    if (!response.ok) {
+        if (response.status === 401)
+            throw new Error("令牌无效，请确认与服务器配置一致");
+        if (response.status === 503)
+            throw new Error("服务器尚未配置市场数据写入令牌");
+        throw new Error(`令牌验证失败（HTTP ${response.status}）`);
+    }
+    let result;
+    try {
+        result = await response.json();
+    }
+    catch {
+        throw new Error("工作台验证响应格式异常，令牌未保存");
+    }
+    if (result?.ok !== true)
+        throw new Error("工作台未确认令牌有效，令牌未保存");
+    await chrome.storage.local.set({ marketIngestToken: token });
+    els.marketTokenStatus.textContent = "令牌已验证并保存在本机浏览器";
+    return token;
+}
 function setResult(value) {
     els.result.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
 }
@@ -454,16 +502,15 @@ els.captureMarket.addEventListener("click", async () => {
     let pages = 0;
     let received = 0;
     let inserted = 0;
+    let verifiedToken = "";
+    els.saveMarketToken.disabled = true;
+    els.clearMarketToken.disabled = true;
     try {
-        const token = els.marketToken.value.trim();
         const maxPages = Number(els.marketMaxPages.value);
-        if (!token)
-            throw new Error("请填写市场数据写入令牌");
         if (!Number.isInteger(maxPages) || maxPages < 1 || maxPages > 20)
             throw new Error("本次采集页数须在 1–20 之间");
-        await loadFactoryConfig();
-        if (!isSafeMarketDestination(factoryConfig.baseUrl))
-            throw new Error("市场数据和令牌不能通过公网 HTTP 传输：请配置 HTTPS 工作台或本地 127.0.0.1");
+        const token = await verifyAndSaveMarketToken();
+        verifiedToken = token;
         const tab = await getActiveTab();
         if (!/^https:\/\/(?:www\.)?seerfar\.cn\//.test(tab?.url || ""))
             throw new Error("当前不是 Seerfar 页面");
@@ -520,20 +567,53 @@ els.captureMarket.addEventListener("click", async () => {
                 throw new Error(next?.error || "翻页后未取得有效数据，已停止");
             snapshot = next.snapshot;
         }
-        await chrome.storage.local.set({ marketIngestToken: token });
         els.progress.textContent = `采集结束：${pages} 页，接收 ${received} 行，新入库 ${inserted} 行；${stopReason}`;
         setResult({ pages, received, inserted, stop_reason: stopReason });
     }
     catch (error) {
+        const safeError = safeMarketTokenError(error, verifiedToken);
         els.progress.textContent = received
             ? `采集中断：已提交 ${received} 行、新入库 ${inserted} 行；后续页面未处理`
             : "市场报表入库失败";
-        setResult({ error: error.message, pages, received, inserted });
+        els.marketTokenStatus.textContent = safeError;
+        setResult({ error: safeError, pages, received, inserted });
     }
     finally {
         marketCaptureRunning = false;
         els.captureMarket.disabled = false;
         els.stopMarket.disabled = true;
+        els.saveMarketToken.disabled = false;
+        els.clearMarketToken.disabled = false;
+    }
+});
+els.saveMarketToken.addEventListener("click", async () => {
+    els.saveMarketToken.disabled = true;
+    els.clearMarketToken.disabled = true;
+    try {
+        await verifyAndSaveMarketToken();
+    }
+    catch (error) {
+        els.marketTokenStatus.textContent = safeMarketTokenError(error);
+    }
+    finally {
+        els.saveMarketToken.disabled = false;
+        els.clearMarketToken.disabled = false;
+    }
+});
+els.clearMarketToken.addEventListener("click", async () => {
+    els.saveMarketToken.disabled = true;
+    els.clearMarketToken.disabled = true;
+    try {
+        await chrome.storage.local.remove("marketIngestToken");
+        els.marketToken.value = "";
+        els.marketTokenStatus.textContent = "本机保存的令牌已清除";
+    }
+    catch {
+        els.marketTokenStatus.textContent = "清除失败，请重试";
+    }
+    finally {
+        els.saveMarketToken.disabled = false;
+        els.clearMarketToken.disabled = false;
     }
 });
 els.stopMarket.addEventListener("click", async () => {
@@ -607,6 +687,8 @@ async function initialize() {
     els.factoryUrl.value = cleanFactoryUrlText(stored.factoryBaseUrl) || factoryConfig.baseUrl;
     const marketSettings = await chrome.storage.local.get(["marketIngestToken"]);
     els.marketToken.value = marketSettings.marketIngestToken || "";
+    if (marketSettings.marketIngestToken)
+        els.marketTokenStatus.textContent = "已从本机浏览器读取令牌；采集前会重新验证";
     await loadPreview();
 }
 initialize().catch((error) => {

@@ -159,6 +159,10 @@ button:disabled {
   margin-top: 10px;
 }
 
+#market-capture .market-token-actions button {
+  margin-top: 0;
+}
+
 button.task-button {
   background: #1f883d;
 }

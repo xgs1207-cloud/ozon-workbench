@@ -30,6 +30,12 @@
         </div>
         <label for="market-token">市场数据写入令牌（与服务器环境变量一致）</label>
         <input id="market-token" type="password" autocomplete="off" spellcheck="false">
+        <div class="connection-actions market-token-actions">
+          <button id="save-market-token" type="button">验证并保存令牌</button>
+          <button id="clear-market-token" type="button" class="secondary">清除本机令牌</button>
+        </div>
+        <small id="market-token-status" role="status" aria-live="polite">验证成功后保存在此浏览器，不必每次输入；不会同步到其他设备。</small>
+        <small>本机保存并非加密，仅建议在私人电脑使用；卸载插件或清除后，本机不再保留令牌。</small>
         <label for="market-max-pages">本次最多采集页数（1–20）</label>
         <input id="market-max-pages" type="number" min="1" max="20" value="1">
         <button id="capture-market" type="button">采集当前及后续页</button>

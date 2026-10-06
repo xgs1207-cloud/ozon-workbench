@@ -23,7 +23,7 @@ import hmac
 from pathlib import Path
 from typing import Any, Mapping
 
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
@@ -37,6 +37,9 @@ from collector.ingest import (
 from keyword_library import store
 from keyword_library.scoring import ScoreConfig
 from market_intelligence import store as market_store
+from market_intelligence import recommend as market_recommend
+from market_intelligence import sessions as research_sessions
+from market_intelligence import ozon_categories
 
 LIBRARY_ROOT = Path(
     os.environ.get("KEYWORD_LIBRARY_ROOT")
@@ -54,6 +57,18 @@ MARKET_DB_PATH = Path(
 )
 
 app = FastAPI(title="ozon-workbench · local workbench", version="0.2.0")
+
+
+def _process_ready_background(session_id: str) -> None:
+    """Background failures remain visible in logs without changing the HTTP acknowledgement."""
+    import logging
+
+    from market_intelligence.auto_publish import process_ready
+
+    try:
+        process_ready(MARKET_DB_PATH, PRODUCTS_ROOT, session_id=session_id)
+    except Exception:  # noqa: BLE001 - no automatic retry after an ambiguous Ozon write
+        logging.getLogger(__name__).exception("选词批次 %s 自动发布后台任务失败，需人工检查", session_id)
 
 
 class MarketSnapshotRequest(BaseModel):
@@ -114,6 +129,186 @@ def market_data_observations(
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     return {"ok": True, "count": len(items), "items": items}
+
+
+@app.get("/api/research/config")
+def research_config() -> dict[str, Any]:
+    """Default explainable weights and evidence gates; no API calls."""
+    return {"ok": True, "config": market_recommend.load_config(MARKET_DB_PATH).as_dict()}
+
+
+class ResearchConfigRequest(BaseModel):
+    min_history_months: int = 3
+    min_demand: float = 0
+    max_competition_density: float | None = None
+    return_penalty: float = 8
+    weights: dict[str, dict[str, float]] = Field(default_factory=dict)
+
+
+@app.put("/api/research/config")
+def update_research_config(request: ResearchConfigRequest) -> dict[str, Any]:
+    try:
+        config = market_recommend.save_config(MARKET_DB_PATH, request.model_dump())
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return {"ok": True, "config": config.as_dict()}
+
+
+@app.get("/api/research/categories")
+def research_categories() -> dict[str, Any]:
+    return {"ok": True, **market_recommend.recommend(
+        MARKET_DB_PATH, dataset="categories", config=market_recommend.load_config(MARKET_DB_PATH)
+    )}
+
+
+@app.get("/api/research/keywords")
+def research_keywords(category_key: str = Query(..., min_length=1)) -> dict[str, Any]:
+    return {"ok": True, **market_recommend.recommend(
+        MARKET_DB_PATH, dataset="keywords", category_key=category_key,
+        config=market_recommend.load_config(MARKET_DB_PATH)
+    )}
+
+
+class ResearchSessionRequest(BaseModel):
+    category_key: str
+    primary_keyword: str
+    secondary_keywords: list[str] = Field(default_factory=list, max_length=10)
+
+
+class AttachResearchProductRequest(BaseModel):
+    product_id: str
+
+
+class AutoPublishRequest(BaseModel):
+    enabled: bool
+    target_store_id: str = ""
+    confirm: str = ""
+
+
+@app.get("/api/research/sessions")
+def list_research_sessions() -> dict[str, Any]:
+    return {"ok": True, "items": research_sessions.list_sessions(MARKET_DB_PATH)}
+
+
+@app.post("/api/research/sessions")
+def create_research_session(request: ResearchSessionRequest) -> dict[str, Any]:
+    try:
+        result = research_sessions.create_session(MARKET_DB_PATH, **request.model_dump())
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return {"ok": True, "session": result}
+
+
+@app.get("/api/research/sessions/{session_id}")
+def get_research_session(session_id: str) -> dict[str, Any]:
+    try:
+        result = research_sessions.get_session(MARKET_DB_PATH, session_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return {"ok": True, "session": result}
+
+
+@app.post("/api/research/sessions/{session_id}/products")
+def attach_research_product(session_id: str, request: AttachResearchProductRequest) -> dict[str, Any]:
+    try:
+        result = research_sessions.attach_product(
+            MARKET_DB_PATH, PRODUCTS_ROOT, session_id=session_id, product_id=request.product_id
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return {"ok": True, "session": result}
+
+
+@app.put("/api/research/sessions/{session_id}/auto-publish")
+def set_research_auto_publish(session_id: str, request: AutoPublishRequest,
+                              background_tasks: BackgroundTasks) -> dict[str, Any]:
+    if request.enabled and request.confirm != "ENABLE_AUTO_PUBLISH":
+        raise HTTPException(status_code=400, detail="开启批次自动发布须明确确认 ENABLE_AUTO_PUBLISH")
+    if request.enabled:
+        if os.environ.get("WORKBENCH_AUTO_PUBLISH_ARMED") != "1":
+            raise HTTPException(status_code=503, detail="服务器尚未启用自动发布总开关")
+        from pipeline.stores import ensure_registry, shop_summary
+
+        shops = shop_summary(ensure_registry(None))
+        target = next((item for item in shops if item["id"] == request.target_store_id), None)
+        if not target or not target.get("enabled") or not target.get("credentials_ready"):
+            raise HTTPException(status_code=422, detail="目标店铺未启用或 Ozon API 凭据尚未就绪")
+    try:
+        result = research_sessions.set_auto_publish(
+            MARKET_DB_PATH, session_id=session_id, enabled=request.enabled,
+            target_store_id=request.target_store_id,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    if request.enabled:
+        background_tasks.add_task(_process_ready_background, session_id)
+    return {"ok": True, "session": result}
+
+
+@app.get("/api/research/sessions/{session_id}/publish-attempts")
+def research_publish_attempts(session_id: str) -> dict[str, Any]:
+    try:
+        research_sessions.get_session(MARKET_DB_PATH, session_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return {"ok": True, "items": research_sessions.list_publish_attempts(MARKET_DB_PATH, session_id)}
+
+
+@app.post("/api/research/sessions/{session_id}/process-ready")
+def research_process_ready(session_id: str, background_tasks: BackgroundTasks) -> dict[str, Any]:
+    try:
+        session = research_sessions.get_session(MARKET_DB_PATH, session_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    if not session["auto_publish_enabled"]:
+        raise HTTPException(status_code=409, detail="此批次尚未开启自动发布")
+    if os.environ.get("WORKBENCH_AUTO_PUBLISH_ARMED") != "1":
+        raise HTTPException(status_code=503, detail="服务器尚未启用自动发布总开关")
+    background_tasks.add_task(_process_ready_background, session_id)
+    return {"ok": True, "queued": True, "session_id": session_id}
+
+
+@app.get("/api/ozon/categories")
+def search_ozon_categories(q: str = Query(..., min_length=2), shop: str | None = None,
+                           refresh: bool = False) -> dict[str, Any]:
+    """Real leaf categories only; never turn Seerfar research IDs into listing IDs."""
+    try:
+        tree = ozon_categories.load_tree(MARKET_DB_PATH.parent, shop_id=shop, refresh=refresh)
+    except Exception as error:  # noqa: BLE001 - credentials/API errors belong in UI
+        raise HTTPException(status_code=503, detail=f"Ozon 官方类目暂不可用：{error}") from error
+    items = ozon_categories.search(tree, q)
+    return {"ok": True, "source": "ozon_seller_api", "items": items}
+
+
+class OfficialCategoryRequest(BaseModel):
+    category_id: int = Field(gt=0)
+    type_id: int = Field(gt=0)
+    shop: str | None = None
+
+
+@app.put("/api/workbench/products/{product_id}/ozon-category")
+def confirm_ozon_category(product_id: str, request: OfficialCategoryRequest) -> dict[str, Any]:
+    directory = _require_product(product_id)
+    _require_pre_submission_edit(directory)
+    from pipeline.ozon_http import find_category_in_tree
+
+    try:
+        tree = ozon_categories.load_tree(MARKET_DB_PATH.parent, shop_id=request.shop)
+    except Exception as error:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"Ozon 官方类目暂不可用：{error}") from error
+    found = find_category_in_tree(tree, category_id=request.category_id, type_id=request.type_id)
+    if not found:
+        raise HTTPException(status_code=422, detail="所选类目/类型不在当前 Ozon 店铺返回的真实类目树中")
+    selected = {"category_id": request.category_id, "type_id": request.type_id,
+                "category_path_zh": " / ".join(found["path"]), "source": "ozon_seller_api",
+                "confirmed_by_user": True}
+    path = directory / "input" / "category-selection.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(selected, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    from pipeline.guided_review import invalidate_from
+
+    invalidate_from(directory, "product_analysis")
+    return {"ok": True, "category": selected}
 
 #: 远程采集入库单次请求的图片总量上限（base64 之后按解码后字节算）
 MAX_CAPTURE_BYTES = int(os.environ.get("WORKBENCH_MAX_CAPTURE_BYTES") or 40 * 1024 * 1024)
@@ -514,6 +709,80 @@ class SkuSelectionRequest(BaseModel):
     all: bool = Field(False, description="全部上架（等价于清除选择文件）")
 
 
+class ManualSkuPrice(BaseModel):
+    sku_id: str
+    price: float = Field(gt=0)
+    currency: str = Field(pattern="^(CNY|RUB)$")
+
+
+class ManualPricesRequest(BaseModel):
+    prices: list[ManualSkuPrice] = Field(min_length=1, max_length=10)
+
+
+class Dimensions(BaseModel):
+    length_mm: int = Field(gt=0)
+    width_mm: int = Field(gt=0)
+    height_mm: int = Field(gt=0)
+    weight_g: int = Field(gt=0)
+
+
+class ConfirmedMeasurementsRequest(BaseModel):
+    product: Dimensions
+    package: Dimensions
+
+
+@app.get("/api/workbench/products/{product_id}/measurements")
+def get_confirmed_measurements(product_id: str) -> dict[str, Any]:
+    directory = _require_product(product_id)
+    return {"ok": True, "overrides": _read_json_file(directory / "input" / "workbench-sku-overrides.json")}
+
+
+@app.put("/api/workbench/products/{product_id}/measurements")
+def set_confirmed_measurements(product_id: str, request: ConfirmedMeasurementsRequest) -> dict[str, Any]:
+    directory = _require_product(product_id)
+    _require_pre_submission_edit(directory)
+    product = request.product.model_dump()
+    package = request.package.model_dump()
+    if any(package[name] < product[name] for name in product):
+        raise HTTPException(status_code=422, detail="包装尺寸和重量不能小于商品本体")
+    target = directory / "input" / "workbench-sku-overrides.json"
+    current = _read_json_file(target)
+    current["product"] = {**{f"product_{key}": value for key, value in product.items()},
+                          **{f"package_{key}": value for key, value in package.items()}}
+    target.write_text(json.dumps(current, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    from pipeline.guided_review import invalidate_from
+
+    invalidate_from(directory, "measurements")
+    return {"ok": True, "overrides": current}
+
+
+@app.get("/api/workbench/products/{product_id}/prices")
+def get_manual_prices(product_id: str) -> dict[str, Any]:
+    directory = _require_product(product_id)
+    return {"ok": True, "required": (directory / "input" / "manual-pricing-required.json").is_file(),
+            "prices": _read_json_file(directory / "input" / "manual-prices.json").get("prices") or {}}
+
+
+@app.put("/api/workbench/products/{product_id}/prices")
+def set_manual_prices(product_id: str, request: ManualPricesRequest) -> dict[str, Any]:
+    from pipeline.sku_selection import active_skus
+
+    directory = _require_product(product_id)
+    _require_pre_submission_edit(directory)
+    source = _read_json_file(directory / "input" / "source.json")
+    active = {str(row.get("sku_id")) for row in active_skus(directory, source.get("skus") or [])}
+    prices = {item.sku_id: {"price": item.price, "currency": item.currency} for item in request.prices}
+    if len(prices) != len(request.prices) or set(prices) != active:
+        raise HTTPException(status_code=422, detail="必须为每个已选 SKU 分别填写一次售价，不能包含未选 SKU")
+    path = directory / "input" / "manual-prices.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"prices": prices}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    from pipeline.guided_review import invalidate_from
+
+    invalidate_from(directory, "measurements")
+    return {"ok": True, "prices": prices}
+
+
 @app.get("/api/workbench/products/{product_id}/skus")
 def workbench_product_skus(product_id: str) -> dict[str, Any]:
     """看某个商品采集到的 SKU 与当前上架范围。"""
@@ -545,6 +814,7 @@ def workbench_set_product_skus(product_id: str, request: SkuSelectionRequest) ->
     from pipeline.sku_selection import SkuSelectionError, clear_selection, set_selection, selection_state
 
     directory = _require_product(product_id)
+    _require_pre_submission_edit(directory)
     try:
         if request.all:
             result = clear_selection(directory)
@@ -558,6 +828,9 @@ def workbench_set_product_skus(product_id: str, request: SkuSelectionRequest) ->
             )
     except SkuSelectionError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
+    from pipeline.guided_review import invalidate_from
+
+    invalidate_from(directory, "product_analysis")
     return {"ok": True, **result, "state": selection_state(directory)}
 
 
@@ -820,10 +1093,21 @@ class CopyRequestModel(BaseModel):
 
 
 def _require_product(product_id: str) -> Path:
-    directory = PRODUCTS_ROOT / product_id
+    if not re.fullmatch(r"P[0-9]{6}", product_id):
+        raise HTTPException(status_code=404, detail="商品编号无效")
+    directory = (PRODUCTS_ROOT / product_id).resolve()
+    if not directory.is_relative_to(PRODUCTS_ROOT.resolve()):
+        raise HTTPException(status_code=404, detail="商品编号无效")
     if not (directory / "status.json").is_file():
         raise HTTPException(status_code=404, detail=f"商品不存在：{product_id}")
     return directory
+
+
+def _require_pre_submission_edit(directory: Path) -> None:
+    from pipeline.status import load_status
+
+    if int(load_status(directory).get("api_write_count") or 0) > 0:
+        raise HTTPException(status_code=409, detail="商品已经向 Ozon 发起写入，请另建版本后再修改")
 
 
 @app.get("/api/workbench/products/{product_id}/keywords")
@@ -841,6 +1125,7 @@ def put_selected_keywords(product_id: str, request: KeywordSelectionRequest) -> 
     from pipeline.selection import select_from_library, set_selected_keywords
 
     directory = _require_product(product_id)
+    _require_pre_submission_edit(directory)
     try:
         if request.from_library:
             payload = select_from_library(
@@ -856,6 +1141,9 @@ def put_selected_keywords(product_id: str, request: KeywordSelectionRequest) -> 
             payload = set_selected_keywords(directory, request.keywords, source="manual")
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
+    from pipeline.guided_review import invalidate_from
+
+    invalidate_from(directory, "product_analysis")
     return {"ok": True, "selection": payload}
 
 
@@ -1264,6 +1552,7 @@ def workbench_keyword_products() -> dict[str, Any]:
 # ----------------------------------------------------------------- 操作台（网页）
 
 WEB_CONSOLE = Path(__file__).resolve().parent / "web" / "console.html"
+WEB_CONSOLE_V2 = Path(__file__).resolve().parent / "web" / "research-workbench.html"
 
 
 class StoreActionRequest(BaseModel):
@@ -1292,11 +1581,16 @@ def _store_for(directory: Path, requested: str | None) -> str:
 
 @app.get("/", include_in_schema=False)
 def workbench_console() -> Any:
-    """单文件操作台（无构建步骤）：浏览器直接点着测。"""
+    """研究到上架的决策工作台；旧的专家台保留在 /advanced。"""
     from fastapi.responses import HTMLResponse
 
-    if not WEB_CONSOLE.is_file():
-        raise HTTPException(status_code=404, detail=f"缺少页面文件：{WEB_CONSOLE}")
+    if not WEB_CONSOLE_V2.is_file():
+        raise HTTPException(status_code=404, detail=f"缺少页面文件：{WEB_CONSOLE_V2}")
+    return HTMLResponse(WEB_CONSOLE_V2.read_text(encoding="utf-8"))
+
+
+@app.get("/advanced", include_in_schema=False)
+def advanced_console() -> Any:
     return HTMLResponse(WEB_CONSOLE.read_text(encoding="utf-8"))
 
 
@@ -1355,6 +1649,8 @@ def submit_product(product_id: str, request: StoreActionRequest) -> dict[str, An
     from pipeline.ozon_write import OzonWriteUploader
 
     directory = _require_product(product_id)
+    if research_sessions.session_for_product(MARKET_DB_PATH, product_id):
+        raise HTTPException(status_code=409, detail="选词批次商品须走逐项审核与批次自动发布，不可用旧入口绕过审核")
     store = _store_for(directory, request.store)
 
     provider = None
@@ -1460,3 +1756,235 @@ def workbench_steps() -> dict[str, Any]:
 
     steps = [{"step": step, "label": STEP_LABELS_ZH.get(step, step)} for step in PIPELINE_STEPS]
     return {"ok": True, "count": len(steps), "steps": steps}
+
+
+class GuidedApprovalRequest(BaseModel):
+    section: str = Field(pattern="^(grouping|copy|image_plan|images|fields)$")
+
+
+class GuidedCopyEditRequest(BaseModel):
+    title_ru: str = Field(min_length=1, max_length=255)
+    description_ru: str = Field(min_length=1, max_length=6000)
+
+
+class GuidedImageSlotRequest(BaseModel):
+    prompt: str = Field(min_length=1, max_length=4000)
+    reference_ids: list[str] = Field(min_length=1, max_length=3)
+
+
+class GuidedImageGenerateRequest(BaseModel):
+    slot: str = Field(min_length=1, max_length=100)
+
+
+class HumanFactsRequest(BaseModel):
+    material: str | None = None
+    package_quantity: int | None = Field(default=None, gt=0)
+    certifications: list[str] = Field(default_factory=list)
+
+
+class HumanAttributesRequest(BaseModel):
+    attributes: dict[str, str] = Field(default_factory=dict)
+
+
+@app.put("/api/workbench/products/{product_id}/guided/facts")
+def guided_confirm_facts(product_id: str, request: HumanFactsRequest) -> dict[str, Any]:
+    directory = _require_product(product_id)
+    _require_pre_submission_edit(directory)
+    target = directory / "input" / "human-confirmations.json"
+    current = _read_json_file(target)
+    current.update({key: value for key, value in request.model_dump().items() if value not in (None, "", [])})
+    target.write_text(json.dumps(current, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    from pipeline.guided_review import invalidate_from
+
+    invalidate_from(directory, "product_analysis")
+    return {"ok": True, "confirmations": current,
+            "next": "请重新运行豆包分析；未确认的主张不会自动写入商品卡"}
+
+
+@app.put("/api/workbench/products/{product_id}/guided/attributes")
+def guided_confirm_attributes(product_id: str, request: HumanAttributesRequest) -> dict[str, Any]:
+    from pipeline.catalog import handle_field_completion
+    from pipeline.context import PipelineGateError, StepContext
+
+    directory = _require_product(product_id)
+    _require_pre_submission_edit(directory)
+    snapshot = _read_json_file(directory / "output" / "ozon-category-attributes.json")
+    permitted = {str(item.get("attribute_id")) for item in snapshot.get("attributes") or []}
+    if not permitted:
+        raise HTTPException(status_code=409, detail="先运行准备流程，取得 Ozon 官方类目属性")
+    if any(key not in permitted or not value.strip() for key, value in request.attributes.items()):
+        raise HTTPException(status_code=422, detail="只能填写该 Ozon 类目返回的属性，且值不能为空")
+    target = directory / "input" / "human-confirmations.json"
+    current = _read_json_file(target)
+    current["attributes"] = request.attributes
+    target.write_text(json.dumps(current, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    try:
+        handle_field_completion(StepContext(directory, "field_completion"))
+    except PipelineGateError as error:
+        raise HTTPException(status_code=409, detail=error.reason) from error
+    return {"ok": True, "attributes": _read_json_file(directory / "output" / "ozon-attributes-final.json")}
+
+
+class GuidedGroupingRequest(BaseModel):
+    strategy: str = Field(pattern="^(suggested|separate_cards)$")
+
+
+@app.put("/api/workbench/products/{product_id}/guided/grouping")
+def guided_choose_grouping(product_id: str, request: GuidedGroupingRequest) -> dict[str, Any]:
+    from contracts import validate_contract
+    from pipeline.sku_selection import active_skus
+
+    directory = _require_product(product_id)
+    _require_pre_submission_edit(directory)
+    path = directory / "output" / "platform-grouping-result.json"
+    result = _read_json_file(path)
+    if not result:
+        raise HTTPException(status_code=409, detail="先运行准备流程，取得 Ozon 变体规则")
+    if request.strategy == "separate_cards":
+        source = _read_json_file(directory / "input" / "source.json")
+        count = len(active_skus(directory, source.get("skus") or []))
+        result.update(platform_card_count=count, platform_can_merge=False,
+                      upload_strategy="separate_cards", reason="运营确认逐 SKU 拆卡，不使用变体合并")
+    elif result.get("upload_strategy") == "rule_required":
+        raise HTTPException(status_code=422, detail="Ozon 规则尚不允许确认合并；可选择逐 SKU 拆卡")
+    errors = validate_contract("platform-grouping-result", result)
+    if errors:
+        raise HTTPException(status_code=422, detail="SKU 分组无效：" + "；".join(errors[:3]))
+    path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return {"ok": True, "grouping": result}
+
+
+@app.post("/api/workbench/products/{product_id}/guided/prepare")
+def guided_prepare(product_id: str, request: StoreActionRequest) -> dict[str, Any]:
+    """Prepare Ark copy, real Ozon attributes and image plan; never write Ozon or generate paid images."""
+    directory = _require_product(product_id)
+    store = _store_for(directory, request.store)
+    return workbench_launch(product_id, LaunchRequest(provider="ark", image_generator="none",
+                                                       uploader="none", oss="none", stores=[store]))
+
+
+@app.get("/api/workbench/products/{product_id}/guided")
+def guided_product(product_id: str) -> dict[str, Any]:
+    from pipeline.guided_review import status as review_status
+
+    directory = _require_product(product_id)
+    return {"ok": True, "product_id": product_id, "review": review_status(directory),
+            "source": _read_json_file(directory / "input" / "source.json"),
+            "selected_keywords": _read_json_file(directory / "input" / "selected-keywords.json"),
+            "analysis": _read_json_file(directory / "output" / "product-analysis.json"),
+            "copy": _read_json_file(directory / "output" / "copy-ru.json"),
+            "image_plan": _read_json_file(directory / "output" / "image-plan.json"),
+            "image_qc": _read_json_file(directory / "output" / "image-qc-report.json"),
+            "grouping": _read_json_file(directory / "output" / "platform-grouping-result.json"),
+            "attributes": _read_json_file(directory / "output" / "ozon-attributes-final.json"),
+            "category_attributes": _read_json_file(directory / "output" / "ozon-category-attributes.json"),
+            "category_selection": _read_json_file(directory / "input" / "category-selection.json"),
+            "human_confirmations": _read_json_file(directory / "input" / "human-confirmations.json"),
+            "measurements": _read_json_file(directory / "input" / "workbench-sku-overrides.json"),
+            "manual_prices": _read_json_file(directory / "input" / "manual-prices.json")}
+
+
+@app.put("/api/workbench/products/{product_id}/guided/copy")
+def guided_edit_copy(product_id: str, request: GuidedCopyEditRequest) -> dict[str, Any]:
+    from pipeline.guided_review import update_copy
+
+    try:
+        directory = _require_product(product_id)
+        _require_pre_submission_edit(directory)
+        result = update_copy(directory, **request.model_dump())
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return {"ok": True, "copy": result}
+
+
+@app.put("/api/workbench/products/{product_id}/guided/image-plan/{slot}")
+def guided_edit_image_slot(product_id: str, slot: str, request: GuidedImageSlotRequest) -> dict[str, Any]:
+    from pipeline.guided_review import update_plan_slot
+
+    try:
+        directory = _require_product(product_id)
+        _require_pre_submission_edit(directory)
+        plan = update_plan_slot(directory, slot=slot, **request.model_dump())
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return {"ok": True, "image_plan": plan}
+
+
+@app.post("/api/workbench/products/{product_id}/guided/approve")
+def guided_approve(product_id: str, request: GuidedApprovalRequest,
+                   background_tasks: BackgroundTasks) -> dict[str, Any]:
+    from pipeline.guided_review import approve
+
+    try:
+        review = approve(_require_product(product_id), request.section)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    session_id = research_sessions.session_for_product(MARKET_DB_PATH, product_id)
+    if session_id and review["ready_to_preflight"]:
+        session = research_sessions.get_session(MARKET_DB_PATH, session_id)
+        if session["auto_publish_enabled"] and os.environ.get("WORKBENCH_AUTO_PUBLISH_ARMED") == "1":
+            background_tasks.add_task(_process_ready_background, session_id)
+    return {"ok": True, "review": review}
+
+
+@app.post("/api/workbench/products/{product_id}/guided/generate-image")
+def guided_generate_image(product_id: str, request: GuidedImageGenerateRequest) -> dict[str, Any]:
+    """One paid Ark image request at a time, after plan approval; supports one-slot redo."""
+    from contracts import validate_contract
+    from models import ImageRequest, ModelError
+    from models.doubao_image import DoubaoImageGenerator
+    from pipeline.guided_review import slot_fingerprint, status as review_status
+    from pipeline.image_qc import run_image_qc
+
+    directory = _require_product(product_id)
+    _require_pre_submission_edit(directory)
+    if not review_status(directory)["sections"]["image_plan"]["approved"]:
+        raise HTTPException(status_code=409, detail="先确认整套图片规划和参考图，再生成图片")
+    plan = _read_json_file(directory / "output" / "image-plan.json")
+    slots = {str(item.get("slot")): item for item in
+             [*(plan.get("main_images") or []), *(plan.get("detail_images") or [])]
+             if isinstance(item, Mapping)}
+    if request.slot not in slots:
+        raise HTTPException(status_code=422, detail="图位不在已确认的图片计划中")
+    try:
+        generator = DoubaoImageGenerator.from_env(slot_filter=[request.slot])
+        result = generator.generate(ImageRequest(product_id=product_id, product_dir=directory,
+                                                 source=_read_json_file(directory / "input" / "source.json")))
+    except (ModelError, ValueError) as error:
+        raise HTTPException(status_code=422, detail=f"豆包生图失败：{error}") from error
+    report_path = directory / "output" / "image-generation-report.json"
+    report = _read_json_file(report_path)
+    files = {str(item.get("slot")): item for item in report.get("files") or []
+             if isinstance(item, Mapping) and item.get("generator") == "doubao"}
+    for item in result.get("generated") or []:
+        slot_name = str(item["slot"])
+        if slot_name not in slots or item.get("path") != slots[slot_name].get("output_path"):
+            raise HTTPException(status_code=422, detail="豆包返回图位与当前图片计划不一致")
+        files[slot_name] = {"slot": slot_name, "path": item["path"], "bytes": item["bytes"],
+                            "generator": "doubao", "slot_fingerprint": slot_fingerprint(slots[slot_name])}
+    report.update(schema_version="1.0.0", product_id=product_id, generator="doubao", final_images=True,
+                  planned_slots=len(slots), generated_slots=len(files), files=list(files.values()), note=result.get("note"))
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    qc = run_image_qc(directory, generator_name="doubao", produces_final_images=True)
+    failures = validate_contract("image-qc-report", qc)
+    if failures:
+        raise HTTPException(status_code=422, detail="图片质检结果不符合契约：" + "；".join(failures[:3]))
+    (directory / "output" / "image-qc-report.json").write_text(
+        json.dumps(qc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    return {"ok": True, "generated": result.get("generated"), "skipped": result.get("skipped"), "qc": qc}
+
+
+@app.get("/api/workbench/products/{product_id}/media/{relative_path:path}")
+def guided_media(product_id: str, relative_path: str) -> Any:
+    from fastapi.responses import FileResponse
+
+    directory = _require_product(product_id).resolve()
+    permitted = [directory / "input" / name for name in ("main-images", "sku-images", "detail-images")]
+    permitted.append(directory / "output" / "generated-images")
+    target = (directory / relative_path).resolve()
+    if not target.is_file() or target.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+        raise HTTPException(status_code=404, detail="图片不存在")
+    if not any(target.is_relative_to(root.resolve()) for root in permitted):
+        raise HTTPException(status_code=403, detail="图片路径不允许访问")
+    return FileResponse(target)

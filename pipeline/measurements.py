@@ -412,6 +412,50 @@ def compute_pricing(
         sku_dims = sku_block.get("package") or (measurements or {}).get("package")
         rows.append(compute_sku_pricing(sku=sku, sku_id=sku_id, config=config, dimensions=sku_dims))
 
+    manual_required = product_dir is not None and (Path(product_dir) / "input" / "manual-pricing-required.json").is_file()
+    if manual_required:
+        manual_file = Path(product_dir) / "input" / "manual-prices.json"
+        try:
+            manual = json.loads(manual_file.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            manual = {}
+        except ValueError as error:
+            raise ValueError("人工售价文件不是有效 JSON") from error
+        entered = manual.get("prices") if isinstance(manual, Mapping) else {}
+        entered = entered if isinstance(entered, Mapping) else {}
+        for row in rows:
+            choice = entered.get(row["sku_id"])
+            choice = choice if isinstance(choice, Mapping) else {}
+            amount = parse_number(choice.get("price"))
+            currency = str(choice.get("currency") or "").upper()
+            # Ignore all auto-pricing rejections: the user's number is the
+            # source of truth for the offer, while costs remain diagnostics.
+            row["errors"] = []
+            if not amount or amount <= 0 or currency not in {"CNY", "RUB"}:
+                row["selling_price_cny"] = None
+                row["selling_price_rub"] = None
+                row["estimated_profit_rub"] = None
+                row["margin_rate"] = None
+                row["status"] = "REJECT"
+                row["errors"].append("缺少人工确认售价（CNY 或 RUB）")
+                continue
+            rub_per_cny = float(config["rub_per_cny"])
+            cny = amount if currency == "CNY" else amount / rub_per_cny
+            rub = amount if currency == "RUB" else amount * rub_per_cny
+            row["selling_price_cny"] = round(cny, 2)
+            row["selling_price_rub"] = round(rub, 2)
+            row["estimated_profit_rub"] = round(rub * (1 - row["total_fee_rate"]) - row["base_cost_cny"] * rub_per_cny, 2) if row["purchase_cost_cny"] else None
+            row["margin_rate"] = round(row["estimated_profit_rub"] / rub, 4) if row["estimated_profit_rub"] is not None else None
+            row["status"] = "UPLOAD"
+            row["breakdown_rub"] = {
+                "selling_price": row["selling_price_rub"],
+                "platform_fees": round(rub * row["total_fee_rate"], 2),
+                "cost": round(row["base_cost_cny"] * rub_per_cny, 2) if row["purchase_cost_cny"] else None,
+                "profit": row["estimated_profit_rub"],
+            }
+            if row["purchase_cost_cny"] is None:
+                row["errors"].append("缺采购价，无法评估利润；人工售价仍保留")
+
     statuses = {row["status"] for row in rows}
     if "REJECT" in statuses:
         recommendation = "REJECT"
@@ -426,7 +470,7 @@ def compute_pricing(
     return {
         "schema_version": SCHEMA_VERSION,
         "product_id": product_id,
-        "pricing_source": "workbench-pricing-engine",
+        "pricing_source": "user_manual" if manual_required else "workbench-pricing-engine",
         "config": {
             key: config[key]
             for key in (

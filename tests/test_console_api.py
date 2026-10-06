@@ -51,10 +51,14 @@ class ConsoleApiTests(unittest.TestCase):
     def test_console_page_is_served(self):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
-        # 工序台：导轨 + 校样 + 动作
-        for marker in ("上品工序台", 'id="rail"', 'id="panel-copy"', "真实提交", "/api/workbench/steps"):
+        # New guided surface: research → selected words → collected product → audit.
+        for marker in ("Ozon 上品工作台", 'data-view="categories"', 'data-view="keywords"',
+                       'data-view="sessions"', 'data-view="product"', "火山方舟"):
             self.assertIn(marker, response.text, marker)
         self.assertIn("/api/workbench/products/", response.text)
+        advanced = self.client.get("/advanced")
+        self.assertEqual(advanced.status_code, 200)
+        self.assertIn("上品工序台", advanced.text)
 
     def test_steps_endpoint_uses_single_source(self):
         from pipeline.steps import PIPELINE_STEPS
@@ -120,6 +124,36 @@ class ConsoleApiTests(unittest.TestCase):
             "/api/workbench/products/P-not-exist/submit", json={"store": "default", "confirm": "SUBMIT"}
         )
         self.assertEqual(response.status_code, 404)
+
+    def test_guided_manual_prices_and_measurements_are_explicit(self):
+        created = self.client.post(
+            "/api/collector/products",
+            json={"source_url": "https://detail.1688.com/offer/246802468.html", "title_zh": "纯棉床单",
+                  "skus": [{"sku_id": "S1", "color_ru": "белый", "purchase_price_cny": 42.0}]},
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        product_id = created.json()["product_id"]
+        root = f"/api/workbench/products/{product_id}"
+        selected = self.client.post(root + "/skus", json={"include": ["S1"]})
+        self.assertEqual(selected.status_code, 200, selected.text)
+        bad_price = self.client.put(root + "/prices", json={"prices": [{"sku_id": "S2", "price": 99, "currency": "CNY"}]})
+        self.assertEqual(bad_price.status_code, 422)
+        good_price = self.client.put(root + "/prices", json={"prices": [{"sku_id": "S1", "price": 99, "currency": "CNY"}]})
+        self.assertEqual(good_price.status_code, 200, good_price.text)
+        bad_dimensions = self.client.put(root + "/measurements", json={
+            "product": {"length_mm": 200, "width_mm": 150, "height_mm": 30, "weight_g": 700},
+            "package": {"length_mm": 190, "width_mm": 160, "height_mm": 40, "weight_g": 800},
+        })
+        self.assertEqual(bad_dimensions.status_code, 422)
+        good_dimensions = self.client.put(root + "/measurements", json={
+            "product": {"length_mm": 200, "width_mm": 150, "height_mm": 30, "weight_g": 700},
+            "package": {"length_mm": 220, "width_mm": 170, "height_mm": 40, "weight_g": 800},
+        })
+        self.assertEqual(good_dimensions.status_code, 200, good_dimensions.text)
+        guided = self.client.get(root + "/guided").json()
+        self.assertEqual(guided["manual_prices"]["prices"]["S1"]["price"], 99)
+        self.assertEqual(guided["measurements"]["product"]["package_weight_g"], 800)
+        self.assertFalse(guided["review"]["ready_to_preflight"])
 
     def test_preflight_on_missing_product_is_404(self):
         response = self.client.post("/api/workbench/products/P-not-exist/preflight", json={"store": "default"})

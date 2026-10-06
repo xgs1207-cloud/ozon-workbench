@@ -17,7 +17,7 @@
   "properties": {
     "schema_version": { "const": "1.0.0" },
     "product_id": { "type": "string", "pattern": "^P[0-9]{6}$" },
-    "pricing_source": { "const": "workbench-pricing-engine" },
+    "pricing_source": { "enum": ["workbench-pricing-engine", "user_manual"] },
     "config": {
       "type": "object",
       "additionalProperties": false,

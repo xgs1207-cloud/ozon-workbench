@@ -45,3 +45,15 @@ Seerfar 官方开放文档中的类目明细、市场词、商品报表分别为
 先读现有 XLSX 和插件可见报表 → 用 Ozon Premium Pro 的**单页**类目/热门词验证（若会员确有权限） → 只对前 10–20 个候选类目查询 Seerfar 多月明细 → 只对这些类目分页查词 → 只对最终少数 SKU 查商品详情。所有请求按 `source + endpoint + filters + period + page` 做缓存，月报每月更新、商品候选每周或人工触发更新；每个任务设置页数上限、预计积分、预览和人工确认。真实扣费接口尚未接入，不会后台自动运行。
 
 依据：[Seerfar 开放 API 文档](http://doc.seerfar.cn/api-docs.html?lang=zh-CN)、[Ozon Seller API](https://docs.ozon.ru/api/seller/)、[Ozon 对自有商品搜索词接口的说明](https://dev.ozon.ru/news/512-Novye-metody-dlia-raboty-s-analitikoi-po-zaprosam-tovarov-v-Seller-API/)。
+
+## 研究工作台（2026-10 版本）
+
+`GET /api/research/categories` 和 `GET /api/research/keywords?category_key=...` 从已入库的 Seerfar 月度快照计算推荐；Ozon 热词仅作独立印证，不把两家的热度加在一起。页面 `/` 显示推荐依据，`/advanced` 保留旧高级台。筛选参数在 `GET/PUT /api/research/config`：默认至少 3 个不同统计月份，类目权重为稳定度 35%、竞争 35%、需求 20%、趋势 10%；关键词为稳定度 30%、竞争 30%、需求 25%、转化 15%。退货取消率仅扣分，类目的季节性系数另有最多 8 分的透明扣分。跨境不可售的记录不进入推荐。
+
+竞争密度同月同源计算：类目用 `竞品数 / 销量`，关键词用 `竞品数 / 月搜热度`；不把“竞对数”与“竞品数”相加，也不拿商品数量除以卢布 GMV。原始字段和证据行 ID 保留，可追溯到 `observations`。Seerfar 关键词单元格的第二行中文翻译只作阅读辅助，上架关键词取第一行俄文原词。实际导出的类目表含 22 列、市场词表含 24 列；`转换集中度/转化集中度` 两种列名均识别。
+
+已有 XLSX 可通过 `python -m market_intelligence.import_seerfar_xlsx --db runtime/market-intelligence.sqlite3 --period YYYY-MM --categories <类目表.xlsx> --keywords <市场词表.xlsx>` 入库，不调用付费 API。`--period` 必须填**数据的统计月**，不是导出日期；若文件是“最近 30 天”滚动窗口，不应伪装成某个自然月以满足 3 个月门槛。单次导出的两张 200 行表只有一个时间窗口，因此会显示候选和初筛分，但不会把“需求稳定”当成已证实，也不会开放推荐批次创建；需补足不同统计月的历史快照，或由用户明确调整门槛并接受有限置信度。
+
+研究批次 `POST /api/research/sessions` 冻结研究类目、一个主词和至多 10 个辅词；一个批次可关联多件 1688 采集商品。每件商品独立确认 SKU、Ozon Seller API 真实末级类目、事实、尺寸重量、逐 SKU 售价、俄文文案、图片计划与参考图、整套图片和 Ozon 必填属性。火山方舟文本模型经 `guided/prepare` 触发，生图按图位手动触发以控制费用。审核许可绑定输入与产物摘要；改动后旧许可失效。
+
+自动发布须同时满足服务器 `WORKBENCH_AUTO_PUBLISH_ARMED=1`、批次显式开启、所有商品审核确认、COS 图片 HTTPS 发布、production 载荷和只读预检通过。同一商品仅自动尝试一次 Ozon 写入；结果不明或失败时转人工，不盲目重试。**此处提交的是商品卡导入，不代表审核通过或有库存可售**。没有正式 Ozon 沙盒，部署测试不得使用真实写接口。

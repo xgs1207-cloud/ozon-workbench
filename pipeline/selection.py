@@ -61,6 +61,7 @@ def set_selected_keywords(
             text = str(item.get("keyword") or item.get("text") or "").strip()
             record = {
                 "keyword": text,
+                "role": item.get("role"),
                 "source_key": item.get("key"),
                 "score": item.get("score"),
                 "status": item.get("status"),

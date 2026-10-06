@@ -147,6 +147,14 @@ button:disabled {
   font: inherit;
 }
 
+#market-capture output {
+  display: block;
+  padding: 7px;
+  border: 1px solid #afb8c1;
+  border-radius: 5px;
+  background: #f6f8fa;
+}
+
 #market-capture button {
   margin-top: 10px;
 }

@@ -82,10 +82,55 @@ async function loadFactoryConfig() {
 async function factoryFetch(path, options = {}) {
     await loadFactoryConfig();
     const headers = { ...(options.headers || {}) };
+    if (headers["X-Market-Ingest-Token"] && !isSafeMarketDestination(factoryConfig.baseUrl))
+        throw new Error("市场数据和令牌不能通过公网 HTTP 传输");
     headers["X-Factory-Device-Id"] = factoryConfig.deviceId;
     if (factoryConfig.authHeader)
         headers["Authorization"] = factoryConfig.authHeader;
     return fetch(`${factoryConfig.baseUrl}${path}`, { ...options, headers });
+}
+function uniqueMarketRecords(records, seen) {
+    return records.filter((record) => {
+        const key = JSON.stringify(record);
+        if (seen.has(key))
+            return false;
+        seen.add(key);
+        return true;
+    });
+}
+function marketRecordChunks(records, maxBytes = 850000) {
+    const encoder = new TextEncoder();
+    const chunks = [];
+    let chunk = [];
+    let bytes = 0;
+    for (const record of records) {
+        const size = encoder.encode(JSON.stringify(record)).length + 1;
+        if (size > maxBytes)
+            throw new Error("单条报表数据超过安全上传大小，请反馈该行内容");
+        if (chunk.length >= 200 || (chunk.length && bytes + size > maxBytes)) {
+            chunks.push(chunk);
+            chunk = [];
+            bytes = 0;
+        }
+        chunk.push(record);
+        bytes += size;
+    }
+    if (chunk.length)
+        chunks.push(chunk);
+    return chunks;
+}
+function isRollingMarketPage(url) {
+    try {
+        const address = new URL(url);
+        return ["seerfar.cn", "www.seerfar.cn"].includes(address.hostname)
+            && /^\/admin\/market(?:\.html)?\/?$/.test(address.pathname);
+    }
+    catch {
+        return false;
+    }
+}
+function marketCaptureMonth(now = new Date()) {
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
 }
 const els = {
     status: document.getElementById("page-status"),
@@ -113,13 +158,20 @@ const els = {
     testConnection: document.getElementById("test-connection"),
     connectionResult: document.getElementById("connection-result"),
     marketCapture: document.getElementById("market-capture"),
+    marketRollingPeriod: document.getElementById("market-rolling-period"),
+    marketNaturalPeriod: document.getElementById("market-natural-period"),
+    marketCaptureMonth: document.getElementById("market-capture-month"),
     marketPeriod: document.getElementById("market-period"),
     marketToken: document.getElementById("market-token"),
-    captureMarket: document.getElementById("capture-market")
+    marketMaxPages: document.getElementById("market-max-pages"),
+    captureMarket: document.getElementById("capture-market"),
+    stopMarket: document.getElementById("stop-market")
 };
 let latestCapture = null;
 let duplicateProductId = null;
 let activePageKind = "unsupported";
+let marketCaptureRunning = false;
+let marketStopRequested = false;
 function setResult(value) {
     els.result.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
 }
@@ -184,6 +236,10 @@ async function loadPreview() {
         els.productCaptureUi.hidden = !(is1688Page || isOzonPage);
         if (isSeerfarPage) {
             activePageKind = "seerfar";
+            const rolling = isRollingMarketPage(tab.url);
+            els.marketRollingPeriod.hidden = !rolling;
+            els.marketNaturalPeriod.hidden = rolling;
+            els.marketCaptureMonth.textContent = `${marketCaptureMonth()}（按本机时间自动生成）`;
             els.status.textContent = "Seerfar 报表页：可手动采集当前可见表格";
             return;
         }
@@ -389,39 +445,108 @@ async function captureCurrentOzonReference() {
 }
 els.capture.addEventListener("click", () => captureCurrentProduct(false));
 els.captureMarket.addEventListener("click", async () => {
+    if (marketCaptureRunning)
+        return;
+    marketCaptureRunning = true;
+    marketStopRequested = false;
     els.captureMarket.disabled = true;
+    els.stopMarket.disabled = false;
+    let pages = 0;
+    let received = 0;
+    let inserted = 0;
     try {
-        const period = els.marketPeriod.value;
         const token = els.marketToken.value.trim();
-        if (!period || !token)
-            throw new Error("请填写报表月份和市场数据写入令牌");
+        const maxPages = Number(els.marketMaxPages.value);
+        if (!token)
+            throw new Error("请填写市场数据写入令牌");
+        if (!Number.isInteger(maxPages) || maxPages < 1 || maxPages > 20)
+            throw new Error("本次采集页数须在 1–20 之间");
         await loadFactoryConfig();
         if (!isSafeMarketDestination(factoryConfig.baseUrl))
             throw new Error("市场数据和令牌不能通过公网 HTTP 传输：请配置 HTTPS 工作台或本地 127.0.0.1");
         const tab = await getActiveTab();
         if (!/^https:\/\/(?:www\.)?seerfar\.cn\//.test(tab?.url || ""))
             throw new Error("当前不是 Seerfar 页面");
-        const snapshot = await sendToTab(tab.id, { type: "SEERFAR_MARKET_CAPTURE" });
+        const rolling = isRollingMarketPage(tab.url);
+        const period = rolling ? marketCaptureMonth() : els.marketPeriod.value;
+        if (!period)
+            throw new Error("请填写报表实际所属自然月");
+        els.marketCaptureMonth.textContent = `${period}（按本机时间自动生成）`;
+        let snapshot = await sendToTab(tab.id, { type: "SEERFAR_MARKET_CAPTURE" });
         if (!snapshot?.records?.length)
             throw new Error(snapshot?.reason || "当前页面没有识别到类目、关键词或商品报表表格");
-        const response = await factoryFetch("/api/collector/market-snapshots", {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "X-Market-Ingest-Token": token },
-            body: JSON.stringify({ ...snapshot, source: "seerfar", capture_method: "browser_extension", period })
-        });
-        const result = await response.json();
-        if (!response.ok)
-            throw new Error(result.detail || `HTTP ${response.status}`);
+        const dataset = snapshot.dataset;
+        const seen = new Set();
+        let stopReason = "已到本次页数上限";
+        for (let page = 1; page <= maxPages; page++) {
+            if (marketStopRequested) {
+                stopReason = "用户已停止";
+                break;
+            }
+            if (snapshot.dataset !== dataset)
+                throw new Error("翻页后报表类型变化，已停止避免混合入库");
+            const unique = uniqueMarketRecords(snapshot.records, seen);
+            if (!unique.length)
+                throw new Error("下一页与已采集数据完全重复，已停止避免循环");
+            const chunks = marketRecordChunks(unique);
+            for (let part = 0; part < chunks.length; part++) {
+                els.progress.textContent = `正在提交第 ${page}/${maxPages} 页，第 ${part + 1}/${chunks.length} 批…`;
+                const response = await factoryFetch("/api/collector/market-snapshots", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "X-Market-Ingest-Token": token },
+                    body: JSON.stringify({ ...snapshot, records: chunks[part], source: "seerfar",
+                        capture_method: "browser_extension", period,
+                        ...(rolling ? { period_kind: "rolling_30d" } : {}) })
+                });
+                const result = await response.json();
+                if (!response.ok)
+                    throw new Error(result.detail?.message || result.detail || `HTTP ${response.status}`);
+                received += chunks[part].length;
+                inserted += Number(result.inserted || 0);
+            }
+            pages += 1;
+            els.progress.textContent = `已完成 ${pages} 页，接收 ${received} 行，新入库 ${inserted} 行`;
+            if (page === maxPages || marketStopRequested) {
+                if (marketStopRequested)
+                    stopReason = "用户已停止";
+                break;
+            }
+            const next = await sendToTab(tab.id, { type: "SEERFAR_MARKET_NEXT_PAGE" });
+            if (next?.done || next?.stopped) {
+                stopReason = next.reason || "已到最后一页";
+                break;
+            }
+            if (!next?.advanced || !next.snapshot?.records?.length)
+                throw new Error(next?.error || "翻页后未取得有效数据，已停止");
+            snapshot = next.snapshot;
+        }
         await chrome.storage.local.set({ marketIngestToken: token });
-        els.progress.textContent = `已接收 ${result.received} 行，新入库 ${result.inserted} 行`;
-        setResult(result);
+        els.progress.textContent = `采集结束：${pages} 页，接收 ${received} 行，新入库 ${inserted} 行；${stopReason}`;
+        setResult({ pages, received, inserted, stop_reason: stopReason });
     }
     catch (error) {
-        els.progress.textContent = "市场报表入库失败";
-        setResult(error.message);
+        els.progress.textContent = received
+            ? `采集中断：已提交 ${received} 行、新入库 ${inserted} 行；后续页面未处理`
+            : "市场报表入库失败";
+        setResult({ error: error.message, pages, received, inserted });
     }
     finally {
+        marketCaptureRunning = false;
         els.captureMarket.disabled = false;
+        els.stopMarket.disabled = true;
+    }
+});
+els.stopMarket.addEventListener("click", async () => {
+    marketStopRequested = true;
+    els.stopMarket.disabled = true;
+    els.progress.textContent = "正在停止；当前页提交完成后结束…";
+    try {
+        const tab = await getActiveTab();
+        if (tab?.id)
+            await sendToTab(tab.id, { type: "SEERFAR_MARKET_STOP" });
+    }
+    catch {
+        // The current tab may have navigated; popup loop still stops after its pending request.
     }
 });
 els.previewToggle.addEventListener("click", () => {

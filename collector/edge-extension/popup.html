@@ -19,12 +19,22 @@
       </details>
       <div id="page-status" class="status">检查当前页面...</div>
       <section id="market-capture" class="task-runner" hidden>
-        <label for="market-period">Seerfar 报表所属月份（必填）</label>
-        <input id="market-period" type="month">
+        <div id="market-rolling-period" hidden>
+          <label>市场关键词：最近 30 天滚动窗口</label>
+          <output id="market-capture-month">采集月份自动识别</output>
+          <small>这是快照采集月份，不是自然月统计；同月多次采集，推荐只取一次。</small>
+        </div>
+        <div id="market-natural-period">
+          <label for="market-period">Seerfar 报表所属自然月（必填）</label>
+          <input id="market-period" type="month">
+        </div>
         <label for="market-token">市场数据写入令牌（与服务器环境变量一致）</label>
         <input id="market-token" type="password" autocomplete="off" spellcheck="false">
-        <button id="capture-market" type="button">将当前可见报表页入库</button>
-        <small>工作台地址须为 HTTPS，或已开 SSH 隧道的 http://127.0.0.1:8766。只读取当前可见页，不自动翻页或调用付费接口。</small>
+        <label for="market-max-pages">本次最多采集页数（1–20）</label>
+        <input id="market-max-pages" type="number" min="1" max="20" value="1">
+        <button id="capture-market" type="button">采集当前及后续页</button>
+        <button id="stop-market" type="button" class="secondary" disabled>停止翻页</button>
+        <small>仅采集 Seerfar 当前显示的列，请先选好指标列。由你启动；每页最多 200 行，逐页入库，重复行跳过，最多 20 页。采集时请保持此弹窗打开；失焦关闭即中断，已入库页保留，重开可从当前页继续。工作台须为 HTTPS 或已开 SSH 隧道的 http://127.0.0.1:8766。不调用付费接口。</small>
       </section>
       <div id="product-capture-ui" hidden>
       <section class="summary">

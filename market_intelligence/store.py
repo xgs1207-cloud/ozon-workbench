@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 SOURCES = {"seerfar", "ozon_seller_api"}
 DATASETS = {"categories", "keywords", "products"}
 METHODS = {"browser_extension", "official_api", "file_import"}
+PERIOD_KINDS = {"calendar_month", "rolling_30d"}
 
 
 def _json(value: Any) -> str:
@@ -66,6 +67,7 @@ def connect(path: Path | str) -> sqlite3.Connection:
             dataset TEXT NOT NULL,
             capture_method TEXT NOT NULL,
             period TEXT NOT NULL DEFAULT '',
+            period_kind TEXT NOT NULL DEFAULT 'calendar_month',
             page_url TEXT NOT NULL DEFAULT '',
             captured_at TEXT NOT NULL,
             imported_at TEXT NOT NULL,
@@ -80,6 +82,7 @@ def connect(path: Path | str) -> sqlite3.Connection:
             entity_key TEXT NOT NULL,
             category_key TEXT NOT NULL DEFAULT '',
             period TEXT NOT NULL DEFAULT '',
+            period_kind TEXT NOT NULL DEFAULT 'calendar_month',
             captured_at TEXT NOT NULL,
             raw_json TEXT NOT NULL,
             row_hash TEXT NOT NULL,
@@ -97,14 +100,22 @@ def connect(path: Path | str) -> sqlite3.Connection:
         );
         """
     )
+    # Existing databases predate period_kind. Their historical YYYY-MM values
+    # represented calendar-month reports, so migrate without rewriting rows.
+    for table in ("ingest_batches", "observations"):
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if "period_kind" not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN period_kind TEXT NOT NULL DEFAULT 'calendar_month'")
     return conn
 
 
 def ingest_snapshot(path: Path | str, *, source: str, dataset: str, capture_method: str,
                     period: str, page_url: str, captured_at: str, records: list[dict[str, Any]],
-                    category_key: str | None = None) -> dict[str, Any]:
+                    category_key: str | None = None, period_kind: str = "calendar_month") -> dict[str, Any]:
     if source not in SOURCES or dataset not in DATASETS or capture_method not in METHODS:
         raise ValueError("不支持的数据来源、数据集或采集方式")
+    if period_kind not in PERIOD_KINDS:
+        raise ValueError("统计周期口径仅支持 calendar_month 或 rolling_30d")
     if source == "ozon_seller_api" and capture_method == "browser_extension":
         raise ValueError("Ozon 官方 API 数据必须由 API 适配器导入，不能由网页采集冒充")
     if capture_method == "browser_extension" and source != "seerfar":
@@ -120,6 +131,8 @@ def ingest_snapshot(path: Path | str, *, source: str, dataset: str, capture_meth
     if period and (len(period) != 7 or period[4] != "-" or not period[:4].isdigit()
                    or not period[5:].isdigit() or not 1 <= int(period[5:]) <= 12):
         raise ValueError("报表月份必须是 YYYY-MM")
+    if period_kind == "rolling_30d" and not period:
+        raise ValueError("最近 30 天滚动数据须填写采集月份 YYYY-MM")
     if capture_method == "browser_extension" and not period:
         raise ValueError("插件采集须注明报表月份，避免错把采集日当统计月")
     if len(page_url) > 2048 or len(captured_at) > 64:
@@ -134,25 +147,31 @@ def ingest_snapshot(path: Path | str, *, source: str, dataset: str, capture_meth
     # month. Keep one observation per capture day even if figures happen to be
     # unchanged; otherwise a later month's identical figure vanishes forever.
     dedupe_bucket = period or (captured_at or _now())[:10]
-    batch_hash = hashlib.sha256(
-        _json([source, dataset, capture_method, dedupe_bucket, page_url, normalized]).encode()
-    ).hexdigest()
+    # Keep the legacy calendar-month hashes stable for existing databases.
+    # Rolling observations with the same visible numbers are a different grain.
+    batch_key = [source, dataset, capture_method, dedupe_bucket, page_url, normalized]
+    if period_kind != "calendar_month":
+        batch_key.append(period_kind)
+    batch_hash = hashlib.sha256(_json(batch_key).encode()).hexdigest()
     with closing(connect(path)) as conn, conn:
         prior = conn.execute("SELECT id, record_count FROM ingest_batches WHERE payload_hash=?", (batch_hash,)).fetchone()
         if prior:
             return {"batch_id": prior["id"], "received": len(records), "inserted": 0, "duplicate_batch": True}
         cur = conn.execute(
-            "INSERT INTO ingest_batches(source,dataset,capture_method,period,page_url,captured_at,imported_at,payload_hash,record_count) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
-            (source, dataset, capture_method, period, page_url, captured_at or _now(), _now(), batch_hash, len(records)),
+            "INSERT INTO ingest_batches(source,dataset,capture_method,period,period_kind,page_url,captured_at,imported_at,payload_hash,record_count) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (source, dataset, capture_method, period, period_kind, page_url, captured_at or _now(), _now(), batch_hash, len(records)),
         )
         inserted = 0
         for entity, category, raw in normalized:
-            row_hash = hashlib.sha256(_json([dedupe_bucket, raw]).encode()).hexdigest()
+            row_key = [dedupe_bucket, raw]
+            if period_kind != "calendar_month":
+                row_key.append(period_kind)
+            row_hash = hashlib.sha256(_json(row_key).encode()).hexdigest()
             result = conn.execute(
-                "INSERT OR IGNORE INTO observations(batch_id,source,dataset,entity_key,category_key,period,captured_at,raw_json,row_hash) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
-                (cur.lastrowid, source, dataset, entity, category, period, captured_at or _now(), raw, row_hash),
+                "INSERT OR IGNORE INTO observations(batch_id,source,dataset,entity_key,category_key,period,period_kind,captured_at,raw_json,row_hash) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (cur.lastrowid, source, dataset, entity, category, period, period_kind, captured_at or _now(), raw, row_hash),
             )
             inserted += result.rowcount
         return {"batch_id": cur.lastrowid, "received": len(records), "inserted": inserted, "duplicate_batch": False}
@@ -171,7 +190,7 @@ def list_observations(path: Path | str, *, dataset: str, source: str | None = No
     args.append(limit)
     with closing(connect(path)) as conn:
         rows = conn.execute(
-            "SELECT id,batch_id,source,dataset,entity_key,category_key,period,captured_at,raw_json "
+            "SELECT id,batch_id,source,dataset,entity_key,category_key,period,period_kind,captured_at,raw_json "
             f"FROM observations WHERE {' AND '.join(clauses)} ORDER BY id DESC LIMIT ?", args,
         ).fetchall()
     return [{key: value for key, value in dict(row).items() if key != "raw_json"}

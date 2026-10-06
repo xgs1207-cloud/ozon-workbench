@@ -111,7 +111,7 @@ def _measure(raw: Mapping[str, Any], kind: str) -> float | None:
 def _observations(path: Path | str, dataset: str) -> list[dict[str, Any]]:
     with closing(connect(path)) as conn:
         rows = conn.execute(
-            "SELECT id,source,entity_key,category_key,period,captured_at,raw_json "
+            "SELECT id,source,entity_key,category_key,period,period_kind,captured_at,raw_json "
             "FROM observations WHERE dataset=? ORDER BY id DESC LIMIT 20000", (dataset,)
         ).fetchall()
     return [dict(row) | {"raw": json.loads(row["raw_json"])} for row in rows]
@@ -167,6 +167,7 @@ def _stability(values: list[float], min_months: int) -> float | None:
 def _group(rows: list[dict[str, Any]], dataset: str) -> dict[tuple[str, str], list[dict[str, Any]]]:
     groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     seen: set[tuple[str, str, str]] = set()
+    selected_kind: dict[tuple[str, str], str] = {}
     for row in rows:  # newest first; keep one snapshot per comparable month
         if row["source"] != "seerfar":
             continue
@@ -175,7 +176,16 @@ def _group(rows: list[dict[str, Any]], dataset: str) -> dict[tuple[str, str], li
         category = str(row["category_key"]).casefold()
         key = (category, entity) if dataset == "keywords" else (entity, entity)
         period = str(row["period"] or "")
-        if not period or (key[0] + ":" + key[1], period, row["source"]) in seen:
+        if not period:
+            continue
+        period_kind = str(row.get("period_kind") or "calendar_month")
+        if key not in selected_kind:
+            selected_kind[key] = period_kind
+        elif selected_kind[key] != period_kind:
+            # A rolling 30-day window and a calendar month are not the same
+            # grain, even when both are assigned the same YYYY-MM bucket.
+            continue
+        if (key[0] + ":" + key[1], period, row["source"]) in seen:
             continue
         seen.add((key[0] + ":" + key[1], period, row["source"]))
         groups[key].append(row)
@@ -220,6 +230,7 @@ def _signal(rows: list[dict[str, Any]], dataset: str, config: RecommendConfig) -
         "crossborder_eligible": "跨境卖家可售" in str(latest.get("销售方式") or "") if "销售方式" in latest else None,
         "periods": [period for period, _ in demand_pairs],
         "latest_period": rows[-1]["period"],
+        "period_kind": rows[-1].get("period_kind") or "calendar_month",
         "source": "seerfar",
         "evidence_ids": [row["id"] for row in rows],
     }

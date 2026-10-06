@@ -4,13 +4,15 @@
 
 默认 SQLite 文件：`runtime/market-intelligence.sqlite3`，可用 `WORKBENCH_MARKET_DB_PATH` 改路径。`runtime/` 已忽略，不上传 Git。此库与现有 `products/` 素材目录及 `keyword-library/` 人工选词库分离；**采集快照不是自动入选关键词**。
 
-表：`ingest_batches` 记录来源、数据集、采集方式、报表月份、时间、页面及批次哈希；`observations` 保留每行原始 JSON、类目键和去重哈希；`category_mappings` 预留 Seerfar 类目与 Ozon 上架类目/类型的**人工验证映射**。同一查询的 Seerfar“月搜热度”和 Ozon `client_count` 永不合并为同一个数字。来源、月份和原始字段必须随评分结果一起展示。
+表：`ingest_batches` 记录来源、数据集、采集方式、月份桶、统计口径、时间、页面及批次哈希；`observations` 保留每行原始 JSON、类目键、统计口径和去重哈希；`category_mappings` 预留 Seerfar 类目与 Ozon 上架类目/类型的**人工验证映射**。同一查询的 Seerfar“月搜热度”和 Ozon `client_count` 永不合并为同一个数字。来源、月份、口径和原始字段必须随评分结果一起展示。
 
 有明确报表月时按来源/实体/月份/原始行去重；Ozon 热词等没有历史月份参数的接口按**抓取日**去重，保留跨日快照，但抓取日不伪装成报表月。
 
 写入 API：`POST /api/collector/market-snapshots`；查询：`GET /api/market-data/stats` 与 `GET /api/market-data/observations?dataset=keywords&source=seerfar&period=2026-09`。三者均须请求头 `X-Market-Ingest-Token`，服务端设置环境变量 `WORKBENCH_MARKET_INGEST_TOKEN`。如果未设置，接口拒绝写入/读取。每批最多 200 行、1 MB；重复批次和重复原始行去重。**不要把 Seerfar/Ozon API Key 当作这个写入令牌。**
 
-插件：打开 Seerfar 报表并等待表格加载 → 点击扩展 → 填写报表所属月和写入令牌 → “将当前可见报表页入库”。当前识别有表头的类目、关键词及带 SKU 的商品报表；只抓当前可见页，最多 200 行，不自动翻页、不访问站内隐藏接口。原始单元格字符串原样存储，页面路径去掉 URL 查询参数。页面改版后须重新核对表头和字段，未识别时不会猜测入库。公网工作台须先提供 HTTPS；扩展拒绝将这批数据和令牌发到公网 HTTP 地址。本机 `127.0.0.1` 可用于测试。
+`period_kind` 标明统计口径：`calendar_month`（默认，适用于明确自然月报表）或 `rolling_30d`（最近 30 天滚动值）。滚动值的 `period=YYYY-MM` **只表示采集发生的月份桶**，并不表示数据覆盖这个完整自然月；采集时间以 `captured_at` 为准。推荐器对同一类目或词只沿用最新记录对应的一种口径，每月桶最多取一条，不把滚动值和自然月报表拼成三个月历史。月初、月末采集的滚动窗口仍可能重叠，`history_months` 仅表示不同月份桶数，不等于独立自然月样本数。
+
+插件：打开 Seerfar 报表并等待表格加载 → 点击扩展 → 确认统计口径、采集月份桶和写入令牌 → “将当前可见报表页入库”。当前识别有表头的类目、关键词及带 SKU 的商品报表；只抓当前可见页，最多 200 行，不自动翻页、不访问站内隐藏接口。原始单元格字符串原样存储，页面路径去掉 URL 查询参数。页面改版后须重新核对表头和字段，未识别时不会猜测入库。公网工作台须先提供 HTTPS；扩展拒绝将这批数据和令牌发到公网 HTTP 地址。本机 `127.0.0.1` 可用于测试。
 
 Ozon 官方 API 导入器只在加 `--execute` 时请求**一页**，不自动循环。优先读取环境变量 `OZON_CLIENT_ID` / `OZON_API_KEY`，也兼容服务器现有的 `OZON_DEFAULT_CLIENT_ID` / `OZON_DEFAULT_API_KEY`；密钥不写浏览器插件、不写数据库。示例：
 

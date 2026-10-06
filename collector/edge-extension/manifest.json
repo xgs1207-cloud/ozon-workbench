@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Ozon 工作台采集助手",
-  "version": "0.4.26",
-  "description": "采集 1688 商品、Ozon 参考页及 Seerfar 当前可见报表到 Ozon 工作台。",
+  "version": "0.4.27",
+  "description": "采集 1688 商品、Ozon 参考页及 Seerfar 可见报表（支持限页翻页）到 Ozon 工作台。",
   "permissions": ["activeTab", "scripting", "storage", "tabs"],
   "host_permissions": [
     "https://*.1688.com/*",
@@ -16,7 +16,7 @@
   "optional_host_permissions": ["https://*/*"],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "采集当前商品或Ozon参考页"
+    "default_title": "采集 1688、Ozon 或 Seerfar 页面"
   },
   "background": {
     "service_worker": "background.js"

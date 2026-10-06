@@ -1,41 +1,280 @@
 const SEERFAR_POLL_INTERVAL_MS = 5000;
 let seerfarBusy = false;
+let marketPageStopRequested = false;
+let activeMarketWidget = null;
+const MARKET_TABLE_CONTAINERS = ".el-table, .ant-table, .vxe-table, .semi-table, [role='grid'], [role='table']";
+const MARKET_PAGER_SELECTOR = ".el-pagination, .ant-pagination, .vxe-pager, .semi-page, "
+    + ".pagination, [class*='pagination'], [aria-label*='分页']";
+
+function marketDataset(headers) {
+    const has = (label) => headers.some((header) => header.includes(label));
+    if (has("关键词") && has("月搜热度"))
+        return "keywords";
+    if (has("SKU") && has("销量"))
+        return "products";
+    if (has("类目") && has("销售额") && has("销量"))
+        return "categories";
+    return null;
+}
+
+function marketHeaders(cells) {
+    const seen = new Map();
+    return cells.map((cell, index) => {
+        const label = seerfarText(cell) || `col_${index}`;
+        const count = (seen.get(label) || 0) + 1;
+        seen.set(label, count);
+        return count === 1 ? label : `${label}_${count}`;
+    });
+}
+
+function marketDataCells(row, selector) {
+    return Array.from(row.querySelectorAll(selector)).filter((cell) =>
+        !cell.classList?.contains("gutter") && !/(?:^|\s)gutter(?:\s|$)/.test(String(cell.className || "")));
+}
+
+function marketWidgetRows(table) {
+    const widget = table.closest?.(MARKET_TABLE_CONTAINERS);
+    if (!widget)
+        return [];
+    // Element Plus keeps the scrollable main body separate from the header;
+    // read that body directly, not fixed-column clones or nested sub-tables.
+    for (const selector of [
+        ".el-table__body-wrapper tbody > tr",
+        ".ant-table-body tbody > tr",
+        ".vxe-table--body-wrapper tbody > tr",
+        "tbody > tr",
+    ]) {
+        const rows = Array.from(widget.querySelectorAll(selector));
+        if (rows.length)
+            return rows;
+    }
+    return [];
+}
+
+function marketRecords(headers, rows, cellSelector) {
+    const records = [];
+    const seen = new Set();
+    for (const row of rows) {
+        if (!row.getClientRects?.().length)
+            continue;
+        const cells = marketDataCells(row, cellSelector);
+        if (cells.length !== headers.length || marketDataset(cells.map((cell) => seerfarText(cell))))
+            continue;
+        const values = cells.map((cell) => seerfarCellText(cell));
+        if (!values.some(Boolean))
+            continue;
+        const record = Object.fromEntries(headers.map((header, index) => [header, values[index]]));
+        headers.forEach((header, index) => {
+            if (!/相关商品|相关产品/.test(header))
+                return;
+            const links = Array.from(cells[index].querySelectorAll("a[href]"))
+                .map((link) => link.href || link.getAttribute("href"))
+                .filter((url) => /^https?:\/\//.test(url)).slice(0, 10);
+            const images = Array.from(cells[index].querySelectorAll("img[src]"))
+                .map((image) => image.currentSrc || image.src || image.getAttribute("src"))
+                .filter((url) => /^https?:\/\//.test(url)).slice(0, 10);
+            if (links.length)
+                record[`${header}链接`] = links;
+            if (images.length)
+                record[`${header}图片`] = images;
+        });
+        const signature = JSON.stringify(record);
+        if (seen.has(signature))
+            continue;
+        seen.add(signature);
+        records.push(record);
+        if (records.length >= 200)
+            break;
+    }
+    return records;
+}
+
 function captureVisibleMarketTable() {
+    let recognizedHeader = false;
     for (const table of document.querySelectorAll("table")) {
-        const rows = Array.from(table.querySelectorAll("tr")).filter((row) => row.getClientRects().length > 0);
+        const rows = Array.from(table.querySelectorAll("tr")).filter((row) => row.getClientRects?.().length > 0);
         const headerRow = rows.find((row) => {
-            const text = seerfarText(row);
-            return row.querySelectorAll("th,td").length >= 3
-                && ((text.includes("关键词") && text.includes("月搜热度"))
-                    || (text.includes("类目") && text.includes("销售额") && text.includes("销量"))
-                    || (text.includes("SKU") && text.includes("销量")));
+            const cells = marketDataCells(row, "th,td");
+            return cells.length >= 3 && marketDataset(cells.map((cell) => seerfarText(cell)));
         });
         if (!headerRow)
             continue;
-        const headers = Array.from(headerRow.querySelectorAll("th,td")).map((cell) => seerfarText(cell));
-        const has = (label) => headers.some((header) => header.includes(label));
-        const dataset = has("关键词") && has("月搜热度") ? "keywords"
-            : has("类目") && has("销售额") && has("销量") ? "categories"
-                : has("SKU") && has("销量") ? "products" : null;
-        if (!dataset)
-            continue;
-        const records = rows.slice(rows.indexOf(headerRow) + 1)
-            .map((row) => Array.from(row.querySelectorAll("td")).map((cell) => seerfarCellText(cell)))
-            .filter((cells) => cells.length === headers.length && cells.some(Boolean))
-            .slice(0, 200)
-            .map((cells) => Object.fromEntries(headers.map((header, index) => [header || `col_${index}`, cells[index]])));
-        if (records.length)
+        recognizedHeader = true;
+        const headers = marketHeaders(marketDataCells(headerRow, "th,td"));
+        const dataset = marketDataset(headers);
+        let records = marketRecords(headers, rows.slice(rows.indexOf(headerRow) + 1), "td");
+        if (!records.length) {
+            // Element/Ant tables render header and body in separate <table>s.
+            // Use only their common table widget, never the whole document.
+            records = marketRecords(headers, marketWidgetRows(table), "td");
+        }
+        if (records.length) {
+            activeMarketWidget = table.closest?.(MARKET_TABLE_CONTAINERS) || table;
             return { dataset, records, page_url: location.origin + location.pathname, captured_at: new Date().toISOString() };
+        }
     }
-    return { records: [], reason: "未找到匹配表格；请先打开 Seerfar 类目、关键词或商品报表并等待加载完成" };
+    // Some versions expose a semantic grid instead of native table elements.
+    for (const grid of document.querySelectorAll("[role='grid'], [role='table']")) {
+        const rows = Array.from(grid.querySelectorAll("[role='row']"));
+        const header = rows.find((row) => marketDataset(Array.from(row.querySelectorAll("[role='columnheader']"))
+            .map((cell) => seerfarText(cell))));
+        if (!header)
+            continue;
+        recognizedHeader = true;
+        const headers = marketHeaders(Array.from(header.querySelectorAll("[role='columnheader']")));
+        const records = marketRecords(headers, rows.filter((row) => row !== header), "[role='cell'], [role='gridcell']");
+        if (records.length) {
+            activeMarketWidget = grid;
+            return { dataset: marketDataset(headers), records, page_url: location.origin + location.pathname,
+                captured_at: new Date().toISOString() };
+        }
+    }
+    return { records: [], reason: recognizedHeader
+        ? "已找到 Seerfar 报表表头，但未找到相同列数的数据行；请等待加载完成或反馈页面结构"
+        : "未找到匹配表格；请先打开 Seerfar 类目、关键词或商品报表并等待加载完成" };
 }
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === "SEERFAR_MARKET_CAPTURE") {
+        marketPageStopRequested = false;
         sendResponse(captureVisibleMarketTable());
+        return true;
+    }
+    if (message?.type === "SEERFAR_MARKET_STOP") {
+        marketPageStopRequested = true;
+        sendResponse({ stopped: true });
+        return true;
+    }
+    if (message?.type === "SEERFAR_MARKET_NEXT_PAGE") {
+        if (marketPageStopRequested) {
+            sendResponse({ advanced: false, stopped: true, reason: "用户已停止翻页" });
+            return true;
+        }
+        advanceMarketPage().then(sendResponse).catch((error) => sendResponse({ advanced: false, error: error.message }));
         return true;
     }
     return undefined;
 });
+
+function marketPageSignature(snapshot) {
+    return JSON.stringify([snapshot?.dataset, snapshot?.records || []]);
+}
+
+function marketPager() {
+    if (/^\/admin\/market(?:\.html)?\/?$/.test(location.pathname)) {
+        const ranking = Array.from(document.querySelectorAll("[data-ranking-pagination]"))
+            .filter((node) => node.getClientRects?.().length);
+        if (ranking.length === 1)
+            return ranking[0].querySelector?.(MARKET_PAGER_SELECTOR) || ranking[0];
+    }
+    const candidates = Array.from(document.querySelectorAll(MARKET_PAGER_SELECTOR))
+        .filter((pager) => pager.getClientRects?.().length);
+    const pagers = candidates.filter((pager) => !candidates.some((other) => other !== pager && pager.contains?.(other)));
+    if (pagers.length === 1)
+        return pagers[0];
+    if (!activeMarketWidget || !pagers.length)
+        return null;
+    for (let ancestor = activeMarketWidget.parentElement, depth = 0; ancestor && depth < 5;
+         ancestor = ancestor.parentElement, depth++) {
+        const local = pagers.filter((pager) => ancestor.contains?.(pager));
+        if (local.length === 1)
+            return local[0];
+    }
+    const tableRect = activeMarketWidget.getBoundingClientRect?.();
+    if (!tableRect)
+        return null;
+    const nearby = pagers.map((pager) => {
+        const rect = pager.getBoundingClientRect?.();
+        if (!rect || rect.top < tableRect.top || rect.top > tableRect.bottom + 700)
+            return null;
+        const tableCenter = (tableRect.left + tableRect.right) / 2;
+        const pagerCenter = (rect.left + rect.right) / 2;
+        return { pager, score: Math.abs(rect.top - tableRect.bottom) + Math.abs(pagerCenter - tableCenter) / 4 };
+    }).filter(Boolean).sort((a, b) => a.score - b.score);
+    if (!nearby.length || (nearby.length > 1 && nearby[1].score - nearby[0].score < 40))
+        return null;
+    return nearby[0].pager;
+}
+
+function marketCurrentPage() {
+    const pager = marketPager();
+    const active = pager?.querySelector?.(".el-pager li.is-active, .el-pager li.active, "
+        + ".ant-pagination-item-active, [aria-current='page']");
+    return active ? seerfarText(active) || active.getAttribute?.("aria-label") || "" : "";
+}
+
+function visibleMarketNextButton() {
+    const pager = marketPager();
+    const pagers = pager ? [pager] : [];
+    const selectors = "button.btn-next, .ant-pagination-next button, .ant-pagination-next a, "
+        + ".el-pager + button, [aria-label*='下一页'], [title*='下一页'], "
+        + "[aria-label='Next Page'], [title='Next Page'], .next button, .next a";
+    for (const pager of pagers) {
+        if (!pager.getClientRects?.().length)
+            continue;
+        const candidates = Array.from(pager.querySelectorAll(selectors));
+        if (!candidates.length) {
+            candidates.push(...Array.from(pager.querySelectorAll("button, a"))
+                .filter((node) => /^(下一页|下页|Next|›|»|>)$/i.test(seerfarText(node))));
+        }
+        for (const node of candidates) {
+            if (!node.getClientRects?.().length)
+                continue;
+            const parent = node.parentElement;
+            const disabled = node.disabled || node.getAttribute?.("aria-disabled") === "true"
+                || parent?.getAttribute?.("aria-disabled") === "true"
+                || node.classList?.contains("disabled") || parent?.classList?.contains("disabled")
+                || node.classList?.contains("is-disabled") || parent?.classList?.contains("is-disabled");
+            return { node, disabled: Boolean(disabled) };
+        }
+    }
+    return null;
+}
+
+async function advanceMarketPage() {
+    if (marketPageStopRequested)
+        return { advanced: false, stopped: true, reason: "用户已停止翻页" };
+    const previous = captureVisibleMarketTable();
+    if (!previous.records?.length)
+        return { advanced: false, error: previous.reason || "当前页没有可采集数据" };
+    if (!marketPager()) {
+        const visiblePagers = Array.from(document.querySelectorAll(MARKET_PAGER_SELECTOR))
+            .filter((pager) => pager.getClientRects?.().length);
+        return visiblePagers.length
+            ? { advanced: false, error: "页面有多个分页器，无法确定哪个属于当前报表；已停止避免误翻页" }
+            : { advanced: false, done: true, reason: "当前报表没有分页器" };
+    }
+    const next = visibleMarketNextButton();
+    if (!next)
+        return { advanced: false, done: true, reason: "未找到报表分页的下一页按钮" };
+    if (next.disabled)
+        return { advanced: false, done: true, reason: "已到最后一页" };
+    const signature = marketPageSignature(previous);
+    const previousPage = marketCurrentPage();
+    next.node.click();
+    const deadline = Date.now() + 15000;
+    let candidateSignature = "";
+    let stableReads = 0;
+    while (Date.now() < deadline) {
+        if (marketPageStopRequested)
+            return { advanced: false, stopped: true, reason: "用户已停止翻页" };
+        await new Promise((resolve) => window.setTimeout(resolve, 400));
+        const current = captureVisibleMarketTable();
+        const currentSignature = marketPageSignature(current);
+        const currentPage = marketCurrentPage();
+        const pageChanged = !previousPage || !currentPage || currentPage !== previousPage;
+        if (current.records?.length && currentSignature !== signature && pageChanged) {
+            stableReads = currentSignature === candidateSignature ? stableReads + 1 : 1;
+            candidateSignature = currentSignature;
+            if (stableReads >= 2)
+                return { advanced: true, snapshot: current };
+        }
+        else {
+            stableReads = 0;
+            candidateSignature = "";
+        }
+    }
+    return { advanced: false, error: "点击下一页后 15 秒内数据未更新，已停止避免重复采集" };
+}
 function seerfarText(node) {
     return String(node?.textContent || "").replace(/\s+/g, " ").trim();
 }

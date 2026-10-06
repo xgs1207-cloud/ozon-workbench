@@ -76,6 +76,7 @@ class MarketSnapshotRequest(BaseModel):
     dataset: str
     capture_method: str
     period: str = ""
+    period_kind: str = "calendar_month"
     page_url: str = ""
     captured_at: str = ""
     category_key: str | None = None

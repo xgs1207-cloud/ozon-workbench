@@ -616,6 +616,125 @@ def collector_detail(product_id: str) -> dict[str, Any]:
     }
 
 
+# ------------------------------------------------------- 效果回流（M4）
+
+
+def _seller_transport(shop_id: str | None) -> Any:
+    """为指定（或首个已启用）店铺构建 Seller 只读传输层。"""
+    from pipeline.ozon_http import OzonCredentials, UrllibTransport
+    from pipeline.stores import enabled_shop_ids, list_shops, load_registry
+
+    registry = load_registry()
+    shops = list_shops(registry)
+    if not shops:
+        raise HTTPException(status_code=400, detail="没有可用店铺：先配置 config/shops.json")
+    enabled = set(enabled_shop_ids(registry))
+    if shop_id:
+        shop = next((item for item in shops if str(item.get("id")) == str(shop_id)), None)
+        if shop is None:
+            raise HTTPException(status_code=404, detail=f"店铺不存在：{shop_id}")
+    else:
+        shop = next((item for item in shops if str(item.get("id")) in enabled), shops[0])
+    try:
+        return UrllibTransport(OzonCredentials.from_shop(shop))
+    except Exception as error:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"店铺凭据未就绪：{error}") from error
+
+
+class ProductQueriesRequest(BaseModel):
+    product_id: str
+    shop: str | None = None
+    days: int = 30
+    skus: list[str] | None = None
+
+
+@app.post("/api/analytics/product-queries")
+def analytics_product_queries(request: ProductQueriesRequest) -> dict[str, Any]:
+    """拉取一个已上架商品的搜索表现并落盘（只读，不发写请求）。"""
+    from collector.product_queries import ProductQueriesError, collect
+
+    product_dir = PRODUCTS_ROOT / request.product_id
+    if not (product_dir / "status.json").is_file():
+        raise HTTPException(status_code=404, detail=f"商品不存在：{request.product_id}")
+    transport = _seller_transport(request.shop)
+    try:
+        report = collect(
+            product_dir, transport, skus=request.skus, days=request.days
+        )
+    except ProductQueriesError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"ok": True, "product_id": request.product_id, "items": report["items"]}
+
+
+@app.get("/api/analytics/product-queries/{product_id}")
+def analytics_product_queries_read(product_id: str) -> dict[str, Any]:
+    from collector.product_queries import read_report
+
+    report = read_report(PRODUCTS_ROOT / product_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail=f"尚无效果数据：{product_id}（先点拉取）")
+    return report
+
+
+class SearchPhrasesRequest(BaseModel):
+    campaigns: list[str] = Field(..., min_length=1, max_length=10)
+    days: int = 14
+    category_id: str | None = None
+    type_id: str | None = None
+    category_path_zh: str | None = None
+    feed_library: bool = True
+
+
+@app.get("/api/analytics/search-phrases/config")
+def search_phrases_config() -> dict[str, Any]:
+    cid = str(os.environ.get("OZON_PERFORMANCE_CLIENT_ID") or "").strip()
+    secret = str(os.environ.get("OZON_PERFORMANCE_CLIENT_SECRET") or "").strip()
+    return {
+        "ready": bool(cid and secret),
+        "missing": [
+            name for name, ok in (
+                ("OZON_PERFORMANCE_CLIENT_ID", bool(cid)),
+                ("OZON_PERFORMANCE_CLIENT_SECRET", bool(secret)),
+            ) if not ok
+        ],
+    }
+
+
+@app.post("/api/analytics/search-phrases")
+def analytics_search_phrases(request: SearchPhrasesRequest) -> dict[str, Any]:
+    """跑 Performance API SEARCH_PHRASES 报表，真实词写进关键词库（可关）。"""
+    from collector.performance_http import UrllibPerformanceTransport
+    from collector.search_phrases import (
+        PERF_BASE_URL,
+        PerformanceCredentials,
+        SearchPhrasesError,
+        run,
+    )
+
+    creds = PerformanceCredentials.from_env()
+    if not creds.client_id or not creds.client_secret:
+        raise HTTPException(
+            status_code=400,
+            detail="缺少 Performance API 密钥：设置环境变量 OZON_PERFORMANCE_CLIENT_ID / "
+                   "OZON_PERFORMANCE_CLIENT_SECRET（广告后台「设置→API-ключи」创建）",
+        )
+    transport = UrllibPerformanceTransport(PERF_BASE_URL)
+    try:
+        result = run(
+            transport,
+            campaigns=request.campaigns,
+            days=request.days,
+            category_id=request.category_id,
+            type_id=request.type_id,
+            category_path_zh=request.category_path_zh,
+            library_root=LIBRARY_ROOT if request.feed_library else None,
+            credentials=creds,
+        )
+    except SearchPhrasesError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"ok": True, **result}
+
+
 # ------------------------------------------------------- 选词与文案生成（M2）
 
 

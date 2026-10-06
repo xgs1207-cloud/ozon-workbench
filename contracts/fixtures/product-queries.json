@@ -1,0 +1,34 @@
+{
+  "analytics_period": {
+    "date_from": "2026-09-03T00:00:00Z",
+    "date_to": "2026-10-03T23:59:59Z"
+  },
+  "page_count": 1,
+  "total": 2,
+  "items": [
+    {
+      "category": "Термосы",
+      "currency": "RUB",
+      "gmv": 18450,
+      "name": "Термос из нержавеющей стали 500 мл",
+      "offer_id": "P000006-01",
+      "position": 12.4,
+      "sku": 5956082914,
+      "unique_search_users": 320,
+      "unique_view_users": 141,
+      "view_conversion": 9.2
+    },
+    {
+      "category": "Термосы",
+      "currency": "RUB",
+      "gmv": 0,
+      "name": "Термос из нержавеющей стали 750 мл",
+      "offer_id": "P000006-02",
+      "position": 48.0,
+      "sku": 5956083009,
+      "unique_search_users": 60,
+      "unique_view_users": 12,
+      "view_conversion": 0
+    }
+  ]
+}

@@ -270,6 +270,7 @@
     <button class="nav-btn" data-view="workbench" aria-current="true" onclick="switchView('workbench')">工序台</button>
     <button class="nav-btn" data-view="keywords" onclick="switchView('keywords')">关键词库</button>
     <button class="nav-btn" data-view="sourcing" onclick="switchView('sourcing')">选品与采集</button>
+    <button class="nav-btn" data-view="analytics" onclick="switchView('analytics')">效果回流</button>
     <button class="nav-btn" data-view="stores" onclick="switchView('stores')">店铺</button>
   </nav>
   <div class="health" id="health">检查服务状态…</div>
@@ -447,6 +448,67 @@
   </div>
 </div>
 
+<!-- ================================================================ 效果回流视图 -->
+<div class="view" id="view-analytics">
+  <div class="page">
+    <div class="page-head">
+      <div>
+        <h2>效果回流</h2>
+        <div class="sub">上架不是终点。拉回平台真实搜索表现与广告真实词，反哺标题、主图、选词与定价。</div>
+      </div>
+    </div>
+
+    <div class="tabs" style="margin-bottom:18px;">
+      <button class="tab" aria-selected="true" onclick="analytics.tab('pq')">商品搜索表现</button>
+      <button class="tab" aria-selected="false" onclick="analytics.tab('sp')">广告真实词</button>
+    </div>
+
+    <!-- 商品搜索表现 -->
+    <div id="an-pq">
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:14px;flex-wrap:wrap;">
+        <label class="sub" style="font-size:13px;">商品</label>
+        <select class="input" id="anProduct" style="min-width:160px;"></select>
+        <label class="sub" style="font-size:13px;">近</label>
+        <select class="input" id="anDays" style="min-width:90px;">
+          <option value="14">14 天</option>
+          <option value="30" selected>30 天</option>
+        </select>
+        <button class="btn primary" id="anPullBtn" onclick="analytics.pull()">拉取效果</button>
+        <span class="sub" id="anHint" style="font-size:12.5px;"></span>
+      </div>
+      <div class="table-wrap" id="anResult">
+        <table><tbody><tr><td>选择一个已上架商品，点「拉取效果」。</td></tr></tbody></table>
+      </div>
+    </div>
+
+    <!-- 广告真实词 -->
+    <div id="an-sp" hidden>
+      <div class="sub" id="spConfig" style="margin-bottom:12px;font-size:13px;">检查 Performance 密钥中…</div>
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap;">
+        <label class="sub" style="font-size:13px;">广告活动 ID</label>
+        <input class="input" id="spCampaigns" placeholder="多个用逗号分隔，最多 10 个" style="min-width:240px;" />
+        <label class="sub" style="font-size:13px;">近</label>
+        <select class="input" id="spDays" style="min-width:90px;">
+          <option value="7">7 天</option>
+          <option value="14" selected>14 天</option>
+          <option value="30">30 天</option>
+        </select>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:14px;flex-wrap:wrap;">
+        <label class="sub" style="font-size:13px;">归入类目（可选）</label>
+        <input class="input" id="spCatId" placeholder="category_id" style="min-width:110px;" />
+        <input class="input" id="spTypeId" placeholder="type_id" style="min-width:100px;" />
+        <input class="input" id="spCatPath" placeholder="类目中文名" style="min-width:150px;" />
+        <label class="sub" style="font-size:13px;"><input type="checkbox" id="spFeed" checked /> 写进关键词库</label>
+        <button class="btn primary" id="spRunBtn" onclick="analytics.runPhrases()">拉取广告真实词</button>
+      </div>
+      <div id="spResult" class="table-wrap">
+        <table><tbody><tr><td>填好广告活动 ID 后点「拉取广告真实词」（报表生成可能需几十秒）。</td></tr></tbody></table>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- ================================================================ 店铺视图 -->
 <div class="view" id="view-stores">
   <div class="page">
@@ -506,6 +568,7 @@ function switchView(name) {
   document.querySelectorAll('.nav-btn').forEach((b) => b.setAttribute('aria-current', String(b.dataset.view === name)));
   if (name === 'keywords') keywords.load();
   if (name === 'stores') stores.load();
+  if (name === 'analytics') analytics.init();
   if (name === 'sourcing') { sourcing.tab(state.sourcingTab); }
 }
 
@@ -961,6 +1024,111 @@ const stores = {
     } catch (error) {
       $('storeGrid').innerHTML = `<p style="color:var(--stop);">加载失败：${error.message}</p>`;
     }
+  },
+};
+
+/* ------------------------------------------------------------------ 效果回流 */
+const analytics = {
+  async init() {
+    try {
+      const data = await api('GET', '/api/collector/products');
+      const items = data.items || [];
+      $('anProduct').innerHTML = items.map((p) =>
+        `<option value="${p.product_id}">${p.product_id} · ${p.status || ''}</option>`).join('');
+    } catch {}
+    this.tab('pq');
+  },
+  tab(which) {
+    $('an-pq').hidden = which !== 'pq';
+    $('an-sp').hidden = which !== 'sp';
+    document.querySelectorAll('#view-analytics .tab').forEach((b) => {
+      b.setAttribute('aria-selected', String(b.textContent.trim() ===
+        (which === 'pq' ? '商品搜索表现' : '广告真实词')));
+    });
+    if (which === 'sp') this.checkPerfConfig();
+  },
+  async checkPerfConfig() {
+    try {
+      const c = await api('GET', '/api/analytics/search-phrases/config');
+      $('spConfig').innerHTML = c.ready
+        ? 'Performance 密钥已就绪。'
+        : `缺少 Performance 密钥环境变量：<b>${(c.missing || []).join('、')}</b>（广告后台「设置→API-ключи」创建后写入服务器环境）`;
+    } catch { $('spConfig').textContent = '密钥状态检查失败。'; }
+  },
+
+  hint(item) {
+    const s = item.unique_search_users, v = item.unique_view_users;
+    if (!s) return { t: '没人搜：标题没覆盖真实词，回去改标题/补词', c: 'hold' };
+    if (item.position != null && item.position > 30)
+      return { t: '排名靠后（3 页外）：用广告/出单顶排名', c: 'hold' };
+    if (v != null && v / s < 0.3)
+      return { t: '点击率低：搜索列表里主图/价格不吸引人，换主图或调价', c: 'hold' };
+    if (v && (item.view_conversion != null) && item.view_conversion < 3)
+      return { t: '转化低：详情图/简介/价格有短板', c: 'hold' };
+    if (item.gmv > 0)
+      return { t: '已出单、表现正常：可补货/加变体/铺更多店', c: 'pass' };
+    return { t: '数据不足，继续观察', c: '' };
+  },
+
+  async pull() {
+    const btn = $('anPullBtn');
+    busy(btn, true);
+    $('anHint').textContent = '拉取中…';
+    const product_id = $('anProduct').value;
+    try {
+      await api('POST', '/api/analytics/product-queries',
+        { product_id, days: parseInt($('anDays').value) });
+      const report = await api('GET', `/api/analytics/product-queries/${product_id}`);
+      const items = report.items || [];
+      if (!items) throw new Error('返回为空');
+      $('anResult').innerHTML = `<div class="table-wrap"><table>
+        <thead><tr><th>Ozon SKU</th><th>offer</th><th>搜索买家</th><th>浏览买家</th><th>平均排名</th><th>转化率%</th><th>GMV</th><th>系统建议</th></tr></thead>
+        <tbody>${items.map((it) => {
+          const h = this.hint(it);
+          return `<tr>
+            <td class="mono">${it.sku ?? '—'}</td><td>${it.offer_id ?? '—'}</td>
+            <td class="num">${it.unique_search_users ?? '—'}</td>
+            <td class="num">${it.unique_view_users ?? '—'}</td>
+            <td class="num">${it.position ?? '—'}</td>
+            <td class="num">${it.view_conversion ?? '—'}</td>
+            <td class="num">${it.gmv ?? '—'}</td>
+            <td><span class="chip ${h.c}">${h.t}</span></td></tr>`;
+        }).join('')}</tbody></table></div>`;
+      $('anHint').textContent = `已拉取 ${items.length} 条（Premium 完整字段）`;
+      toast('效果数据已拉取');
+    } catch (error) {
+      $('anResult').innerHTML = `<table><tbody><tr><td>拉取失败：${error.data?.detail || error.message}</td></tr></tbody></table>`;
+      toast('拉取失败', 'stop');
+    } finally { busy(btn, false); }
+  },
+
+  async runPhrases() {
+    const btn = $('spRunBtn');
+    const campaigns = $('spCampaigns').value.split(',').map((s) => s.trim()).filter(Boolean);
+    if (!campaigns.length) { toast('请填广告活动 ID', 'stop'); return; }
+    busy(btn, true);
+    $('spResult').innerHTML = '<table><tbody><tr><td>报表生成中…（可能几十秒）</td></tr></tbody></table>';
+    try {
+      const data = await api('POST', '/api/analytics/search-phrases', {
+        campaigns,
+        days: parseInt($('spDays').value),
+        category_id: $('spCatId').value || null,
+        type_id: $('spTypeId').value || null,
+        category_path_zh: $('spCatPath').value || null,
+        feed_library: $('spFeed').checked,
+      });
+      const row = (p, cls) => p.map((x) => `<span class="chip ${cls}">${x}</span>`).join('');
+      $('spResult').innerHTML = `<div style="font-size:13px;line-height:2;">
+        <p>共 <b>${data.phrases}</b> 个真实搜索词组（报表 ${data.uuid}，${data.period.dateFrom} ~ ${data.period.dateTo}）</p>
+        <p><b>高转化出单词</b>（建议加进标题/简介吃自然流量）：<br>${row(data.winners, 'pass') || '—'}</p>
+        <p><b>只点不买的词</b>（建议设为否定词省广告费）：<br>${row(data.negatives, 'hold') || '—'}</p>
+        ${data.library ? `<p class="sub">已写进关键词库：新增 ${data.library.created}、更新 ${data.library.updated}</p>` : ''}
+      </div>`;
+      toast('广告真实词已拉取');
+    } catch (error) {
+      $('spResult').innerHTML = `<table><tbody><tr><td>拉取失败：${error.data?.detail || error.message}</td></tr></tbody></table>`;
+      toast('拉取失败', 'stop');
+    } finally { busy(btn, false); }
   },
 };
 

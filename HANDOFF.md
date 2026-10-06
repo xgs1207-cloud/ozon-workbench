@@ -4,7 +4,7 @@
 > 所有"未完成"都写清了缺什么、谁来做、怎么做完。
 > 读完这份 + 跑一遍 §2 的自检，你应该能在 15 分钟内接手并继续开发。
 
-最后更新：2026-10（工作台公网入口：nginx 反向代理 + Basic Auth，端口 8088，无需 SSH 隧道）。
+最后更新：2026-10（新增「效果回流」：product-queries 商品搜索表现 + search-phrases 广告真实词；公网入口 nginx + Basic Auth，端口 8088）。
 
 ---
 
@@ -87,7 +87,10 @@ ssh -i $key ubuntu@43.132.190.110 "cd /opt/ozon-workbench && bash deploy/with-en
 | 网页操作台 | `web/console.html`（单文件、零依赖）+ API：`GET /`、`/api/workbench/{steps,stores,summary,doctor}`、`products/{id}/{summary,skus,keywords,copy,artifacts,publications,preflight,verify,publish-images,submit,run}`、`collector/{products,duplicates,ozon-reference-page}` |
 | 1688 采集插件 | `collector/edge-extension/`（MV3 Edge 插件，从原项目复用）：1688 页面抓标题/SKU/主图/详情图/属性 → 页面内抽屉选 SKU（≤10）+ 选 Ozon 类目 → 直接 POST `/api/collector/products` 入库（服务端带 Referer 下载图片）。也支持 Ozon 参考页采集。默认走公网 8088（Basic Auth 由 background 注入），无需隧道 |
 | 公网入口 | nginx 监听 8088 + Basic Auth 代理到 `127.0.0.1:8766`（配置 `deploy/nginx/ozon-workbench.conf`，服务器实际路径 `/etc/nginx/sites-available/ozon-workbench`）；轻量服务器防火墙放行 8088 |
-| 测试 | **本机 751 OK**（Python 3.14.7，skip 56；Python 3.11 上全 passed）；服务器同套（Python 3.14，skip 4） |
+| **效果回流 · 商品搜索表现** | `collector/product_queries.py`：Seller API `POST /v1/analytics/product-queries`，分页 + 归一化，落盘 `output/product-queries.json`；默认窗口结束于 3 天前、向前 30 天；Premium 专属字段（`position`/`unique_view_users`/`view_conversion`）缺失即 None；`enumerate_ozon_skus()` 自动找 SKU。7 测试 |
+| **效果回流 · 广告真实词** | `collector/search_phrases.py` + `collector/performance_http.py`：Performance API `SEARCH_PHRASES` 全流程（换 Bearer token → 建报表 → 轮询 → 下 CSV），俄/英表头别名兼容；`classify()` 分出 winners（出单词→进标题）/ negatives（点击≥5 且 0 单→否定词）/ neutral，词组以 `source=performance_ad` upsert 进关键词库。8 测试 |
+| Seerfar 令牌 | `SEERFAR_API_TOKEN` 已存入 `/etc/ozon-workbench.env`（**未进仓库**）。注意：它服务于"关键词批量挖掘"模块（端点 `/open-api/keyword/mining/ozon`），**该模块尚未开发**，与上面两个回流模块无关 |
+| 测试 | 服务器全量 **770 passed, 2 skipped**（Python 3.14，pytest）；本机无 pytest，用 `python -m unittest tests.test_product_queries tests.test_search_phrases` 跑新模块（15 测试全绿） |
 
 ### 3.2 服务器上的商品
 
@@ -111,6 +114,8 @@ P000006  UPLOADED         completed 15/16   ← ★ 已真实上线（见 §3.1�
 | 5 | **型号名称（9048）** | 来源与字典都没有，只能人工定 | 已做人工确认入口：`products/<id>/input/human-confirmations.json` → `{"attributes": {"9048": "你的型号"}}`（**只补空缺、不覆盖机器值**） |
 | 6 | **批量上架操作台** | 现在一次选一个商品 | 在 `web/console.html` 加多选 + 逐商品调用现有 `/run`、`/publish-images`、`/submit` |
 | 7 | 定时确认 Ozon 终态 | 现在是提交时确认一次 + 手动补确认 | 把 `pipeline.ozon_status.confirm_task()` 接进定时任务 |
+| 8 | **SEARCH_PHRASES 真机跑通** | 缺 Performance API 密钥 `OZON_PERFORMANCE_CLIENT_ID/SECRET`（与 Seller 密钥不同）；报表创建路径暂用 `/api/client/statistics/search-phrases/json`（参照 video 报表类推），未真机确认 | 用户在广告后台「设置→API-ключи」创建（client_id 形如 `xxx@advertising.performance.ozon.ru`）→ 写入 `/etc/ozon-workbench.env` → 用「效果回流」视图拉取，对齐路径（可用环境变量 `OZON_PERF_REPORT_PATH` 覆盖） |
+| 9 | **Seerfar 批量挖词模块** | `SEERFAR_API_TOKEN` 已存但模块未建 | 按 `http://doc.seerfar.cn/api-docs.html` 的 `/open-api/keyword/mining/ozon` 写采集器（复用 `collector/` 注入式传输 + 关键词库 upsert），与现有效果回流形成"挖词→上架→回流"闭环 |
 
 ---
 
@@ -123,6 +128,9 @@ ozon-workbench/
 ├── keyword_library/          关键词库（按类目 JSONL、分位数打分、CLI）
 ├── collector/
 │   ├── edge-extension/       ★ Edge 采集插件（MV3）：1688/Ozon 页面采集 + SKU 抽屉 + 类目选择，直接 POST 入库
+│   ├── product_queries.py    ★ 效果回流：Seller API product-queries（商品搜索买家/排名/转化/GMV）
+│   ├── search_phrases.py     ★ 效果回流：Performance API SEARCH_PHRASES（广告真实词→winners/negatives）
+│   ├── performance_http.py   ★ Performance API urllib 传输层（Bearer，可注入 urlopen）
 │   ├── seerfar_xlsx.py       Seerfar 导出表 → 关键词库
 │   ├── sourcing.py           选品清单（含品牌观察名单 classify_keyword）
 │   ├── collection_plan.py    采集清单（哪些词已采集）
@@ -155,7 +163,7 @@ ozon-workbench/
 │   ├── nginx/ozon-workbench.conf  公网入口配置（8088 + Basic Auth 反代）
 │   ├── with-env.sh                服务器 CLI 加载 /etc/ozon-workbench.env
 │   └── push-to-github.sh          从服务器推 GitHub
-└── tests/                    751 个测试（含端到端回归）
+└── tests/                    770 个测试（服务器 pytest 全绿；本机无 pytest 时用 unittest 跑单模块）
 ```
 
 ---

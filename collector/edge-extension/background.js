@@ -3,9 +3,7 @@ const COMMAND_CENTER_QUERY_VERSION = "2026-08-01-ui-state-v1";
 // 旧的本机/局域网地址：检测到这些旧配置时回退到新的公网默认地址
 const LEGACY_LOCAL_FACTORY_URLS = new Set([
     "http://127.0.0.1:8765",
-    "http://localhost:8765",
-    "http://127.0.0.1:8766",
-    "http://localhost:8766"
+    "http://localhost:8765"
 ]);
 const OZON_IMAGE_HOST_SUFFIXES = ["ozone.ru", "ozon.ru", "ozonusercontent.com"];
 async function ensureFactoryDeviceId() {

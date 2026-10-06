@@ -132,6 +132,25 @@ button:disabled {
   color: #586069;
 }
 
+#market-capture label {
+  display: block;
+  margin: 8px 0 4px;
+  font-weight: 600;
+}
+
+#market-capture input {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 7px;
+  border: 1px solid #afb8c1;
+  border-radius: 5px;
+  font: inherit;
+}
+
+#market-capture button {
+  margin-top: 10px;
+}
+
 button.task-button {
   background: #1f883d;
 }

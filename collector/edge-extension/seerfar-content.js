@@ -20,7 +20,7 @@ function captureVisibleMarketTable() {
         if (!dataset)
             continue;
         const records = rows.slice(rows.indexOf(headerRow) + 1)
-            .map((row) => Array.from(row.querySelectorAll("td")).map((cell) => seerfarText(cell)))
+            .map((row) => Array.from(row.querySelectorAll("td")).map((cell) => seerfarCellText(cell)))
             .filter((cells) => cells.length === headers.length && cells.some(Boolean))
             .slice(0, 200)
             .map((cells) => Object.fromEntries(headers.map((header, index) => [header || `col_${index}`, cells[index]])));
@@ -38,6 +38,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 function seerfarText(node) {
     return String(node?.textContent || "").replace(/\s+/g, " ").trim();
+}
+function seerfarCellText(node) {
+    // Seerfar often renders the Russian query and its Chinese translation on
+    // separate visual lines. Keep the break so listing keywords stay Russian.
+    const rendered = typeof node?.innerText === "string" ? node.innerText : node?.textContent || "";
+    return String(rendered).replace(/\u00a0/g, " ").replace(/\r\n?/g, "\n")
+        .split("\n").map((line) => line.replace(/[ \t\f\v]+/g, " ").trim())
+        .filter(Boolean).join("\n");
 }
 function seerfarNumber(value) {
     const text = String(value || "").replace(/[^0-9,.-]/g, "").replace(/,/g, ".");
@@ -329,5 +337,5 @@ async function pollSeerfarJob() {
         seerfarBusy = false;
     }
 }
-void pollSeerfarJob();
-window.setInterval(() => void pollSeerfarJob(), SEERFAR_POLL_INTERVAL_MS);
+// Search-visibility jobs have no matching API in this workbench yet. Do not
+// poll a nonexistent endpoint every five seconds from each Seerfar tab.

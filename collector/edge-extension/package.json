@@ -1,9 +1,10 @@
 {
   "name": "crossborder-1688-manual-collector",
-  "version": "0.4.25",
+  "version": "0.4.26",
   "private": true,
   "scripts": {
-    "build": "tsc -p tsconfig.json"
+    "build": "node --check content.js && node --check popup.js && node --check background.js && node --check seerfar-content.js",
+    "test": "node --test tests/seerfar.test.cjs"
   },
   "devDependencies": {
     "typescript": "^5.5.0"

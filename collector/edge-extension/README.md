@@ -1,6 +1,6 @@
-# 1688 / Ozon 采集 Edge 插件
+# 1688 / Ozon / Seerfar 采集 Edge 插件
 
-从原项目 `jlcglobal/jlc-global-ozon-auto-listing` 复用，默认工作台地址已改为公网入口 `http://43.132.190.110:8088`（nginx 反向代理 + Basic Auth），**不再需要 SSH 隧道**。
+从原项目 `jlcglobal/jlc-global-ozon-auto-listing` 复用，默认工作台地址为公网入口 `http://43.132.190.110:8088`（nginx 反向代理 + Basic Auth）。1688/Ozon 商品采集可沿用此入口；**Seerfar 市场报表因包含独立写入令牌，必须用 HTTPS 或本地 SSH 隧道**。
 
 ## 功能
 
@@ -9,6 +9,20 @@
 - 重复采集自动查重（同一 offer 已入库会提示，可选择建新版本）。
 - 也支持采集 Ozon 参考页（竞品文案/图片），存到 `references/`。
 - Seerfar 页面有独立 content script。
+
+## Seerfar 报表采集到工作台
+
+插件只读取你已登录的 Seerfar 页面里**当前可见的一页表格**（类目、市场关键词或商品，最多 200 行），不自动翻页，也不调用 Seerfar 付费 API。市场数据写入令牌是工作台单独配置的 `WORKBENCH_MARKET_INGEST_TOKEN`，**不是 Seerfar API Key**，请由管理员通过安全方式提供。
+
+当前公网入口是 HTTP，插件会拒绝把市场数据令牌发送到那里。请先在本机保持 SSH 隧道运行：
+
+```powershell
+ssh -i "D:\AI作图\ozonfinancedeploy.pem" -N -L 8766:127.0.0.1:8766 ubuntu@43.132.190.110
+```
+
+若本机 8766 被占用，可把上面 `-L` 的**左侧**端口改为 8767，再把插件工作台地址相应设为 `http://127.0.0.1:8767`。在插件「工作台连接」填 `http://127.0.0.1:8766`（或实际映射端口），点「保存并连接」；在 Seerfar 的 HTTPS 报表页刷新页面、打开插件，填写**报表真实统计月**和写入令牌，再点「将当前可见报表页入库」。成功时显示收到/新入库行数；翻页后需再点一次。重复快照会去重。滚动“最近 30 天”报表不能硬填某个自然月；这类报表需先调整数据模型再导入。
+
+从旧版升级后，请到 `edge://extensions/` / `chrome://extensions/` 点击此已解压扩展的「重新加载」，并刷新已打开的 Seerfar 页面。HTTPS 自定义工作台地址会在「保存并连接」时请求该站点的访问权限。
 
 ## 安装（Edge / Chrome，加载已解压的扩展）
 
@@ -63,6 +77,7 @@
 - `manifest.json` — MV3 清单。
 - `content.js` — 1688 / Ozon 页面采集 + SKU 抽屉 + 类目选择（核心，147KB）。
 - `seerfar-content.js` — Seerfar 页面采集。
+- `tests/seerfar.test.cjs` — 无账号的表格、地址、授权与安全门槛回归测试（`npm test`）。`npm run build` 检查现有 JavaScript 语法；旧 `src/*.ts` 源码不在本仓库，未依赖 TypeScript 编译。
 - `popup.html` / `popup.js` / `popup.css` — 插件弹窗 UI。
 - `background.js` — service worker：代理 HTTP 请求（注入认证头、绕开混合内容限制）、打开操作台标签页。
 - `page-probe.js` — 注入页面上下文读取 `window` 里的商品数据。

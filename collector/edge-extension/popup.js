@@ -3,9 +3,7 @@ const COMMAND_CENTER_QUERY_VERSION = "2026-08-01-ui-state-v1";
 // 旧的本机/局域网地址：检测到这些旧配置时回退到新的公网默认地址
 const LEGACY_LOCAL_FACTORY_URLS = new Set([
     "http://127.0.0.1:8765",
-    "http://localhost:8765",
-    "http://127.0.0.1:8766",
-    "http://localhost:8766"
+    "http://localhost:8765"
 ]);
 let factoryConfig = { baseUrl: DEFAULT_FACTORY_URL, authHeader: null, deviceId: "" };
 async function ensureFactoryDeviceId() {
@@ -52,6 +50,21 @@ function factoryUrlOrDefault(value) {
         return DEFAULT_FACTORY_URL;
     return text;
 }
+async function ensureWorkbenchHostPermission(origin) {
+    const address = new URL(origin);
+    if (address.protocol !== "https:")
+        return;
+    const pattern = `https://${address.hostname}/*`;
+    if (await chrome.permissions.contains({ origins: [pattern] }))
+        return;
+    if (!await chrome.permissions.request({ origins: [pattern] }))
+        throw new Error("未获得 HTTPS 工作台的站点访问权限，请重新点保存并连接授权");
+}
+function isSafeMarketDestination(origin) {
+    const address = new URL(origin);
+    return address.protocol === "https:"
+        || (address.protocol === "http:" && ["localhost", "127.0.0.1"].includes(address.hostname));
+}
 async function loadFactoryConfig() {
     const stored = await chrome.storage.local.get(["factoryBaseUrl"]);
     const text = factoryUrlOrDefault(stored.factoryBaseUrl);
@@ -76,6 +89,7 @@ async function factoryFetch(path, options = {}) {
 }
 const els = {
     status: document.getElementById("page-status"),
+    productCaptureUi: document.getElementById("product-capture-ui"),
     title: document.getElementById("title"),
     mainCount: document.getElementById("main-count"),
     skuCount: document.getElementById("sku-count"),
@@ -166,9 +180,10 @@ async function loadPreview() {
         const is1688Page = Boolean(tab?.url && /https:\/\/[^/]*1688\.com\//.test(tab.url));
         const isOzonPage = Boolean(tab?.url && /https:\/\/[^/]*ozon\.ru\/product\//.test(tab.url));
         const isSeerfarPage = Boolean(tab?.url && /^https:\/\/(?:www\.)?seerfar\.cn\//.test(tab.url));
+        els.marketCapture.hidden = !isSeerfarPage;
+        els.productCaptureUi.hidden = !(is1688Page || isOzonPage);
         if (isSeerfarPage) {
             activePageKind = "seerfar";
-            els.marketCapture.hidden = false;
             els.status.textContent = "Seerfar 报表页：可手动采集当前可见表格";
             return;
         }
@@ -381,8 +396,7 @@ els.captureMarket.addEventListener("click", async () => {
         if (!period || !token)
             throw new Error("请填写报表月份和市场数据写入令牌");
         await loadFactoryConfig();
-        const address = new URL(factoryConfig.baseUrl);
-        if (address.protocol !== "https:" && !["localhost", "127.0.0.1"].includes(address.hostname))
+        if (!isSafeMarketDestination(factoryConfig.baseUrl))
             throw new Error("市场数据和令牌不能通过公网 HTTP 传输：请配置 HTTPS 工作台或本地 127.0.0.1");
         const tab = await getActiveTab();
         if (!/^https:\/\/(?:www\.)?seerfar\.cn\//.test(tab?.url || ""))
@@ -437,6 +451,7 @@ async function saveConnection() {
     try {
         const text = cleanFactoryUrlText(els.factoryUrl.value);
         const access = parseFactoryUrl(text);
+        await ensureWorkbenchHostPermission(access.origin);
         await chrome.storage.local.set({ factoryBaseUrl: text });
         factoryConfig = { baseUrl: access.origin, authHeader: access.authHeader, deviceId: await ensureFactoryDeviceId() };
         els.connectionResult.textContent = "工作台地址已保存";

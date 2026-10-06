@@ -2,7 +2,7 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8">
-    <title>1688采集</title>
+    <title>Ozon 工作台采集</title>
     <link rel="stylesheet" href="popup.css">
   </head>
   <body>
@@ -24,8 +24,9 @@
         <label for="market-token">市场数据写入令牌（与服务器环境变量一致）</label>
         <input id="market-token" type="password" autocomplete="off" spellcheck="false">
         <button id="capture-market" type="button">将当前可见报表页入库</button>
-        <small>支持类目、关键词和商品报表；只读取当前页表格，不自动翻页或调用付费接口。</small>
+        <small>工作台地址须为 HTTPS，或已开 SSH 隧道的 http://127.0.0.1:8766。只读取当前可见页，不自动翻页或调用付费接口。</small>
       </section>
+      <div id="product-capture-ui" hidden>
       <section class="summary">
         <div class="label">标题</div>
         <div id="title" class="value">unknown</div>
@@ -47,6 +48,7 @@
       <button id="capture" disabled>采集当前商品</button>
       <button id="preview-toggle" class="secondary" disabled>查看采集预览</button>
       <button id="debug-export" class="secondary" disabled>导出当前页面SKU诊断</button>
+      </div>
       <section class="task-runner">
         <button id="open-inbox" class="secondary">打开共享工作台</button>
         <small>采集完成后，请在共享工作台运行单个商品或批次</small>

@@ -1,5 +1,41 @@
 const SEERFAR_POLL_INTERVAL_MS = 5000;
 let seerfarBusy = false;
+function captureVisibleMarketTable() {
+    for (const table of document.querySelectorAll("table")) {
+        const rows = Array.from(table.querySelectorAll("tr")).filter((row) => row.getClientRects().length > 0);
+        const headerRow = rows.find((row) => {
+            const text = seerfarText(row);
+            return row.querySelectorAll("th,td").length >= 3
+                && ((text.includes("关键词") && text.includes("月搜热度"))
+                    || (text.includes("类目") && text.includes("销售额") && text.includes("销量"))
+                    || (text.includes("SKU") && text.includes("销量")));
+        });
+        if (!headerRow)
+            continue;
+        const headers = Array.from(headerRow.querySelectorAll("th,td")).map((cell) => seerfarText(cell));
+        const has = (label) => headers.some((header) => header.includes(label));
+        const dataset = has("关键词") && has("月搜热度") ? "keywords"
+            : has("类目") && has("销售额") && has("销量") ? "categories"
+                : has("SKU") && has("销量") ? "products" : null;
+        if (!dataset)
+            continue;
+        const records = rows.slice(rows.indexOf(headerRow) + 1)
+            .map((row) => Array.from(row.querySelectorAll("td")).map((cell) => seerfarText(cell)))
+            .filter((cells) => cells.length === headers.length && cells.some(Boolean))
+            .slice(0, 200)
+            .map((cells) => Object.fromEntries(headers.map((header, index) => [header || `col_${index}`, cells[index]])));
+        if (records.length)
+            return { dataset, records, page_url: location.origin + location.pathname, captured_at: new Date().toISOString() };
+    }
+    return { records: [], reason: "未找到匹配表格；请先打开 Seerfar 类目、关键词或商品报表并等待加载完成" };
+}
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.type === "SEERFAR_MARKET_CAPTURE") {
+        sendResponse(captureVisibleMarketTable());
+        return true;
+    }
+    return undefined;
+});
 function seerfarText(node) {
     return String(node?.textContent || "").replace(/\s+/g, " ").trim();
 }

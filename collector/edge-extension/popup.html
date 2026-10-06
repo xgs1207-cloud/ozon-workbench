@@ -18,6 +18,14 @@
         <small id="connection-result">地址保存在本浏览器，无需访问码；商品与任务在工作台共享</small>
       </details>
       <div id="page-status" class="status">检查当前页面...</div>
+      <section id="market-capture" class="task-runner" hidden>
+        <label for="market-period">Seerfar 报表所属月份（必填）</label>
+        <input id="market-period" type="month">
+        <label for="market-token">市场数据写入令牌（与服务器环境变量一致）</label>
+        <input id="market-token" type="password" autocomplete="off" spellcheck="false">
+        <button id="capture-market" type="button">将当前可见报表页入库</button>
+        <small>支持类目、关键词和商品报表；只读取当前页表格，不自动翻页或调用付费接口。</small>
+      </section>
       <section class="summary">
         <div class="label">标题</div>
         <div id="title" class="value">unknown</div>

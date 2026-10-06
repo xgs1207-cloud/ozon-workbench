@@ -19,10 +19,11 @@ import os
 import re
 import shutil
 import tempfile
+import hmac
 from pathlib import Path
 from typing import Any, Mapping
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
@@ -35,6 +36,7 @@ from collector.ingest import (
 )
 from keyword_library import store
 from keyword_library.scoring import ScoreConfig
+from market_intelligence import store as market_store
 
 LIBRARY_ROOT = Path(
     os.environ.get("KEYWORD_LIBRARY_ROOT")
@@ -46,7 +48,72 @@ PRODUCTS_ROOT = Path(
     or (Path(__file__).resolve().parent / "products")
 )
 
+MARKET_DB_PATH = Path(
+    os.environ.get("WORKBENCH_MARKET_DB_PATH")
+    or (Path(__file__).resolve().parent / "runtime" / "market-intelligence.sqlite3")
+)
+
 app = FastAPI(title="ozon-workbench · local workbench", version="0.2.0")
+
+
+class MarketSnapshotRequest(BaseModel):
+    source: str
+    dataset: str
+    capture_method: str
+    period: str = ""
+    page_url: str = ""
+    captured_at: str = ""
+    category_key: str | None = None
+    records: list[dict[str, Any]] = Field(min_length=1, max_length=200)
+
+
+def _market_auth(token: str | None) -> None:
+    expected = os.environ.get("WORKBENCH_MARKET_INGEST_TOKEN", "")
+    if not expected:
+        raise HTTPException(status_code=503, detail="市场数据接口未配置写入令牌")
+    if not token or not hmac.compare_digest(token, expected):
+        raise HTTPException(status_code=401, detail="市场数据接口令牌无效")
+
+
+@app.post("/api/collector/market-snapshots")
+def market_snapshot_ingest(
+    payload: MarketSnapshotRequest,
+    x_market_ingest_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Browser extension and future official-API adapters share this source-aware sink."""
+    _market_auth(x_market_ingest_token)
+    if len(json.dumps(payload.records, ensure_ascii=False).encode("utf-8")) > 1024 * 1024:
+        raise HTTPException(status_code=413, detail="单次市场数据不能超过 1 MB")
+    try:
+        result = market_store.ingest_snapshot(MARKET_DB_PATH, **payload.model_dump())
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return {"ok": True, **result}
+
+
+@app.get("/api/market-data/stats")
+def market_data_stats(x_market_ingest_token: str | None = Header(default=None)) -> dict[str, Any]:
+    _market_auth(x_market_ingest_token)
+    return {"ok": True, **market_store.database_stats(MARKET_DB_PATH)}
+
+
+@app.get("/api/market-data/observations")
+def market_data_observations(
+    dataset: str,
+    source: str | None = None,
+    category_key: str | None = None,
+    period: str | None = None,
+    limit: int = Query(100, ge=1, le=500),
+    x_market_ingest_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _market_auth(x_market_ingest_token)
+    try:
+        items = market_store.list_observations(
+            MARKET_DB_PATH, dataset=dataset, source=source, category_key=category_key, period=period, limit=limit
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return {"ok": True, "count": len(items), "items": items}
 
 #: 远程采集入库单次请求的图片总量上限（base64 之后按解码后字节算）
 MAX_CAPTURE_BYTES = int(os.environ.get("WORKBENCH_MAX_CAPTURE_BYTES") or 40 * 1024 * 1024)

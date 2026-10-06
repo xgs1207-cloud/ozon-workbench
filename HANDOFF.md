@@ -32,9 +32,9 @@ Seerfar 采词 → 热度/竞争筛选 → 按类目建关键词库 → 选品�
 | 服务器 | `ubuntu@43.132.190.110`，代码在 `/opt/ozon-workbench`，服务 `ozon-workbench-api`（uvicorn，监听 `127.0.0.1:8766`） |
 | SSH 私钥 | `D:\AI作图\ozonfinancedeploy.pem` |
 | 服务端配置/密钥 | `/etc/ozon-workbench.env`（`root:ubuntu`，`640`）——**只读用，永不打印、永不提交** |
-| 网页操作台（公网，推荐） | `http://43.132.190.110:8088/`，Basic Auth 登录（账号 `ozon` / 密码见 `/etc/nginx/ozon-workbench.htpasswd`，当前 `ozon2026wb`）。nginx 配置见 `deploy/nginx/ozon-workbench.conf`，轻量服务器防火墙已放行 TCP:8088 |
+| 网页操作台（公网） | `http://43.132.190.110:8088/`，Basic Auth 登录信息由管理员保管，**不得写进仓库**。nginx 配置见 `deploy/nginx/ozon-workbench.conf`，轻量服务器防火墙已放行 TCP:8088。市场数据插件写入令牌仅允许 HTTPS 或本地 SSH 隧道，不走此公网 HTTP 入口 |
 | 网页操作台（隧道，备用） | 本机开隧道后访问 `http://127.0.0.1:8766/`：`ssh -i "D:\AI作图\ozonfinancedeploy.pem" -N -L 8766:127.0.0.1:8766 ubuntu@43.132.190.110` |
-| 1688 采集插件 | `collector/edge-extension/`，Edge 加载已解压扩展；默认地址 `http://43.132.190.110:8088`。弹窗里填 `http://ozon:ozon2026wb@43.132.190.110:8088` 保存即可（凭据只存本机 chrome.storage）。详见 `collector/edge-extension/README.md` |
+| 1688 采集插件 | `collector/edge-extension/`，Edge 加载已解压扩展；默认地址 `http://43.132.190.110:8088`。现有商品采集的 Basic Auth 凭据由管理员单独配置；市场报表入库请用 HTTPS 或本地 SSH 隧道。详见 `collector/edge-extension/README.md` |
 
 **两个必须知道的坑**：
 

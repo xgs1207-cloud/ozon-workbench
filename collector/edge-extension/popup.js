@@ -97,7 +97,11 @@ const els = {
     factoryUrl: document.getElementById("factory-url"),
     saveConnection: document.getElementById("save-connection"),
     testConnection: document.getElementById("test-connection"),
-    connectionResult: document.getElementById("connection-result")
+    connectionResult: document.getElementById("connection-result"),
+    marketCapture: document.getElementById("market-capture"),
+    marketPeriod: document.getElementById("market-period"),
+    marketToken: document.getElementById("market-token"),
+    captureMarket: document.getElementById("capture-market")
 };
 let latestCapture = null;
 let duplicateProductId = null;
@@ -161,6 +165,13 @@ async function loadPreview() {
         const tab = await getActiveTab();
         const is1688Page = Boolean(tab?.url && /https:\/\/[^/]*1688\.com\//.test(tab.url));
         const isOzonPage = Boolean(tab?.url && /https:\/\/[^/]*ozon\.ru\/product\//.test(tab.url));
+        const isSeerfarPage = Boolean(tab?.url && /^https:\/\/(?:www\.)?seerfar\.cn\//.test(tab.url));
+        if (isSeerfarPage) {
+            activePageKind = "seerfar";
+            els.marketCapture.hidden = false;
+            els.status.textContent = "Seerfar 报表页：可手动采集当前可见表格";
+            return;
+        }
         if (!tab || !tab.url || (!is1688Page && !isOzonPage)) {
             activePageKind = "unsupported";
             els.status.textContent = "当前页面不是可采集的1688商品页或Ozon商品页";
@@ -362,6 +373,43 @@ async function captureCurrentOzonReference() {
     }
 }
 els.capture.addEventListener("click", () => captureCurrentProduct(false));
+els.captureMarket.addEventListener("click", async () => {
+    els.captureMarket.disabled = true;
+    try {
+        const period = els.marketPeriod.value;
+        const token = els.marketToken.value.trim();
+        if (!period || !token)
+            throw new Error("请填写报表月份和市场数据写入令牌");
+        await loadFactoryConfig();
+        const address = new URL(factoryConfig.baseUrl);
+        if (address.protocol !== "https:" && !["localhost", "127.0.0.1"].includes(address.hostname))
+            throw new Error("市场数据和令牌不能通过公网 HTTP 传输：请配置 HTTPS 工作台或本地 127.0.0.1");
+        const tab = await getActiveTab();
+        if (!/^https:\/\/(?:www\.)?seerfar\.cn\//.test(tab?.url || ""))
+            throw new Error("当前不是 Seerfar 页面");
+        const snapshot = await sendToTab(tab.id, { type: "SEERFAR_MARKET_CAPTURE" });
+        if (!snapshot?.records?.length)
+            throw new Error(snapshot?.reason || "当前页面没有识别到类目、关键词或商品报表表格");
+        const response = await factoryFetch("/api/collector/market-snapshots", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-Market-Ingest-Token": token },
+            body: JSON.stringify({ ...snapshot, source: "seerfar", capture_method: "browser_extension", period })
+        });
+        const result = await response.json();
+        if (!response.ok)
+            throw new Error(result.detail || `HTTP ${response.status}`);
+        await chrome.storage.local.set({ marketIngestToken: token });
+        els.progress.textContent = `已接收 ${result.received} 行，新入库 ${result.inserted} 行`;
+        setResult(result);
+    }
+    catch (error) {
+        els.progress.textContent = "市场报表入库失败";
+        setResult(error.message);
+    }
+    finally {
+        els.captureMarket.disabled = false;
+    }
+});
 els.previewToggle.addEventListener("click", () => {
     els.preview.hidden = !els.preview.hidden;
 });
@@ -417,6 +465,8 @@ async function initialize() {
     await loadFactoryConfig();
     const stored = await chrome.storage.local.get(["factoryBaseUrl"]);
     els.factoryUrl.value = cleanFactoryUrlText(stored.factoryBaseUrl) || factoryConfig.baseUrl;
+    const marketSettings = await chrome.storage.local.get(["marketIngestToken"]);
+    els.marketToken.value = marketSettings.marketIngestToken || "";
     await loadPreview();
 }
 initialize().catch((error) => {

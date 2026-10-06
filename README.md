@@ -4,6 +4,8 @@
 
 > **接手先读 [HANDOFF.md](HANDOFF.md)**：架构、数据流、不变量、四个 adapter 怎么接、排查手册、未完成清单。
 
+市场选品数据底座（Seerfar 插件快照 + Ozon Premium Pro 官方 API 单页导入）的接口、字段和控费口径见 [docs/market-intelligence-db.md](docs/market-intelligence-db.md)。此数据仓库与人工确认的关键词库分开。
+
 ## 端到端流程
 
 ```
@@ -807,5 +809,4 @@ capture-<offer_id>/
    系统版本、代码目录、图片目录 + **HTTPS 域名**（Ozon 只抓 https，门禁也只接受 https）；
 2. **GitHub 推送**：本机到 github.com 超时（gh 设备码登录也失败），换网络后我立刻推送
    （本地已备好 9 个提交，作者 `xgs1207-cloud`）。
-
 

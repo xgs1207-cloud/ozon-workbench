@@ -4,6 +4,7 @@ keyword-library/
 batches/
 output/
 logs/
+runtime/
 *.log
 
 # ---- 本地配置与凭据（绝不提交）----

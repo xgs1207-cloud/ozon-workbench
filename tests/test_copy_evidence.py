@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from models import CopyRequest, ModelError
 from models.fake import FakeProvider
@@ -210,6 +211,70 @@ class CopyEvidenceTests(unittest.TestCase):
             with self.subTest(keywords=keywords):
                 provider.write_copy_candidates_ru(self.request(force_new_model_call=True))
                 self.assertEqual(len(transport.calls), 2)
+
+    def test_only_invalid_generic_cached_tag_revalidated_without_any_new_rpc(self):
+        cached_response = self.response()
+        for row in cached_response["candidates"]:
+            row["copy_bundle"]["hashtags"] = ["#антистресс", "#подарок", "#привидение", "#антистресс"]
+        transport = Transport([cached_response])
+        provider = HttpModelProvider(transport, max_attempts=1)
+        # Reproduce the receipt written by the previous deployed validator.
+        with patch("models.http_provider._normalize_copy_candidate_hashtags", lambda value: (deepcopy(value), [])):
+            with self.assertRaisesRegex(ModelError, "подарок"):
+                provider.write_copy_candidates_ru(self.request())
+        receipt_path = self.directory / "output/copy-generation-diagnostic.json"
+        previous = read_json(receipt_path)
+        self.assertEqual(len(transport.calls), 1)
+        self.assertEqual(previous["payload"], cached_response)
+        result = provider.write_copy_candidates_ru(self.request(revalidate_only=True))
+        self.assertEqual(len(transport.calls), 1)  # No responses remain, so any extra RPC would also fail.
+        receipt = read_json(receipt_path)
+        self.assertEqual(receipt["input_key"], previous["input_key"])
+        self.assertEqual(receipt["payload"], cached_response)  # Original private response remains auditable.
+        self.assertEqual(receipt["status"], "valid")
+        self.assertEqual(receipt["original_attempts"], 1)
+        self.assertTrue(any("подарок" in note for note in receipt["normalization"]))
+        for raw, row in zip(cached_response["candidates"], result["candidates"]):
+            copy = row["documents"]["copy_bundle"]
+            self.assertEqual(copy["hashtags"], ["#антистресс", "#привидение"])
+            for field in ("title_ru", "description_ru", "claim_evidence", "description_sections"):
+                self.assertEqual(copy[field], raw["copy_bundle"][field])
+            self.assertTrue(any("已移除" in warning and "подарок" in warning for warning in copy["warnings"]))
+
+    def test_fresh_tag_cleanup_uses_same_normalizer_and_preserves_raw_receipt(self):
+        response = self.response()
+        response["candidates"][0]["copy_bundle"]["hashtags"] = ["#антистресс", "#подарок", "#антистресс"]
+        transport = Transport([response])
+        provider = HttpModelProvider(transport, max_attempts=1)
+        result = provider.write_copy_candidates_ru(self.request())
+        self.assertEqual(len(transport.calls), 1)
+        self.assertEqual(result["candidates"][0]["documents"]["copy_bundle"]["hashtags"], ["#антистресс"])
+        receipt = read_json(self.directory / "output/copy-generation-diagnostic.json")
+        self.assertEqual(receipt["payload"], response)
+        self.assertTrue(receipt["normalization"])
+
+    def test_tag_cleanup_cannot_hide_cached_numbers_materials_or_invalid_fact_ids(self):
+        for mutation, message in (
+            (lambda copy: copy.update(title_ru=copy["title_ru"] + " 99 г"), "数值"),
+            (lambda copy: copy.update(title_ru=copy["title_ru"] + " из силикона"), "材质"),
+            (lambda copy: copy["claim_evidence"][0].update(fact_ids=["fabricated_fact"]), "fabricated_fact"),
+        ):
+            response = self.response()
+            copy = response["candidates"][0]["copy_bundle"]
+            copy["hashtags"] = ["#антистресс", "#подарок"]
+            mutation(copy)
+            transport = Transport([response])
+            provider = HttpModelProvider(transport, max_attempts=1)
+            with self.subTest(message=message):
+                with patch("models.http_provider._normalize_copy_candidate_hashtags", lambda value: (deepcopy(value), [])):
+                    with self.assertRaises(ModelError):
+                        provider.write_copy_candidates_ru(self.request(force_new_model_call=True))
+                with self.assertRaisesRegex(ModelError, message):
+                    provider.write_copy_candidates_ru(self.request(revalidate_only=True))
+                self.assertEqual(len(transport.calls), 1)
+                receipt = read_json(self.directory / "output/copy-generation-diagnostic.json")
+                self.assertEqual(receipt["status"], "invalid")
+                self.assertEqual(receipt["payload"], response)
 
 
 class CopyEvidenceWorkflowTests(unittest.TestCase):

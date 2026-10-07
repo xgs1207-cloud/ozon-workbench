@@ -41,6 +41,39 @@ from contracts.normalize import normalize_payload
 
 DEFAULT_TIMEOUT = 90
 DEFAULT_TEMPERATURE = 0.3
+
+
+def _normalize_copy_candidate_hashtags(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """Remove invalid/duplicate AI tags only; never repair factual buyer copy."""
+    from copy import deepcopy
+    from rules.validate import validate_hashtags
+    from pipeline.copy_evidence import safe_evidence_problems
+
+    normalized = deepcopy(data)
+    notes = []
+    rows = normalized.get("candidates")
+    if not isinstance(rows, list):
+        return normalized, notes
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("copy_bundle"), dict):
+            continue
+        copy = row["copy_bundle"]
+        tags = copy.get("hashtags")
+        if not isinstance(tags, list) or any(not isinstance(tag, str) for tag in tags):
+            continue  # A malformed tag type remains a validation error.
+        retained, seen = [], set()
+        for tag in tags:
+            errors = validate_hashtags([tag])
+            identity = tag.strip().casefold()
+            reason = "；".join(errors) if errors else "重复 AI 标签" if identity in seen else ""
+            if reason:
+                note = f"{row.get('mode', 'candidate')}: 已移除不合规或重复 AI 标签 {tag!r}：{reason}"
+                notes.extend(safe_evidence_problems([note]))
+                continue
+            retained.append(tag)
+            seen.add(identity)
+        copy["hashtags"] = retained
+    return normalized, notes
 DEFAULT_MAX_ATTEMPTS = 3
 #: 单次回复上限（够写完整 JSON，又能挡住异常长回复烧钱）
 DEFAULT_MAX_TOKENS = 4000
@@ -680,6 +713,7 @@ class HttpModelProvider:
         force_new_call: bool = False,
         revalidate_only: bool = False,
         diagnostic_context: Mapping[str, Any] | None = None,
+        normalize_response: Callable[[dict[str, Any]], tuple[dict[str, Any], list[str]]] | None = None,
     ) -> tuple[dict[str, Any], list[str]]:
         """调模型 → 抠 JSON →（按契约机械归一化）→ 校验 → 失败带问题清单重试。
 
@@ -701,17 +735,23 @@ class HttpModelProvider:
         if failure_diagnostic is not None and not force_new_call:
             from pipeline.listing_form import read_json
             previous = read_json(failure_diagnostic)
-            if previous.get("input_key") == diagnostic_key and previous.get("status") == "invalid":
+            if (previous.get("input_key") == diagnostic_key and previous.get("status") in {"invalid", "valid"}
+                    and "payload" in previous):
                 old_payload = previous.get("payload")
+                cache_fixes = []
+                if isinstance(old_payload, dict) and normalize_response is not None:
+                    old_payload, cache_fixes = normalize_response(old_payload)
                 old_problems = list(validate(old_payload)) if isinstance(old_payload, dict) else ["此前响应不是合法 JSON"]
                 if not old_problems:
                     from pipeline.listing_form import write_json
-                    write_json(failure_diagnostic, {"task": task, "input_key": diagnostic_key,
+                    write_json(failure_diagnostic, {**previous, "task": task, "input_key": diagnostic_key,
                                                   "status": "valid", "attempts": 0,
+                                                  "original_attempts": previous.get("original_attempts", previous.get("attempts", 0)),
+                                                  "normalization": cache_fixes,
                                                   "context": dict(diagnostic_context or {})})
                     self.calls.append({"task": task, "attempt": 0, "ok": True, "cache_hit": True,
-                                       "problems": [], "normalized": [], "chars": 0})
-                    return old_payload, ["已重新校验此前响应，未重复调用收费模型"]
+                                       "problems": [], "normalized": cache_fixes[:6], "chars": 0})
+                    return old_payload, ["已重新校验此前响应，未重复调用收费模型", *cache_fixes]
                 raise ModelError("此前生成结果仍未通过校验，已保留诊断且未重复收费；"
                                  "请检查提示后显式重新生成（force=true）："
                                  + "；".join(safe_evidence_problems(old_problems)))
@@ -731,6 +771,7 @@ class HttpModelProvider:
         for attempt in range(1, (attempts or self.max_attempts) + 1):
             text = self.transport.complete(system=system, user=prompt, temperature=self.temperature)
             payload = extract_json(text)
+            raw_payload = payload
             fixes: list[str] = []
             if payload is None:
                 if looks_truncated(text):
@@ -742,8 +783,12 @@ class HttpModelProvider:
                 else:
                     problems = ["输出不是合法 JSON 对象（可能需要去掉解释文字或代码围栏）"]
             else:
+                if normalize_response is not None:
+                    payload, response_fixes = normalize_response(payload)
+                    fixes.extend(response_fixes)
                 if schema is not None:
-                    payload, fixes = normalize_payload(payload, schema)
+                    payload, schema_fixes = normalize_payload(payload, schema)
+                    fixes.extend(schema_fixes)
                 for key, document_contract in (document_contracts or {}).items():
                     document = payload.get(key)
                     if not isinstance(document, Mapping) or load_contract is None:
@@ -773,6 +818,7 @@ class HttpModelProvider:
                     from pipeline.listing_form import write_json
                     write_json(failure_diagnostic, {"task": task, "input_key": diagnostic_key,
                                                   "status": "valid", "attempts": attempt,
+                                                  "payload": raw_payload, "normalization": fixes,
                                                   "context": dict(diagnostic_context or {})})
                 if attempt > 1:
                     warnings.append(f"{task}: 第 {attempt} 次尝试通过校验（前一次输出不合法）")
@@ -781,7 +827,8 @@ class HttpModelProvider:
                 from pipeline.listing_form import write_json
                 write_json(failure_diagnostic, {"task": task, "input_key": diagnostic_key,
                                               "status": "invalid", "attempts": attempt,
-                                              "problems": problems[:12], "payload": payload,
+                                              "problems": problems[:12], "payload": raw_payload,
+                                              "normalization": fixes,
                                               "context": dict(diagnostic_context or {})})
             if attempt < (attempts or self.max_attempts):
                 prompt = (
@@ -973,6 +1020,7 @@ class HttpModelProvider:
                                            failure_diagnostic=request.product_dir / "output/copy-generation-diagnostic.json",
                                            force_new_call=request.extra.get("force_new_model_call") is True,
                                            revalidate_only=request.extra.get("revalidate_only") is True,
+                                           normalize_response=_normalize_copy_candidate_hashtags,
                                            diagnostic_context={"input_fingerprint": request.extra.get("input_fingerprint"),
                                                                "evidence_version": request.extra.get("evidence_version")})
         # Metadata documents are deterministic projections, not extra model calls.

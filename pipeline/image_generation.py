@@ -22,6 +22,8 @@ def handle_image_generation(ctx: StepContext) -> dict[str, Any]:
 
     source = ctx.require_json("input/source.json")
     plan = ctx.require_json("output/image-plan.json")
+    if plan.get("studio_mode"):
+        raise PipelineGateError(ctx.step, "自主生图工作区请逐张创建任务，不通过旧流水线批量调用付费模型")
     planned = list(plan.get("main_images") or []) + list(plan.get("detail_images") or [])
 
     try:

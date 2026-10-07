@@ -48,7 +48,8 @@ def build_url_map(
     plan = _read_json(directory / "image-plan.json")
     if not plan:
         plan = _read_json(directory / "output" / "image-plan.json")
-    slots = [item for item in (list(plan.get("main_images") or []) + list(plan.get("detail_images") or [])) if isinstance(item, Mapping)]
+    from .media_selection import selected_image_specs
+    slots = selected_image_specs(plan)
     if not slots:
         raise ValueError("缺少图片计划（output/image-plan.json）：先生成或导入计划")
 

@@ -417,7 +417,7 @@ def build_design_document(
 
     main_planned = [item for item in (image_plan.get("main_images") or []) if isinstance(item, Mapping)]
     detail_planned = [item for item in (image_plan.get("detail_images") or []) if isinstance(item, Mapping)]
-    if not main_planned or len(detail_planned) != 8:
+    if not image_plan.get("studio_mode") and (not main_planned or len(detail_planned) != 8):
         raise ValueError(
             f"图片计划结构不对：主图 {len(main_planned)} 张、详情图 {len(detail_planned)} 张（应为 N + 恰好 8）"
         )

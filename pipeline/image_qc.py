@@ -18,6 +18,7 @@ from contracts import format_problems, validate_contract
 
 from .context import PipelineGateError, StepContext
 from .image_probe import aspect_ratio_text, probe_image
+from .media_selection import selected_image_specs
 
 SCHEMA_VERSION = "1.0.0"
 ASPECT_TOLERANCE = 0.002
@@ -88,11 +89,7 @@ def run_image_qc(
     """跑一次技术质检，返回对齐 ``image-qc-report`` 契约的报告。"""
     directory = Path(product_dir)
     plan = _read_json(directory / "output" / "image-plan.json")
-    slots = [
-        item
-        for item in (list(plan.get("main_images") or []) + list(plan.get("detail_images") or []))
-        if isinstance(item, Mapping)
-    ]
+    slots = selected_image_specs(plan)
     if not slots:
         raise ValueError("缺少图片计划（output/image-plan.json），无法质检")
 

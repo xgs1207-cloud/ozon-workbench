@@ -282,9 +282,21 @@ def build_import_request(payload: Mapping[str, Any]) -> dict[str, Any]:
 
         primary = _media_url(variant["color_image"]) if variant.get("color_image") else ""
         gallery: list[str] = []
-        for url in [str(item) for item in ([primary] if primary else []) + detail_urls]:
+        if payload.get("studio_mode") is True:
+            # Explicit selected order is the gallery order, including its
+            # first/primary image. Never use a different SKU's main as fallback.
+            candidates = [_media_url(image.get("url")) for image in images
+                          if (str(image.get("source_sku_id") or "") == sku_id
+                              or (image.get("role") == "detail" and not image.get("source_sku_id")))]
+        else:
+            candidates = [str(item) for item in ([primary] if primary else []) + detail_urls]
+        for url in candidates:
             if url.startswith("https://") and url not in gallery:
                 gallery.append(url)
+        if payload.get("studio_mode") is True:
+            if not gallery:
+                raise OzonWriteError(f"规格 {sku_id} 未选择可用的商品图片，不能提交空图片商品")
+            primary = gallery[0]
 
         name = str(variant.get("display_name_ru") or payload.get("title") or "")
         if not name.strip() or len(name) > MAX_NAME_LENGTH or any(len(word) > 27 for word in name.split()):

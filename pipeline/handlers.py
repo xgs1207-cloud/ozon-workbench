@@ -281,7 +281,7 @@ def handle_image_plan(ctx: StepContext) -> dict[str, Any]:
     sku_count = len(active_skus(ctx.product_dir, source.get("skus") or []))
     main_images = list(plan.get("main_images") or [])
     detail_images = list(plan.get("detail_images") or [])
-    if len(main_images) != sku_count:
+    if not plan.get("studio_mode") and len(main_images) != sku_count:
         raise PipelineGateError(
             ctx.step,
             f"主图数量 {len(main_images)} 与要上架的 SKU 数 {sku_count} 不一致（每个上架 SKU 必须恰好 1 张主图）",
@@ -289,9 +289,9 @@ def handle_image_plan(ctx: StepContext) -> dict[str, Any]:
         )
     selected_ids = {str(row.get("sku_id")) for row in source.get("skus") or []}
     plan_ids = {str(row.get("source_sku_id") or row.get("sku_identity") or row.get("sku_id")) for row in main_images}
-    if plan_ids != selected_ids:
+    if (not plan.get("studio_mode") and plan_ids != selected_ids) or (plan.get("studio_mode") and not plan_ids.issubset(selected_ids)):
         raise PipelineGateError(ctx.step, "主图所属 SKU 与当前所选规格不一致，请重新规划图片")
-    if len(detail_images) != 8:
+    if not plan.get("studio_mode") and len(detail_images) != 8:
         raise PipelineGateError(
             ctx.step,
             f"共享详情图必须是 8 张，实际 {len(detail_images)}",

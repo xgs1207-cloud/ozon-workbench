@@ -89,7 +89,7 @@ ENV_KEYS = ("MODEL_BASE_URL", "MODEL_API_KEY", "MODEL_NAME")
 class ChatTransport(Protocol):
     name: str
 
-    def complete(self, *, system: str, user: str, temperature: float | None = None) -> str: ...
+    def complete(self, *, system: str, user: str | Sequence[Mapping[str, Any]], temperature: float | None = None) -> str: ...
 
 
 def _extract_content(response: Mapping[str, Any]) -> str:
@@ -144,7 +144,7 @@ class OpenAICompatibleTransport:
     def endpoint(self) -> str:
         return f"{self.base_url}/chat/completions"
 
-    def build_request(self, *, system: str, user: str, temperature: float | None = None) -> urllib.request.Request:
+    def build_request(self, *, system: str, user: str | Sequence[Mapping[str, Any]], temperature: float | None = None) -> urllib.request.Request:
         body: dict[str, Any] = {
             "model": self.model,
             "messages": [
@@ -173,7 +173,7 @@ class OpenAICompatibleTransport:
             method="POST",
         )
 
-    def complete(self, *, system: str, user: str, temperature: float | None = None) -> str:
+    def complete(self, *, system: str, user: str | Sequence[Mapping[str, Any]], temperature: float | None = None) -> str:
         request = self.build_request(system=system, user=user, temperature=temperature)
         try:
             with self._urlopen(request, timeout=self.timeout) as response:
@@ -1175,6 +1175,24 @@ def build_provider_from_env(env: Mapping[str, str] | None = None, *, ark: bool =
     )
 
 
+def build_ark_vision_transport(env: Mapping[str, str] | None = None) -> OpenAICompatibleTransport:
+    """Configured Ark multimodal chat, with one caller-owned request and no retries.
+
+    Official contract: https://docs.volcengine.com/docs/ark/image-understanding
+    ARK_VISION_MODEL may select a vision-capable endpoint independently of copy.
+    Falling back to ARK_TEXT_MODEL does not assert that endpoint supports images;
+    an incompatible model returns a real error instead of synthetic observations.
+    """
+    source = dict(os.environ if env is None else env)
+    source["MODEL_NAME"] = str(source.get("ARK_VISION_MODEL") or source.get("ARK_TEXT_MODEL")
+                               or source.get("MODEL_NAME") or "").strip()
+    source["MODEL_API_KEY"] = str(source.get("ARK_API_KEY") or source.get("MODEL_API_KEY") or "").strip()
+    source["MODEL_BASE_URL"] = str(source.get("ARK_BASE_URL") or source.get("MODEL_BASE_URL") or ARK_BASE_URL).strip()
+    config = ProviderConfig.ark_from_env(source)
+    return OpenAICompatibleTransport(base_url=config.base_url, api_key=config.api_key, model=config.model,
+                                   timeout=config.timeout, thinking="disabled", max_tokens=min(config.max_tokens or 4000, 6000))
+
+
 __all__ = [
     "ARK_BASE_URL",
     "ChatTransport",
@@ -1182,5 +1200,6 @@ __all__ = [
     "OpenAICompatibleTransport",
     "ProviderConfig",
     "build_provider_from_env",
+    "build_ark_vision_transport",
     "extract_json",
 ]

@@ -172,6 +172,11 @@ def workflow_status(directory: Path | str) -> dict[str, Any]:
     plan_payload = read_json(directory / PLAN_FILE)
     plan_current = bool(confirmed and plan.get("input_fingerprint") == current_plan
                         and plan_payload and plan.get("artifact_sha256") == _hash(plan_payload))
+    if plan_payload.get("studio_mode") is True:
+        # A freely edited image does not depend on confirmed generated copy.
+        # Actual image/SKU/version review remains a separate publication gate.
+        plan_current = bool(plan_payload and plan.get("studio_scope") == studio_scope(directory)
+                            and plan.get("artifact_sha256") == _hash(plan_payload))
     plan.update(fingerprint=current_plan, payload=plan_payload,
                 status="ready" if plan_current else "stale" if plan_payload else "missing")
     gates = risk_gates(payload) if analysis_current else {"preparation": [], "publication": [], "deferred": []}
@@ -465,9 +470,26 @@ def refresh_plan_metadata(directory: Path | str) -> dict[str, Any]:
     state = read_json(directory / STATE_FILE)
     previous = state.get("plan") or {}
     fingerprint = plan_fingerprint(directory)
+    plan = read_json(directory / PLAN_FILE)
+    if plan.get("studio_mode") is True:
+        from .sku_selection import selection_state
+        selection = selection_state(directory)
+        if not selection.get("has_selection") or selection.get("unknown_in_selection") or not selection.get("active_count"):
+            raise ValueError("请先确认上架规格")
+        allowed = set(selection["selected"])
+        from .media_selection import selected_image_specs
+        if any(row.get("source_sku_id") and str(row["source_sku_id"]) not in allowed
+               for row in selected_image_specs(plan)):
+            raise ValueError("选中的图片包含未选规格；请取消选择该图片或重新选择规格")
+        errors = validate_contract("image-plan", plan)
+        if errors:
+            raise ValueError("图片工作室资料无效：" + "；".join(errors[:5]))
+        state["plan"] = {**previous, "studio_scope": studio_scope(directory),
+                         "artifact_sha256": _hash(plan), "edited_at": _now()}
+        write_json(directory / STATE_FILE, state)
+        return workflow_status(directory)
     if not current["analysis"]["confirmed"] or not current["copy"]["confirmed"] or previous.get("input_fingerprint") != fingerprint:
         raise ValueError("规格、关键词或文案已变更，不能把旧图片方案标记为有效")
-    plan = read_json(directory / PLAN_FILE)
     errors = validate_contract("image-plan", plan)
     ids = current["selected_sku_ids"]
     main = plan.get("main_images") or []
@@ -481,6 +503,13 @@ def refresh_plan_metadata(directory: Path | str) -> dict[str, Any]:
         (directory / "output/image-plan-brief.md").write_text(render_plan_brief(plan), encoding="utf-8")
         write_json(directory / STATE_FILE, state)
     return workflow_status(directory)
+
+
+def studio_scope(directory: Path | str) -> str:
+    directory = Path(directory)
+    from .sku_selection import selection_state
+    return _hash({"source": read_json(directory / "input/source.json"),
+                  "selected_sku_ids": selection_state(directory).get("selected") or []})
 
 
 def pipeline_artifact_current(directory: Path | str, artifact: str) -> bool:

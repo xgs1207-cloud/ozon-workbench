@@ -28,6 +28,7 @@ from typing import Any, Mapping, Protocol, Sequence
 from contracts import format_problems, validate_contract
 
 from .context import PipelineGateError, StepContext
+from .media_selection import selected_image_specs
 from .publications import (
     ACTION_CREATE,
     ACTION_SKIP,
@@ -177,12 +178,9 @@ def resolve_image_urls(product_dir: Path | str) -> dict[str, str]:
 
 
 def planned_slots(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for role, key in (("variant_main", "main_images"), ("detail", "detail_images")):
-        for item in plan.get(key) or []:
-            if isinstance(item, Mapping):
-                rows.append({"slot": item.get("slot"), "role": role, "output_path": item.get("output_path")})
-    return rows
+    return [{"slot": item.get("slot"), "role": item["role"],
+             "output_path": item.get("output_path"), "source_sku_id": item.get("source_sku_id")}
+            for item in selected_image_specs(plan)]
 
 
 # --------------------------------------------------------------------- 载荷构建
@@ -321,12 +319,18 @@ def build_upload_payload(
     slots = planned_slots(plan)
     missing_images = [str(item["slot"]) for item in slots if not str(urls.get(str(item["slot"])) or "").startswith("https://")]
     if not slots:
-        blockers.append("没有图片计划（先跑 image_plan）")
+        blockers.append("未选择上架图片；可以继续编辑草稿，正式发布前需选择商品图片"
+                        if plan.get("studio_mode") is True else "没有图片计划（先跑 image_plan）")
     elif missing_images:
         blockers.append(f"以下图位没有可用的 https 公网地址：{missing_images}")
 
     # 7) 图片技术质检必须通过（本地真跑；语义维度缺失不算阻断）
     qc = _read_json(directory / "output" / "image-qc-report.json")
+    if plan.get("studio_mode") is True and slots:
+        # Selected files are checked now; rejected or unmade unused planned
+        # slots must not leak into the publication decision via an old report.
+        from .image_qc import run_image_qc
+        qc = run_image_qc(directory)
     qc_critical = qc.get("critical_failures")
     qc_decision = str(qc.get("decision") or "")
     if not isinstance(qc_critical, list) or not qc_decision:
@@ -390,7 +394,16 @@ def build_upload_payload(
                 and urls.get(str(item["slot"]))
             ),
             "",
-        ) or next((str(urls.get(str(item["slot"]))) for item in slots if urls.get(str(item["slot"]))), "")
+        )
+        if plan.get("studio_mode") is True:
+            eligible = [item for item in slots if
+                        (str(item.get("source_sku_id") or "") == sku_id
+                         or (item["role"] == "detail" and not item.get("source_sku_id")))]
+            color_image = next((str(urls.get(str(item["slot"]))) for item in eligible
+                                if str(urls.get(str(item["slot"])) or "").startswith("https://")), "")
+        else:
+            color_image = color_image or next((str(urls.get(str(item["slot"]))) for item in slots
+                                              if urls.get(str(item["slot"]))), "")
         if not color_image:
             blockers.append(f"SKU {sku_id} 没有可用图片地址")
         variants.append(
@@ -417,6 +430,7 @@ def build_upload_payload(
             "url": urls.get(str(item["slot"]), ""),
             "order": position,
             "output_path": item.get("output_path"),
+            **({"source_sku_id": item.get("source_sku_id")} if plan.get("studio_mode") is True else {}),
         }
         for position, item in enumerate(slots, start=1)
     ]
@@ -531,6 +545,8 @@ def build_upload_payload(
             },
         },
     }
+    if plan.get("studio_mode") is True:
+        payload["studio_mode"] = True
     return payload
 
 

@@ -177,14 +177,16 @@ class ImagePlanContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_image_plan(product_dir=self.product_dir, source={"collection_id": "COL-XXXXXXXX"}, source_refs=[])
 
-    def test_no_chinese_in_buyer_visible_text_or_prompts(self):
-        """叠字与生图提示词里不能有中文（颜色走俄语映射；提示词给生图模型）。"""
+    def test_chinese_operator_prompts_but_no_chinese_buyer_visible_text(self):
+        """操作提示词改为中文；真正展示给买家的文字保持俄语。"""
         plan = self._plan()
         cjk = __import__("re").compile(r"[\u4e00-\u9fff]")
         for item in plan["main_images"] + plan["detail_images"]:
             for text in item["russian_text"]:
                 self.assertIsNone(cjk.search(text), f"{item['slot']} 叠字含中文: {text}")
-            self.assertIsNone(cjk.search(str(item["prompt"])), f"{item['slot']} 提示词含中文")
+            self.assertIsNotNone(cjk.search(str(item["prompt"])), f"{item['slot']} 提示词不是中文")
+            self.assertIn("不出现中文", item["prompt"])
+            self.assertIn("3:4", item["prompt"])
         # 中文颜色名要能映射成俄语（红色 → красный）
         colors = [item["variant_value"] for item in plan["main_images"]]
         self.assertTrue(all(value and not cjk.search(value) for value in colors), colors)

@@ -58,6 +58,7 @@ def load_contract(name: str) -> dict[str, Any]:
             if filename == "ozon-upload-payload.schema.json":
                 # Add our media fields without editing ignored upstream files.
                 schema.setdefault("properties", {}).update({
+                    "studio_mode": {"type": "boolean"},
                     "hashtags": {"type": "array", "maxItems": 30,
                                  "items": {"type": "string", "maxLength": 30}},
                     "videos": {"type": "array", "maxItems": 50, "items": {"type": "object"}},
@@ -72,6 +73,42 @@ def load_contract(name: str) -> dict[str, Any]:
 def validate_contract(name: str, payload: Any, *, allow_extra: bool = False) -> list[str]:
     """返回问题列表（空列表 = 通过）。``allow_extra`` 只放宽 additionalProperties。"""
     schema = dict(load_contract(name))
+    if (name.removesuffix(".schema.json") == "image-plan"
+            and isinstance(payload, Mapping) and payload.get("studio_mode") is True):
+        # Keep ignored upstream contracts and legacy whole-plan validation
+        # intact. Studio drafts may have any number of independently made slots.
+        schema["properties"] = dict(schema.get("properties") or {})
+        schema["properties"].update({
+            "studio_mode": {"type": "boolean", "const": True},
+            "selected_slots": {"type": "array", "uniqueItems": True,
+                               "items": {"type": "string", "minLength": 1}},
+        })
+        schema["required"] = [*schema.get("required", []), "selected_slots"]
+        for key in ("main_images", "detail_images"):
+            field = dict(schema["properties"][key])
+            field["minItems"] = 0
+            field.pop("maxItems", None)
+            schema["properties"][key] = field
+        for field_name, count_names in (("variant_image_strategy", ("variant_main_count", "shared_detail_count")),
+                                        ("generator_contract", ("exact_shared_detail_count",))):
+            field = dict(schema["properties"][field_name])
+            field["properties"] = dict(field["properties"])
+            for count_name in count_names:
+                field["properties"][count_name] = {"type": "integer", "minimum": 0}
+            schema["properties"][field_name] = field
+        schema["$defs"] = dict(schema.get("$defs") or {})
+        planned = dict(schema["$defs"]["plannedImage"])
+        planned["additionalProperties"] = True  # studio jobs/draft vs adopted metadata
+        planned["properties"] = dict(planned["properties"])
+        overlays = dict(planned["properties"]["overlay_plan"])
+        overlays["minItems"] = 0  # text-free product photos are legitimate studio drafts
+        planned["properties"]["overlay_plan"] = overlays
+        schema["$defs"]["plannedImage"] = planned
+        from pipeline.media_selection import selected_image_specs
+        try:
+            selected_image_specs(payload)
+        except ValueError as error:
+            return [str(error)]
     if allow_extra:
         schema = _relax_extra(schema)
     return validate(schema, payload)

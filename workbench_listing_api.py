@@ -112,6 +112,21 @@ def plan_images(product_id: str, request: GenerateRequest):
                                      web_provider(), force=request.force)}
 
 
+class ImageInsightsRequest(GenerateRequest):
+    image_paths: list[str] = Field(min_length=1, max_length=3)
+
+
+@router.post("/guided/image-insights")
+def image_insights(product_id: str, request: ImageInsightsRequest):
+    """Explicit advisory vision call; never certify facts or publish a listing."""
+    from pipeline.image_insights import analyze_image_insights
+    result = run_service(analyze_image_insights, directory_for(product_id),
+                         image_paths=request.image_paths, force=request.force)
+    return {"ok": True, "insights": {**(result.get("payload") or {}),
+        "status": result.get("status"), "warning_zh": result.get("warning_zh")},
+        "cache_hit": result.get("cache_hit", False), "model_calls": result.get("model_calls", 0)}
+
+
 class StoreRequest(BaseModel):
     store: str | None = None
     confirm: str | None = None

@@ -124,8 +124,9 @@ def planned_slots(product_dir: Path | str) -> list[dict[str, Any]]:
     """读图片计划里的槽位（主图 + 详情图）。"""
     directory = Path(product_dir)
     plan = _read_json(directory / PLAN_FILE)
+    from .media_selection import selected_image_specs
     rows: list[dict[str, Any]] = []
-    for item in list(plan.get("main_images") or []) + list(plan.get("detail_images") or []):
+    for item in selected_image_specs(plan):
         if not isinstance(item, Mapping):
             continue
         slot = str(item.get("slot") or "").strip()
@@ -135,7 +136,7 @@ def planned_slots(product_dir: Path | str) -> list[dict[str, Any]]:
                 {
                     "slot": slot,
                     "output_path": relative,
-                    "role": "variant_main" if slot.startswith("main-") else "detail",
+                    "role": item["role"],
                 }
             )
     return rows
@@ -147,8 +148,12 @@ def image_publication_version(directory: Path | str) -> dict[str, Any]:
 
     root = Path(directory).resolve()
     plan = root / PLAN_FILE
+    data = _read_json(plan)
+    from .media_selection import selected_media_version
+    plan_body = (json.dumps(selected_media_version(data), ensure_ascii=False, sort_keys=True).encode()
+                 if data.get("studio_mode") is True else plan.read_bytes() if plan.is_file() else None)
     return {
-        "image_plan_sha256": hashlib.sha256(plan.read_bytes()).hexdigest() if plan.is_file() else None,
+        "image_plan_sha256": hashlib.sha256(plan_body).hexdigest() if plan_body is not None else None,
         "images_review_sha256": digest(root, "images"),
     }
 
@@ -173,8 +178,8 @@ def image_publication_binding(directory: Path | str, manifest: Mapping[str, Any]
     if not review_status(root)["sections"]["images"]["approved"]:
         issues.append("当前图片尚未审核确认，不能使用公开地址提交")
     plan = _read_json(root / PLAN_FILE)
-    specs = [row for row in list(plan.get("main_images") or []) + list(plan.get("detail_images") or [])
-             if isinstance(row, Mapping)]
+    from .media_selection import selected_image_specs
+    specs = selected_image_specs(plan)
     files = manifest.get("files") if isinstance(manifest.get("files"), Mapping) else {}
     urls = manifest.get("urls") if isinstance(manifest.get("urls"), Mapping) else {}
     expected_content: dict[str, Any] = {}
@@ -486,9 +491,11 @@ class CosObjectStorage:
         rows = planned_slots(directory)
         if not rows:
             raise CosError(f"缺少图片计划或计划里没有槽位：{directory / PLAN_FILE}")
-        if slots:
+        if slots is not None:
             wanted = {str(item) for item in slots}
             rows = [row for row in rows if row["slot"] in wanted]
+            if not rows:
+                raise CosError("没有选中可公开的图片图位")
 
         version = image_publication_version(directory)
         results = [self.publish_slot(directory, row) for row in rows]
@@ -502,9 +509,8 @@ class CosObjectStorage:
             if image_publication_version(directory) != version:
                 raise CosError("图片规划或审核内容在上传期间变化，请重新核对并公开图片")
             plan = _read_json(directory / PLAN_FILE)
-            specs = {str(row.get("slot")): row for row in
-                     list(plan.get("main_images") or []) + list(plan.get("detail_images") or [])
-                     if isinstance(row, Mapping)}
+            from .media_selection import selected_image_specs
+            specs = {str(row.get("slot")): row for row in selected_image_specs(plan)}
             bindings: dict[str, Any] = {}
             for item in ok:
                 spec = specs[item["slot"]]

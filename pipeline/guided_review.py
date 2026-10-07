@@ -57,8 +57,8 @@ def _write(path: Path, value: Mapping[str, Any]) -> None:
 
 def _image_paths(directory: Path) -> list[str]:
     plan = _read(directory / "output" / "image-plan.json")
-    return [str(item.get("output_path")) for item in
-            [*(plan.get("main_images") or []), *(plan.get("detail_images") or [])]
+    from .media_selection import selected_image_specs
+    return [str(item.get("output_path")) for item in selected_image_specs(plan)
             if isinstance(item, Mapping) and item.get("output_path")]
 
 
@@ -80,6 +80,40 @@ def digest(directory: Path | str, section: str) -> str | None:
             return None
         return hashlib.sha256(json.dumps({"fingerprint": copy["fingerprint"],
             "payload": copy["payload"]}, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    if section in {"images", "image_plan"}:
+        plan = _read(directory / "output/image-plan.json")
+        if plan.get("studio_mode") is True:
+            from .media_selection import selected_image_specs, selected_media_version
+            try:
+                specs = selected_image_specs(plan)
+            except ValueError:
+                return None
+            report = _read(directory / "output/image-generation-report.json")
+            selected = {row["slot"] for row in specs}
+            scoped = selected_media_version(plan)
+            if section == "images":
+                scoped["produced"] = [row for row in report.get("files") or [] if row.get("slot") in selected]
+                qc = _read(directory / "output/image-qc-report.json") if specs else None
+                # Fresh timestamps from an unrelated job do not change the
+                # technical judgment of the selected, unchanged image bytes.
+                def semantic(value: Any) -> Any:
+                    if isinstance(value, Mapping):
+                        return {key: semantic(child) for key, child in value.items()
+                                if key not in {"checked_at", "started_at", "finished_at", "generated_at"}}
+                    if isinstance(value, list):
+                        return [semantic(child) for child in value]
+                    return value
+                scoped["qc"] = semantic(qc)
+            digest_value = hashlib.sha256(json.dumps(scoped, sort_keys=True, ensure_ascii=False).encode())
+            if section == "images":
+                for spec in specs:
+                    relative = str(spec.get("output_path") or "")
+                    path = (directory / relative).resolve()
+                    if not path.is_relative_to(directory) or not path.is_file():
+                        return None
+                    digest_value.update(relative.encode())
+                    digest_value.update(path.read_bytes())
+            return digest_value.hexdigest()
     paths = [*DEPENDENCIES[section], *(_image_paths(directory) if section == "images" else [])]
     digest_value = hashlib.sha256()
     for relative in paths:
@@ -117,6 +151,9 @@ def problems(directory: Path | str, section: str) -> list[str]:
                 return [f"{relative} 比文案更新，请重新生成或人工完整复核文案"]
         return validate_copy_bundle(_read(copy_path))
     if section == "image_plan":
+        studio_plan = _read(directory / "output/image-plan.json")
+        if studio_plan.get("studio_mode") is True:
+            return validate_contract("image-plan", studio_plan)
         if (directory / "input/guided-workflow.json").is_file():
             from .guided_workflow import workflow_status
             if workflow_status(directory)["plan"]["status"] != "ready":
@@ -129,31 +166,40 @@ def problems(directory: Path | str, section: str) -> list[str]:
             return ["主图数量与当前上架 SKU 不一致，请重新生成图片计划"]
         return validate_contract("image-plan", plan)
     if section == "images":
+        plan = _read(directory / "output/image-plan.json")
+        studio = plan.get("studio_mode") is True
+        from .media_selection import selected_image_specs
+        try:
+            selected_specs = selected_image_specs(plan)
+        except ValueError as error:
+            return [str(error)]
+        if studio and not selected_specs:
+            return []  # Valid media draft; actual no-image upload is still gated.
         generation = _read(directory / "output" / "image-generation-report.json")
         generator = generation.get("generator")
         if (generation.get("final_images") is not True
                 or not isinstance(generator, str)
                 or generator not in REAL_IMAGE_GENERATORS | {"mixed"}):
             return ["当前不是支持的生图后端生成的正式图片；占位图或未知来源图片不能用于批次自动上架"]
-        if generation.get("generated_slots") != generation.get("planned_slots"):
+        if not studio and generation.get("generated_slots") != generation.get("planned_slots"):
             return ["图片尚未覆盖整套规划图位"]
-        plan = _read(directory / "output" / "image-plan.json")
         expected = {str(item.get("slot")): item for item in
-                    [*(plan.get("main_images") or []), *(plan.get("detail_images") or [])]
+                    selected_specs
                     if isinstance(item, Mapping)}
         produced = {str(item.get("slot")): item for item in generation.get("files") or []
-                    if isinstance(item, Mapping)}
+                    if isinstance(item, Mapping) and (not studio or str(item.get("slot")) in expected)}
         if set(produced) != set(expected) or any(
             not isinstance(produced[slot].get("generator"), str)
             or produced[slot].get("generator") not in REAL_IMAGE_GENERATORS
             or produced[slot].get("path") != spec.get("output_path")
+            or ("source_sku_id" in produced[slot] and produced[slot].get("source_sku_id") != spec.get("source_sku_id"))
             or produced[slot].get("slot_fingerprint") != slot_fingerprint(spec)
             for slot, spec in expected.items()
         ):
             return ["图片与当前图位提示词/参考图不一致，须重做变更的图位"]
         generators = {item["generator"] for item in produced.values()}
         report_generator = next(iter(generators)) if len(generators) == 1 else "mixed"
-        if generation.get("generator") != report_generator:
+        if not studio and generation.get("generator") != report_generator:
             return ["图片整套来源摘要与各图位实际生图后端不一致，请重新汇总生图报告"]
         qc = _read(directory / "output" / "image-qc-report.json")
         if qc.get("critical_failures") or qc.get("decision") == "reject":
@@ -232,6 +278,11 @@ def approve(directory: Path | str, section: str) -> dict[str, Any]:
         "sha256": current,
         "approved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
+    if section == "images" and _read(directory / "output/image-plan.json").get("studio_mode") is True:
+        # The user's explicit selected-image confirmation also confirms its
+        # ordered adoption plan. No second mandatory whole-plan click.
+        review["approved"]["image_plan"] = {"sha256": digest(directory, "image_plan"),
+                                             "approved_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     _write(path, review)
     return status(directory)
 
@@ -292,6 +343,14 @@ def status(directory: Path | str) -> dict[str, Any]:
     for name, item in sections.items():
         if not item["approved"]:
             blockers.append(f"{name} 尚未审核确认或原产物已变更")
+    plan = _read(directory / "output/image-plan.json")
+    if plan.get("studio_mode") is True:
+        from .media_selection import selected_image_specs
+        try:
+            if not selected_image_specs(plan):
+                blockers.append("尚未选择可发布图片：零张可确认草稿，但不能提交无图商品")
+        except ValueError as error:
+            blockers.append(str(error))
     return {"sections": sections, "facts_ready": facts_ok, "sku_ready": sku_ok,
             "manual_prices_ready": prices_ok, "ready_to_preflight": not blockers, "blockers": blockers}
 
@@ -335,6 +394,16 @@ def update_plan_slot(directory: Path | str, *, slot: str, prompt: str,
         raise ValueError("图位不存在")
     if not prompt.strip() or len(prompt) > 4000:
         raise ValueError("提示词须为 1–4000 字")
+    from .image_jobs import generated_spec
+    produced = next((row for row in _read(directory / "output/image-generation-report.json").get("files") or []
+                     if row.get("slot") == slot), {})
+    if produced.get("slot_fingerprint") == slot_fingerprint(found) and not found.get("generated_spec"):
+        found["generated_spec"] = generated_spec(found)
+    if plan.get("studio_mode") is not True:
+        plan.update(studio_mode=True, selected_slots=[row["slot"] for row in
+                    [*(plan.get("main_images") or []), *(plan.get("detail_images") or [])]
+                    if any(saved.get("slot") == row["slot"] for saved in
+                           _read(directory / "output/image-generation-report.json").get("files") or [])])
     found["prompt"] = prompt.strip()
     found["reference_image_ids"] = ids
     found["reference_product_images"] = [reference_index[item] for item in ids]

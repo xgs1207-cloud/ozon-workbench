@@ -7,7 +7,7 @@
 - 图片只允许引用 ``input/{main,sku,detail}-images`` 里的真实文件（不引用 output/ 或历史商品）；
 - **不编造尺寸/材质/认证**：没有结构化尺寸就不给 ``measurement_annotation``，确认不了的槽位标 ``needs_human_input``；
 - 禁止后置叠字（``overlay_strategy=single_pass_model_native_typography``），文字只来自本计划；
-- 中文只出现在内部规划字段里，``russian_text`` 与提示词里的可见文字必须是俄语。
+- 操作者的生图指令使用简单中文；``russian_text`` 和最终画面的可见文字仍只用俄语。
 """
 
 from __future__ import annotations
@@ -328,17 +328,36 @@ def _planned_image(
 
 
 def _main_prompt(core: str, variant_value: str | None, colors: Sequence[str]) -> str:
-    subject = core or "the product"
-    parts = [f"Photo-realistic seller photo of {subject}"]
+    subject = core or "参考图中的商品"
+    parts = [f"为参考图中的商品制作一张真实电商主图。商品识别词：{subject}。"]
     if variant_value:
-        parts.append(f"({variant_value})")
+        parts.append(f"只表现当前规格：{variant_value}，不混入其他规格。")
     if colors:
-        parts.append("color: " + ", ".join(colors[:2]))
+        parts.append("保持参考图颜色，颜色标识：" + "、".join(colors[:2]) + "。")
     parts.append(
-        "centered on a light neutral background, soft diffused daylight, subtle natural shadow, "
-        "product occupies 45-65% of frame width, no text overlays, no watermarks, no Chinese characters"
+        "商品居中，占画面宽度约45%–65%，浅色中性背景，柔和自然光和真实阴影；"
+        "通过清晰的整体外观让买家一眼认出商品。保持本体结构、比例和配件不变，"
+        "不要凭空增加功能、材质说明、尺寸或认证。3:4竖图，照片级实拍，不叠文字，不出现中文、水印、二维码。"
     )
-    return ", ".join(parts)
+    return "".join(parts)
+
+
+def _detail_prompt(index: int, purpose: str, *, single_sku: bool) -> str:
+    """Plain Chinese operator instructions; no invented specifications/benefits."""
+    scenes = (
+        "用清晰的整体外观展示这是什么商品，选择一个有依据的可见特点作为画面重点，不编造功效。",
+        "展示已确认用途对应的真实使用场景；如果用途尚未确认，只拍商品本体，不添加使用效果。",
+        "用近景展示参考图实际可见的结构和部件，通过角度与光线让细节易看清，不推测材质或拆出隐藏部件。",
+        ("只展示当前已选规格的外观特点，不加入其他颜色或规格，不做虚构对比。" if single_sku else
+         "只并排展示本次已选规格的真实外观差异，不加入未选规格，不放大或编造差异。"),
+        "根据已确认的使用信息展示一个动作或步骤；没有动作证据时，改为商品外观展示，不虚构操作。",
+        "把商品放在简洁、可信的生活环境中，商品仍是最大视觉主体；不暗示未经证实的适用年龄或特殊功效。",
+        "特写参考图可见的表面外观、边缘或连接处，用自然光突出细节，不把外观猜测写成材质或质量保证。",
+        "展示已确认的购买提醒或实际配件；未知参数保持不展示，不增加认证标志、尺寸标尺或承诺。",
+    )
+    return (f"制作一张真实电商详情图，重点：{purpose}。{scenes[index - 1]}"
+            "严格保持勾选参考图商品的结构、颜色、比例和配件，不改变规格。"
+            "3:4竖图，自然光，照片级实拍，不用3D或插画，不叠文字，不出现中文、水印、店铺链接或二维码。")
 
 
 def build_image_plan(
@@ -506,11 +525,7 @@ def build_image_plan(
                     differentiation=f"Слот {index} из {SHARED_DETAIL_COUNT}: {plan['buyer_question']}",
                 ),
                 overlay_plan=[_overlay(role="callout", text=plan["buyer_question"], priority=1)],
-                prompt=(
-                    f"Photo-realistic seller photo illustrating: {plan['visual_goal'].lower()}, "
-                    f"{'based on the real product photos' if (detail_refs or main_refs) else 'product reference required'}, "
-                    "natural light, no text overlays, no watermarks, no Chinese characters, 3:4"
-                ),
+                prompt=_detail_prompt(index, plan["purpose"], single_sku=single_sku),
                 prompt_brief=(
                     f"详情图 {index}/8：{plan['purpose']}；要回答买家问题「{plan['buyer_question']}」；"
                     "照片级实拍、3:4、商品为主视觉，不叠中文、不用 3D/插画。"

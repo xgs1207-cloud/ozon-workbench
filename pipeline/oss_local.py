@@ -55,14 +55,15 @@ def planned_slots(product_dir: Path | str) -> list[dict[str, Any]]:
     """读图片计划里的槽位（主图 + 详情图），只保留有实际文件路径的。"""
     directory = Path(product_dir)
     plan = _read_json(directory / PLAN_FILE)
+    from .media_selection import selected_image_specs
     rows: list[dict[str, Any]] = []
-    for item in list(plan.get("main_images") or []) + list(plan.get("detail_images") or []):
+    for item in selected_image_specs(plan):
         if not isinstance(item, Mapping):
             continue
         slot = str(item.get("slot") or "").strip()
         relative = str(item.get("output_path") or "").strip()
         if slot and relative:
-            rows.append({"slot": slot, "output_path": relative, "role": "variant_main" if slot.startswith("main-") else "detail"})
+            rows.append({"slot": slot, "output_path": relative, "role": item["role"]})
     return rows
 
 

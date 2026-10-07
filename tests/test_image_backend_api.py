@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import tempfile
@@ -85,10 +86,38 @@ class ImageBackendApiTests(unittest.TestCase):
     setUp = forms_fixture.AuthorizedFormsApiTests.setUp
     tearDown = forms_fixture.AuthorizedFormsApiTests.tearDown
     authorize = forms_fixture.AuthorizedFormsApiTests.authorize
-    collect = listing_fixture.ListingFlowApiTests.collect
     analyze = listing_fixture.ListingFlowApiTests.analyze
     category_and_keywords = listing_fixture.ListingFlowApiTests.category_and_keywords
     copy_and_plan = listing_fixture.ListingFlowApiTests.copy_and_plan
+
+    def collect(self):
+        listing_fixture.ListingFlowApiTests.collect(self)
+        # This HTTP fixture historically wrote untracked placeholder bytes.
+        # Async workers require authentic sealed inputs even for offline tests.
+        source = read_json(self.directory / "input/source.json")
+        relatives = []
+        for name in ("main-images", "sku-images", "detail-images"):
+            relative = f"input/{name}/01.png"
+            write_solid_png(self.directory / relative, 900, 1200)
+            relatives.append(relative)
+        source["stored_images"] = relatives
+        source["skus"][0]["image_path"] = "input/sku-images/01.png"
+        write_json(self.directory / "input/source.json", source)
+        manifest = read_json(self.directory / "input/source-manifest.json")
+        files = {row["path"]: row for row in manifest["files"]}
+        for relative in ["input/source.json", *relatives]:
+            path = self.directory / relative
+            files[relative] = {"path": relative, "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "bytes": path.stat().st_size}
+        manifest["files"] = list(files.values())
+        write_json(self.directory / "input/source-manifest.json", manifest)
+
+    def generate_request(self, slot, generator):
+        from pipeline import image_jobs
+        with patch("models.load_web_image_generator", return_value=generator) as loader, patch.object(image_jobs._EXECUTOR, "submit"):
+            response = self.client.post(self.base + "/guided/generate-image", json={"slot": slot})
+        if response.status_code == 200:
+            image_jobs.run_image_job(self.directory, response.json()["job"]["id"], generator)
+        return response, loader
 
     def ready_plan(self):
         self.collect()
@@ -99,15 +128,14 @@ class ImageBackendApiTests(unittest.TestCase):
         return [*plan["main_images"], *plan["detail_images"]]
 
     def generator(self, name, calls):
-        directory = self.directory
         class OfflineGenerator:
             produces_final_images = True
             def generate(self, request):
                 calls.append(request.slot)
-                plan = read_json(directory / "output/image-plan.json")
+                plan = read_json(request.product_dir / "output/image-plan.json")
                 spec = next(row for row in [*plan["main_images"], *plan["detail_images"]]
                             if row["slot"] == request.slot)
-                path = write_solid_png(directory / spec["output_path"], 900, 1200)
+                path = write_solid_png(request.product_dir / spec["output_path"], 900, 1200)
                 return {"generator": name, "model": "offline-model", "final_images": True,
                         "generated": [{"slot": request.slot, "path": spec["output_path"],
                                        "bytes": path.stat().st_size}], "skipped": [], "note": "offline"}
@@ -124,6 +152,49 @@ class ImageBackendApiTests(unittest.TestCase):
         self.assertEqual(result.json()["image_backend"]["name"], "rightapi")
         self.assertNotIn("never-echo-this-fixture", result.text)
         self.assertNotIn("image_sources", result.json()["source"])
+
+    def test_free_single_slot_queue_poll_and_ordered_selection_without_generated_copy(self):
+        self.collect()
+        created = self.client.post(self.base + "/guided/image-slots", json={
+            "prompt": "用近景突出真实颜色和表面细节", "reference_ids": ["sku-001"], "role": "detail"})
+        self.assertEqual(created.status_code, 200, created.text)
+        slot = created.json()["slot"]
+        self.assertTrue(created.json()["image_plan"]["studio_mode"])
+        response, _ = self.generate_request(slot, self.generator("rightapi", []))
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn(response.json()["job"]["status"], {"queued", "running"})
+        polled = self.client.get(self.base + "/guided/image-jobs")
+        self.assertEqual(polled.status_code, 200, polled.text)
+        self.assertEqual(polled.json()["jobs"][-1]["status"], "completed")
+        self.assertNotIn("snapshot_hashes", polled.text)
+        self.assertNotIn("instance", polled.text)
+        self.assertNotIn("pid", polled.text)
+        selected = self.client.put(self.base + "/guided/image-selection", json={"selected_slots": [slot]})
+        self.assertEqual(selected.status_code, 200, selected.text)
+        confirmed = self.client.post(self.base + "/guided/approve", json={"section": "images"})
+        self.assertEqual(confirmed.status_code, 200, confirmed.text)
+        self.assertTrue(confirmed.json()["review"]["sections"]["images"]["approved"])
+        self.assertTrue(confirmed.json()["review"]["sections"]["image_plan"]["approved"])
+        self.assertFalse((self.directory / "output/copy-ru.json").exists())
+
+    def test_image_count_zero_is_explicit_draft_confirmation(self):
+        self.collect()
+        selected = self.client.put(self.base + "/guided/image-selection", json={"selected_slots": []})
+        self.assertEqual(selected.status_code, 200, selected.text)
+        confirmed = self.client.post(self.base + "/guided/approve", json={"section": "images"})
+        self.assertEqual(confirmed.status_code, 200, confirmed.text)
+        self.assertFalse(confirmed.json()["review"]["ready_to_preflight"])
+
+    def test_unknown_or_duplicate_selected_slots_never_silently_dropped(self):
+        self.collect()
+        created = self.client.post(self.base + "/guided/image-slots", json={
+            "prompt": "展示采集商品真实形状", "reference_ids": ["sku-001"]})
+        self.assertEqual(created.status_code, 200, created.text)
+        slot = created.json()["slot"]
+        for chosen in ([slot, slot], ["not-an-existing-slot"], [slot]):
+            response = self.client.put(self.base + "/guided/image-selection", json={"selected_slots": chosen})
+            self.assertEqual(response.status_code, 422, response.text)
+            self.assertEqual(read_json(self.directory / "output/image-plan.json")["selected_slots"], [])
 
     def test_no_generation_before_approved_plan(self):
         self.collect()
@@ -144,12 +215,11 @@ class ImageBackendApiTests(unittest.TestCase):
             "generated_slots": len(specs), "files": files})
         calls = []
         generator = self.generator("rightapi", calls)
-        with patch("models.load_web_image_generator", return_value=generator) as loader:
-            result = self.client.post(self.base + "/guided/generate-image", json={"slot": specs[0]["slot"]})
+        result, loader = self.generate_request(specs[0]["slot"], generator)
         self.assertEqual(result.status_code, 200, result.text)
         loader.assert_called_once_with(slot_filter=[specs[0]["slot"]])
         self.assertEqual(calls, [specs[0]["slot"]])
-        self.assertEqual(result.json()["generator"], "rightapi")
+        self.assertEqual(result.json()["job"]["generator"], "rightapi")
         report = read_json(self.directory / "output/image-generation-report.json")
         self.assertEqual(report["generator"], "mixed")
         self.assertEqual(report["generated_slots"], len(specs))
@@ -178,7 +248,7 @@ class ImageBackendApiTests(unittest.TestCase):
                                "planned_slots": len(specs), "generated_slots": len(specs), "files": files})
         generator = self.generator("rightapi", [])
         with patch("models.load_web_image_generator", return_value=generator):
-            first = self.client.post(self.base + "/guided/generate-image", json={"slot": specs[0]["slot"]})
+            first, _ = self.generate_request(specs[0]["slot"], generator)
             self.assertEqual(first.status_code, 200, first.text)
             approved = self.client.post(self.base + "/guided/approve", json={"section": "images"})
             self.assertEqual(approved.status_code, 200, approved.text)
@@ -186,7 +256,7 @@ class ImageBackendApiTests(unittest.TestCase):
             previous_id = read_json(report_path)["generation_id"]
             qc = read_json(self.directory / "output/image-qc-report.json")
             with patch("pipeline.image_qc.run_image_qc", return_value=qc):
-                second = self.client.post(self.base + "/guided/generate-image", json={"slot": specs[0]["slot"]})
+                second, _ = self.generate_request(specs[0]["slot"], generator)
         self.assertEqual(second.status_code, 200, second.text)
         self.assertNotEqual(previous_id, read_json(report_path)["generation_id"])
         current = self.client.get(self.base + "/guided").json()

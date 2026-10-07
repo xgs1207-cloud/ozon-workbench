@@ -155,7 +155,7 @@ def publish_media(product_id: str, request: StoreRequest):
         run_service(_require_editable, directory)
         review = status(directory)
         if not review["sections"]["images"]["approved"]:
-            raise HTTPException(409, "先确认整套正式图片，再发布图片地址")
+            raise HTTPException(409, "先确认所选上架图片，再发布图片地址")
         try:
             result = _storage_from_env().publish_product(directory)
         except Exception as error:

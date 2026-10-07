@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -181,6 +182,21 @@ def _list_reference_images(product_dir: Path) -> list[dict[str, Any]]:
                 }
             )
     return images
+
+
+def _references_for_sku(sku: Mapping[str, Any], references: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Bind by collected local paths or exact SKU filename tokens, never list order."""
+    paths = {str(sku.get("image_path") or "").replace("\\", "/")}
+    paths.update(str(path).replace("\\", "/") for path in sku.get("image_refs") or [] if isinstance(path, str))
+    explicit = [dict(ref) for ref in references if ref.get("path") in paths]
+    if explicit:
+        return explicit
+    sku_id = str(sku.get("sku_id") or "")
+    if not sku_id:
+        return []
+    token = re.compile(r"(?:^|[-_])" + re.escape(sku_id) + r"(?=$|[-_])")
+    return [dict(ref) for ref in references if ref.get("role") == "sku"
+            and token.search(Path(str(ref.get("path") or "")).stem)]
 
 
 def _art_direction(*, kind: str, index: int, differentiation: str) -> dict[str, Any]:
@@ -390,7 +406,10 @@ def build_image_plan(
         variant_value = _variant_value(sku)
         colors = [color for color in (_russian_color(sku),) if color]
         # 身份锁优先用同一 SKU 的参考图；没有就退回主图素材
-        bound_refs = sku_refs or main_refs
+        bound_refs = _references_for_sku(sku, references)
+        if not bound_refs:
+            risks.append({"area": "reference", "level": "high",
+                          "message": f"SKU {sku_id} 没有可确认归属的参考图，请人工选择同规格图片；不按图片顺序绑定"})
         operation = "generate_from_reference" if bound_refs else "needs_human_input"
         status = "planned" if bound_refs else "needs_review"
         russian_text = [core] if core else []
@@ -440,6 +459,11 @@ def build_image_plan(
 
     detail_images: list[dict[str, Any]] = []
     single_sku = len(skus) == 1
+    selected_refs = [ref for sku in skus for ref in _references_for_sku(sku, references)]
+    selected_refs = list({ref["id"]: ref for ref in selected_refs}.values())
+    # A shared gallery may contain unselected variants. Prefer selected SKU
+    # identities; users can explicitly add vetted detail references later.
+    safe_detail_refs = selected_refs or detail_refs or main_refs
     for index, plan in enumerate(DETAIL_PLAN, start=1):
         slot = f"detail-{index:03d}"
         # 单 SKU 时按规则不做 SKU 对比图，改用卖点图
@@ -449,7 +473,7 @@ def build_image_plan(
             layout_type, image_type = "core_benefit", "benefit"
         russian_text = [core] if core and index == 1 else []
         operation = "compose_from_real_images" if image_type == "comparison" else "generate_from_reference"
-        if not detail_refs and not main_refs:
+        if not safe_detail_refs:
             operation, status = "needs_human_input", "needs_review"
             failure_reason = "没有可用的参考原图"
         else:
@@ -466,8 +490,8 @@ def build_image_plan(
                 scene_description=f"Слот {slot}: {plan['visual_goal']}",
                 purchase_reason=plan["purpose"],
                 russian_text=russian_text,
-                reference_ids=[item["id"] for item in (detail_refs or main_refs)[:4]],
-                reference_paths=[item["path"] for item in (detail_refs or main_refs)[:4]],
+                reference_ids=[item["id"] for item in safe_detail_refs[:3]],
+                reference_paths=[item["path"] for item in safe_detail_refs[:3]],
                 operation=operation,
                 output_path=f"output/generated-images/detail/{slot}.png",
                 status=status,

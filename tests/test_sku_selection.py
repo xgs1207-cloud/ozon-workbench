@@ -38,7 +38,7 @@ def capture() -> dict:
         "title_zh": "316 不锈钢保温杯",
         "category": {"category_id": "1001", "type_id": "2001"},
         "skus": [
-            {"sku_id": sku_id, "color_ru": color, "capacity": "500 мл", "purchase_price_cny": 18.0 + index}
+            {"sku_id": sku_id, "color_ru": color, "capacity": "500 мл", "purchase_price_cny": 18.0 + index, "image_path": f"input/sku-images/{index + 1:02d}.png"}
             for index, (sku_id, color) in enumerate(
                 zip(SKUS, ("красный", "синий", "зелёный"))
             )

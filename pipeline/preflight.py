@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import urllib.error
 import urllib.request
@@ -40,6 +41,7 @@ def check_image_urls(
     urlopen: Callable[..., Any] | None = None,
     timeout: int = DEFAULT_TIMEOUT,
     limit: int = 12,
+    expected_content: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """匿名 GET 我们的图片地址（Ozon 也是匿名来取的）。"""
     opener = urlopen or urllib.request.urlopen
@@ -51,6 +53,12 @@ def check_image_urls(
             with opener(request, timeout=timeout) as response:
                 body = response.read()
                 item.update(ok=int(getattr(response, "status", 200)) == 200, status=getattr(response, "status", None), bytes=len(body))
+                expected = (expected_content or {}).get(url)
+                if expected is not None:
+                    item["content_matches"] = (len(body) == expected.get("size_bytes")
+                                               and hashlib.sha256(body).hexdigest() == expected.get("sha256"))
+                    if not item["content_matches"]:
+                        item.update(ok=False, error="公开图片内容与当前已审核文件不一致，请重新公开图片")
         except urllib.error.HTTPError as error:
             item.update(status=error.code, error=f"HTTP {error.code}")
         except Exception as error:  # noqa: BLE001
@@ -87,6 +95,9 @@ def preflight(
     image_urls = urls_payload.get("urls") if isinstance(urls_payload.get("urls"), Mapping) else urls_payload
     if not image_urls:
         problems.append("图片还没发布到对象存储（缺 output/image-public-urls.json）")
+    from .oss_cos import image_publication_binding
+    binding = image_publication_binding(product, urls_payload)
+    problems.extend(binding["problems"])
 
     payload = build_upload_payload(
         product_dir=product,
@@ -126,6 +137,8 @@ def preflight(
         url_checks = check_image_urls(
             [str(item.get("url")) for item in (payload.get("images") or []) if isinstance(item, Mapping) and item.get("url")],
             urlopen=urlopen,
+            limit=len(payload.get("images") or []),
+            expected_content=binding.get("expected_content"),
         )
         for check in url_checks:
             if not check["ok"]:
@@ -141,6 +154,7 @@ def preflight(
         "production_blockers": payload_blockers,
         "problems": problems,
         "image_upload_gate": gate,
+        "image_publication_binding": {key: value for key, value in binding.items() if key != "expected_content"},
         "attributes": len(attributes),
         "variants": len(variants),
         "currency": sorted(

@@ -22,27 +22,51 @@ import argparse
 import json
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
+from urllib.parse import urlsplit
 
 from .ozon_status import _read_json, _transport_for_store
 
 PATH_PRODUCT_ATTRIBUTES = "/v4/product/info/attributes"
 
 
-def _attributes_of(document: Mapping[str, Any]) -> dict[int, list[str]]:
-    """把 ``ozon-attributes-final.json`` 压成 {attribute_id: [值…]}（含每个 SKU 的值）。"""
+def _attribute_text(value: Any) -> str:
+    return str(value).lower() if isinstance(value, bool) else "" if value is None else str(value)
+
+
+def _attributes_of(document: Mapping[str, Any], sku_id: str | None = None) -> dict[int, list[str]]:
+    """Read only the current SKU's overrides, never another variant's values."""
     result: dict[int, list[str]] = {}
     for item in document.get("common_attributes") or []:
         if isinstance(item, Mapping) and item.get("attribute_id") is not None:
-            value = str(item.get("value") or "").strip()
+            value = _attribute_text(item.get("value")).strip()
             if value:
                 result.setdefault(int(item["attribute_id"]), []).append(value)
     by_sku = document.get("attributes_by_sku") if isinstance(document.get("attributes_by_sku"), Mapping) else {}
-    for rows in by_sku.values():
+    for rows in ([by_sku.get(sku_id) or []] if sku_id is not None else []):
+        override_ids = {int(row["attribute_id"]) for row in rows if isinstance(row, Mapping)
+                        and row.get("attribute_id") is not None}
+        for attribute_id in override_ids:
+            result.pop(attribute_id, None)
         for item in rows or []:
             if isinstance(item, Mapping) and item.get("attribute_id") is not None:
-                value = str(item.get("value") or "").strip()
+                value = _attribute_text(item.get("value")).strip()
                 if value:
                     result.setdefault(int(item["attribute_id"]), []).append(value)
+    return result
+
+
+def _expected_for_variant(payload: Mapping[str, Any], variant: Mapping[str, Any]) -> dict[int, list[dict[str, Any]]]:
+    common = [row for row in payload.get("attributes") or [] if isinstance(row, Mapping)]
+    overrides = [row for row in variant.get("attributes") or [] if isinstance(row, Mapping)]
+    ids = {row.get("attribute_id") for row in overrides}
+    result: dict[int, list[dict[str, Any]]] = {}
+    for row in [*(row for row in common if row.get("attribute_id") not in ids), *overrides]:
+        if row.get("attribute_id") is None:
+            continue
+        result.setdefault(int(row["attribute_id"]), []).append({
+            "value": _attribute_text(row.get("value")),
+            "dictionary_value_id": row.get("dictionary_value_id"),
+        })
     return result
 
 
@@ -80,7 +104,17 @@ def verify_submitted(
     items = response.get("result") or response.get("items") or []
     by_offer = {str(item.get("offer_id")): item for item in items if isinstance(item, Mapping)}
 
-    expected = _attributes_of(_read_json(product / "output" / "ozon-attributes-final.json"))
+    compiled_attributes = _read_json(product / "output" / "ozon-attributes-final.json")
+    payload = _read_json(product / "output/store-runs" / store_id / "payload.json")
+    variants = {str(row.get("offer_id")): row for row in payload.get("variants") or []
+                if isinstance(row, Mapping)}
+    source_skus = {str(row.get("offer_id")): str(row.get("sku_id") or "")
+                   for row in store_entry.get("sku_publications") or [] if isinstance(row, Mapping)}
+    grouping = _read_json(product / "output/platform-grouping-result.json")
+    must_merge = (payload.get("product_group") or {}).get("must_merge")
+    if must_merge is None:
+        strategy = grouping.get("upload_strategy")
+        must_merge = strategy == "merged_variants" if strategy else len(offer_ids) > 1
     checks: list[dict[str, Any]] = []
 
     missing_offers = [offer for offer in offer_ids if offer not in by_offer]
@@ -101,7 +135,7 @@ def verify_submitted(
         checks.append(
             {
                 "name": f"sku_assigned[{offer}]",
-                "ok": bool(sku),
+                "ok": str(sku or "").isdigit() and int(sku) > 0,
                 "detail": f"sku={sku}",
             }
         )
@@ -114,11 +148,22 @@ def verify_submitted(
             for attribute in (item.get("attributes") or [])
             if isinstance(attribute, Mapping) and attribute.get("id") is not None
         }
+        variant = variants.get(offer)
+        expected = (_expected_for_variant(payload, variant) if variant is not None else {
+            key: [{"value": value} for value in values] for key, values in
+            _attributes_of(compiled_attributes, source_skus.get(offer)).items()})
+        stored_ids = {int(attribute["id"]): {int(value.get("dictionary_value_id") or 0)
+            for value in attribute.get("values") or [] if isinstance(value, Mapping)}
+            for attribute in item.get("attributes") or [] if isinstance(attribute, Mapping)
+            and attribute.get("id") is not None}
         for attribute_id, values in expected.items():
-            # 颜色/容量这类是"每 SKU 一个值"，只要求 Ozon 上有这条属性的任意一个值
-            wanted = {value for value in values}
+            # Dictionary IDs are authoritative; text attributes compare the
+            # expected values for this exact offer, not the union of all SKUs.
+            wanted = {value["value"] for value in values if value.get("value")}
             stored_values = set(stored.get(attribute_id) or [])
-            ok = bool(stored_values & wanted)
+            ok = all((int(value.get("dictionary_value_id") or 0) in stored_ids.get(attribute_id, set()))
+                if int(value.get("dictionary_value_id") or 0) > 0 else value.get("value") in stored_values
+                for value in values)
             # 类型(8229) 等由类和型决定，Ozon 可能不放在 attributes 里 → 只提示不判失败
             soft = attribute_id in {8229}
             checks.append(
@@ -130,10 +175,11 @@ def verify_submitted(
                 }
             )
         primary = str(item.get("primary_image") or "")
+        image_host = (urlsplit(primary).hostname or "").casefold()
         checks.append(
             {
                 "name": f"image_rehosted[{offer}]",
-                "ok": bool(primary) and "ozone.ru" in primary,
+                "ok": bool(primary) and (image_host == "ozone.ru" or image_host.endswith(".ozone.ru")),
                 "detail": primary or "（没有主图）",
             }
         )
@@ -141,15 +187,16 @@ def verify_submitted(
         if isinstance(model_info, Mapping) and model_info.get("model_id"):
             model_ids.add(model_info.get("model_id"))
             count = int(model_info.get("count") or 0)
-            checks.append(
-                {
-                    "name": f"variant_merged[{offer}]",
-                    "ok": count >= len(offer_ids),
-                    "detail": f"model_id={model_info.get('model_id')}｜count={count}（offer 数 {len(offer_ids)}）",
-                }
-            )
+            if must_merge:
+                checks.append(
+                    {
+                        "name": f"variant_merged[{offer}]",
+                        "ok": count >= len(offer_ids),
+                        "detail": f"model_id={model_info.get('model_id')}｜count={count}（offer 数 {len(offer_ids)}）",
+                    }
+                )
 
-    if len(offer_ids) > 1:
+    if len(offer_ids) > 1 and must_merge:
         checks.append(
             {
                 "name": "same_model_id",

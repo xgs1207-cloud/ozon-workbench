@@ -9,7 +9,8 @@ from unittest.mock import patch
 from models import CopyRequest, ModelError
 from models.fake import FakeProvider
 from models.http_provider import HttpModelProvider
-from pipeline.copy_evidence import candidate_evidence, safe_evidence_problems, verified_copy_facts
+from pipeline.copy_evidence import (_measurements, candidate_evidence, safe_evidence_problems,
+                                    verified_copy_facts)
 from pipeline.guided_workflow import (CANDIDATES_FILE, _copy_source, copy_generation_status,
                                       generate_copy_candidates)
 from pipeline.listing_form import read_json, write_json
@@ -90,6 +91,108 @@ class CopyEvidenceTests(unittest.TestCase):
         category["confirmed_by_user"] = False
         facts = verified_copy_facts(sparse_analysis(), {"selected_category": category})
         self.assertNotIn("category.type", {row["id"] for row in facts})
+
+    def dimension_facts(self, length=40, width=40, height=60):
+        analysis = sparse_analysis()
+        analysis["facts"]["dimensions"] = {"length_mm": length, "width_mm": width, "height_mm": height}
+        return verified_copy_facts(analysis, {"selected_category": real_category()})
+
+    def dimension_bundle(self, claim, ids=None):
+        copy = safe_bundle(self.directory)
+        copy["description_ru"] += " Размеры: " + claim + "."
+        if ids is not None:
+            copy["claim_evidence"].append({"claim": claim, "fact_ids": ids})
+        return copy
+
+    def test_shared_dimension_unit_preserves_three_axes_and_all_separator_forms(self):
+        facts = self.dimension_facts()
+        ids = ["facts.dimensions.length_mm", "facts.dimensions.width_mm", "facts.dimensions.height_mm"]
+        for claim in ("40×40×60 мм", "40 x 40 x 60 mm", "40х40х60 мм", "40 * 40 * 60 мм",
+                      "40 40 60 мм", "40,0 × 40.00 × 60,000 мм"):
+            with self.subTest(claim=claim):
+                self.assertEqual(_measurements(claim), {("40", "mm"), ("60", "mm")})
+                result = candidate_evidence(self.dimension_bundle(claim, list(reversed(ids))), facts, [])
+                self.assertTrue(any(row["claim"] == claim for row in result["claim_evidence"]))
+                inferred = candidate_evidence(self.dimension_bundle(claim), facts, [])
+                self.assertIn({"claim": claim, "fact_ids": ids}, inferred["claim_evidence"])
+
+    def test_shared_dimension_unit_rejects_swapped_missing_or_invented_axes(self):
+        ids = ["facts.dimensions.length_mm", "facts.dimensions.width_mm", "facts.dimensions.height_mm"]
+        facts = self.dimension_facts(40, 50, 60)
+        for claim, references, available in (
+            ("50×40×60 мм", ids, facts),
+            ("40×50×99 мм", ids, facts),
+            ("40×50×60 мм", ids[:2], facts),
+            ("40×40×60 мм", ids[:1], self.dimension_facts()),
+            ("40×40×60 мм", None, self.facts + [row for row in self.dimension_facts()
+                                               if row["id"] == ids[0]]),
+            ("40×50×60", ids, facts),
+            ("40×50×60 widgets", ids, facts),
+            ("40×50×60 г", ids, facts),
+            ("4×5×6 см", ids, facts),  # No implicit unit conversion.
+            ("40×50×60×70 мм", ids, facts),
+        ):
+            with self.subTest(claim=claim, references=references), self.assertRaisesRegex(ValueError, "尺寸三轴"):
+                candidate_evidence(self.dimension_bundle(claim, references), available, [])
+        missing_height = [row for row in facts if row["id"] != ids[2]]
+        with self.assertRaisesRegex(ValueError, "尺寸三轴"):
+            candidate_evidence(self.dimension_bundle("40×50×60 мм"), missing_height, [])
+        mixed = deepcopy(facts)
+        next(row for row in mixed if row["id"] == ids[2])["id"] = "facts.skus.other.dimensions.height_mm"
+        with self.assertRaisesRegex(ValueError, "尺寸三轴"):
+            candidate_evidence(self.dimension_bundle("40×50×60 мм"), mixed, [])
+
+    def test_shared_dimension_units_do_not_turn_bare_or_unknown_numbers_into_length_facts(self):
+        ids = ["facts.dimensions.length_mm", "facts.dimensions.width_mm", "facts.dimensions.height_mm"]
+        for unit in ("", "widgets"):
+            facts = self.dimension_facts()
+            for row in facts:
+                if row["id"] in ids:
+                    row["unit"] = unit
+            with self.subTest(unit=unit), self.assertRaisesRegex(ValueError, "尺寸三轴"):
+                candidate_evidence(self.dimension_bundle("40×40×60 мм", ids), facts, [])
+        for claim in ("40×40×60 мм²", "40x40x60mm100g"):
+            with self.subTest(claim=claim), self.assertRaises(ValueError):
+                candidate_evidence(self.dimension_bundle(claim, ids), self.dimension_facts(), [])
+
+    def test_cached_shared_dimension_false_positive_revalidated_without_new_model_call(self):
+        facts = self.dimension_facts()
+        ids = ["facts.dimensions.length_mm", "facts.dimensions.width_mm", "facts.dimensions.height_mm"]
+        bundle = self.dimension_bundle("40×40×60 мм", ids)
+        response = {"candidates": [{"mode": mode, "copy_bundle": deepcopy(bundle)} for mode in MODES]}
+        transport = Transport([response])
+        provider = HttpModelProvider(transport, max_attempts=1)
+        # Simulate the paid receipt rejected by the previously deployed parser.
+        with patch("pipeline.copy_evidence._dimension_fact_ids", return_value=[]):
+            with self.assertRaisesRegex(ModelError, "尺寸三轴"):
+                provider.write_copy_candidates_ru(self.request(verified_facts=facts))
+        path = self.directory / "output/copy-generation-diagnostic.json"
+        previous = read_json(path)
+        result = provider.write_copy_candidates_ru(self.request(verified_facts=facts, revalidate_only=True))
+        current = read_json(path)
+        self.assertEqual(len(transport.calls), 1)
+        self.assertEqual(current["input_key"], previous["input_key"])
+        self.assertEqual(current["context"], previous["context"])
+        self.assertEqual(current["payload"], previous["payload"])
+        self.assertEqual(current["status"], "valid")
+        self.assertEqual(len(result["candidates"]), 3)
+
+    def test_valid_receipt_status_cannot_bypass_new_axis_validation(self):
+        facts = self.dimension_facts(40, 50, 60)
+        ids = ["facts.dimensions.length_mm", "facts.dimensions.width_mm", "facts.dimensions.height_mm"]
+        bundle = self.dimension_bundle("50×40×60 мм", ids)
+        response = {"candidates": [{"mode": mode, "copy_bundle": deepcopy(bundle)} for mode in MODES]}
+        transport = Transport([response])
+        provider = HttpModelProvider(transport, max_attempts=1)
+        with self.assertRaises(ModelError):
+            provider.write_copy_candidates_ru(self.request(verified_facts=facts))
+        path = self.directory / "output/copy-generation-diagnostic.json"
+        receipt = read_json(path)
+        receipt["status"] = "valid"  # Simulate a receipt accepted by an old set-only validator.
+        write_json(path, receipt)
+        with self.assertRaisesRegex(ModelError, "尺寸三轴"):
+            provider.write_copy_candidates_ru(self.request(verified_facts=facts, revalidate_only=True))
+        self.assertEqual(len(transport.calls), 1)
 
     def test_raw_label_numbers_and_materials_cannot_launder_claims(self):
         analysis = sparse_analysis()

@@ -32,8 +32,8 @@ def capture(url_suffix: str, keyword: str | None = None) -> dict:
         "title_zh": "316 不锈钢保温杯",
         "category": {"category_id": "1001", "type_id": "2001"},
         "skus": [
-            {"sku_id": "S1", "color_ru": "красный", "capacity": "500 мл", "purchase_price_cny": 18.5},
-            {"sku_id": "S2", "color_ru": "синий", "capacity": "500 мл", "purchase_price_cny": 19.0},
+            {"sku_id": "S1", "color_ru": "красный", "capacity": "500 мл", "purchase_price_cny": 18.5, "image_path": "input/sku-images/01.png"},
+            {"sku_id": "S2", "color_ru": "синий", "capacity": "500 мл", "purchase_price_cny": 19.0, "image_path": "input/sku-images/02.png"},
         ],
     }
     if keyword:

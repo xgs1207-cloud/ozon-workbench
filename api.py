@@ -1355,10 +1355,10 @@ def _require_product(product_id: str) -> Path:
 
 
 def _require_pre_submission_edit(directory: Path) -> None:
-    from pipeline.status import load_status
+    from pipeline.listing_draft import submission_editable
 
-    if int(load_status(directory).get("api_write_count") or 0) > 0 or (directory / "runtime/listing-submit-attempt.json").is_file():
-        raise HTTPException(status_code=409, detail="商品已经向 Ozon 发起写入，请另建版本后再修改")
+    if not submission_editable(directory):
+        raise HTTPException(status_code=409, detail="商品已被 Ozon 接收或提交状态待核实，请先查询状态；不能直接修改或重复提交")
 
 
 @app.get("/api/workbench/products/{product_id}/keywords")
@@ -1816,6 +1816,7 @@ class StoreActionRequest(BaseModel):
 
     store: str | None = None
     confirm: str | None = None
+    retry_rejected: bool = False
 
 
 def _store_for(directory: Path, requested: str | None) -> str:
@@ -1984,8 +1985,9 @@ def submit_product(product_id: str, request: StoreActionRequest) -> dict[str, An
         from workbench_listing_api import run_service
         from pipeline.listing_draft import submit_listing
         store = _store_for(directory, request.store)
-        return {"ok": True, "store": store,
-                "report": run_service(submit_listing, directory, shop=store)}
+        report = run_service(submit_listing, directory, shop=store,
+                             retry_rejected=request.retry_rejected)
+        return {"ok": bool(report.get("ok")), "store": store, "report": report}
     if research_sessions.session_for_product(MARKET_DB_PATH, product_id):
         raise HTTPException(status_code=409, detail="选词批次商品须走逐项审核与批次自动发布，不可用旧入口绕过审核")
     store = _store_for(directory, request.store)

@@ -106,8 +106,8 @@ class PollingTests(unittest.TestCase):
         slept: list[float] = []
         transport = RecordingTransport(
             [
-                info_response(pending("P000001-S1")),
-                info_response(imported("P000001-S1")),
+                info_response(pending("P000001-S1"), pending("P000001-S2")),
+                info_response(imported("P000001-S1"), imported("P000001-S2")),
             ]
         )
         result = confirm_task(transport, "777", payload=sample_payload(), interval_seconds=2.0, sleep=slept.append)
@@ -201,7 +201,7 @@ class ApplyConfirmationTests(unittest.TestCase):
         self.assertEqual(info["counts"]["imported"], 2)
 
     def test_failure_marks_store_failed_with_reason(self):
-        _, applied = self.confirm(info_response(failed("P000001-S1")))
+        _, applied = self.confirm(info_response(failed("P000001-S1"), failed("P000001-S2")))
         self.assertEqual(applied["status"], "failed")
         result = json.loads(
             (self.product_dir / "output" / "store-runs" / "default" / "ozon-result.json").read_text(encoding="utf-8")

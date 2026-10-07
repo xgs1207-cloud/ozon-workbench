@@ -336,7 +336,10 @@ document.addEventListener('click',async event=>{
             if(productDraft()?.dirty||listingDraft()?.dirty||productDraft()?.pending?.size)throw Error('请先保存所有未保存的修改');
             const shop=selectedReadStore();if(!shop)throw Error('请选择已授权店铺');
             if(!confirm(`确认向店铺「${shop.display_name||shop.id}」提交已审核商品？会真实创建商品卡；不提交库存、不启用付费集评。`))return;
-            const result=await flowRequest('guided/submit','POST',{store:shop.id,confirm:'SUBMIT'});flowShowResult(result);notice('已收到提交结果，请回读审核状态；受理不等于可售');
+            const result=await flowRequest('guided/submit','POST',{store:shop.id,confirm:'SUBMIT'});flowShowResult(result);
+            const report=result.report||{},outcome=report.state||report.outcome;
+            if(!result.ok)notice(outcome==='rejected'?'Ozon 明确拒绝，请查看错误并修正资料后确认重试':'提交未确认成功，请回读现有任务；不要重复提交',true);
+            else notice(outcome==='imported'?'商品已导入，请继续核对审核状态；未填写库存':'Ozon 已受理现有任务，正在处理；受理不等于审核通过或可售');
         }
         if(action==='verify'){const result=await flowRequest('verify','POST',{store:selectedReadStore()?.id});flowShowResult(result)}
     } catch(error) {

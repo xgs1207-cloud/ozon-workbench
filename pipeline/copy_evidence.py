@@ -24,6 +24,16 @@ def safe_evidence_problems(problems: list[Any]) -> list[str]:
 
 
 _MEASURE = re.compile(r"(?<![\w])(?P<number>\d+(?:[.,]\d+)?)[ \t]*(?P<unit>[A-Za-zА-Яа-яЁё]+|%)?")
+_DIMENSION_NUMBER = r"\d+(?:[.,]\d+)?"
+_DIMENSION_SEPARATOR = r"(?:[ \t]*[×xх*][ \t]*|[ \t]+)"
+_DIMENSION = re.compile(
+    rf"(?<![\w.,])(?P<length>{_DIMENSION_NUMBER}){_DIMENSION_SEPARATOR}"
+    rf"(?P<width>{_DIMENSION_NUMBER}){_DIMENSION_SEPARATOR}"
+    rf"(?P<height>{_DIMENSION_NUMBER})[ \t]*(?P<unit>[A-Za-zА-Яа-яЁё]+|%)?(?!\w)",
+    re.IGNORECASE,
+)
+_DIMENSION_FACT = re.compile(r"^(?P<group>.+\.dimensions)\.(?P<axis>length|width|height)_mm$")
+_DIMENSION_AXES = ("length", "width", "height")
 _UNITS = {
     "ml": "ml", "мл": "ml", "миллилитр": "ml", "миллилитра": "ml", "миллилитров": "ml",
     "l": "l", "л": "l", "литр": "l", "литра": "l", "литров": "l",
@@ -63,21 +73,51 @@ _MATERIAL_CLAIMS = (
 )
 
 
+def _measurement(number: str, unit: str | None) -> tuple[str, str | None]:
+    # Preserve integer zeroes and exact decimals, not floating-point rounding.
+    number = format(Decimal(number.replace(",", ".")), "f")
+    if "." in number:
+        number = number.rstrip("0").rstrip(".")
+    token = (unit or "").casefold()
+    return number, _UNITS.get(token, f"unrecognized:{token}" if token else None)
+
+
+def _dimension_measures(match: re.Match[str]) -> tuple[tuple[str, str | None], ...]:
+    return tuple(_measurement(match[axis], match["unit"]) for axis in _DIMENSION_AXES)
+
+
+def _scalar_matches(text: str):
+    dimensions = list(_DIMENSION.finditer(text))
+    for match in _MEASURE.finditer(text):
+        if not any(start.start() <= match.start() < start.end() for start in dimensions):
+            yield match
+
+
 def _measurements(value: Any, unit: str = "") -> set[tuple[str, str | None]]:
     text = f"{value} {unit}".strip()
-    result: set[tuple[str, str | None]] = set()
-    for match in _MEASURE.finditer(text):
-        # Decimal preserves exact measurements (including large values); strip
-        # fractional zeroes only, never the zeroes of an integer such as 100.
-        number = format(Decimal(match["number"].replace(",", ".")), "f")
-        if "." in number:
-            number = number.rstrip("0").rstrip(".")
-        token = (match["unit"] or "").casefold()
-        # Unknown measure words stay distinct instead of becoming a wildcard.
-        # Bare numbers only match bare facts; unit conversion is not inferred.
-        canonical_unit = _UNITS.get(token, f"unrecognized:{token}" if token else None)
-        result.add((number, canonical_unit))
-    return result
+    # Shared trailing units apply to all three axes; tuple validation below
+    # separately retains order and duplicate axes instead of trusting this set.
+    return {measure for match in _DIMENSION.finditer(text) for measure in _dimension_measures(match)} | {
+        _measurement(match["number"], match["unit"]) for match in _scalar_matches(text)
+    }
+
+
+def _dimension_fact_ids(match: re.Match[str], facts: Mapping[str, Mapping[str, Any]]) -> list[str]:
+    measures = _dimension_measures(match)
+    if measures[0][1] not in {"mm", "cm", "m"}:
+        return []  # Unitless/unknown/non-length units cannot prove dimensions.
+    groups: dict[str, dict[str, str]] = {}
+    for identity in facts:
+        axis = _DIMENSION_FACT.fullmatch(identity)
+        if axis:
+            groups.setdefault(axis["group"], {})[axis["axis"]] = identity
+    for axes in groups.values():
+        if all(axis in axes for axis in _DIMENSION_AXES):
+            ids = [axes[axis] for axis in _DIMENSION_AXES]
+            if all(_measurements(facts[identity]["value"], facts[identity].get("unit", "")) == {measure}
+                   for identity, measure in zip(ids, measures)):
+                return ids
+    return []
 
 
 def verified_copy_facts(analysis: Mapping[str, Any], source: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
@@ -157,11 +197,24 @@ def candidate_evidence(copy: Mapping[str, Any], facts: list[dict[str, Any]], key
                              + "；只能引用 verified_facts 中的完整 ID")
         measures = {measure for identity in ids if identity in numeric_facts
                     for measure in _measurements(by_id[identity]["value"], by_id[identity].get("unit", ""))}
+        cited_numeric = {identity: numeric_facts[identity] for identity in ids if identity in numeric_facts}
+        if any(not _dimension_fact_ids(match, cited_numeric) for match in _DIMENSION.finditer(claim)):
+            raise ValueError("候选尺寸三轴与引用的事实不一致；必须完整引用同组 length_mm、width_mm、height_mm 并按轴核对单位和值")
         if any(not any(n == fn and u == fu for fn, fu in measures) for n, u in _measurements(claim)):
             raise ValueError("候选数值/单位与引用的事实不一致；规格名称和类目不能证明数值，请去掉无依据的数值")
         evidence.append({"claim": claim, "fact_ids": ids})
-    # Legacy providers can omit evidence; matching remains exact on value/unit.
-    for match in _MEASURE.finditer(combined):
+    # Legacy providers can omit evidence, but dimensions still need a complete
+    # same-group tuple. One 40 mm fact cannot prove 40 x 40 x 60 mm.
+    for match in _DIMENSION.finditer(combined):
+        matching = _dimension_fact_ids(match, numeric_facts)
+        if not matching:
+            raise ValueError("候选含未证实的尺寸三轴或单位；请补充完整且按轴一致的 dimensions 事实")
+        raw = match.group(0).strip()
+        if not any(raw in row["claim"] for row in evidence):
+            evidence.append({"claim": raw, "fact_ids": matching})
+    # Scalar measurements keep their exact value/unit checks; bare numbers
+    # cannot match a unit-bearing fact and unknown units remain distinct.
+    for match in _scalar_matches(combined):
         raw = match.group(0).strip()
         numeric_only = match["number"] + (match["unit"] or "")
         measurement = next(iter(_measurements(numeric_only)))

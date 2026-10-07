@@ -200,13 +200,14 @@ def invalidate_from(directory: Path | str, step: str) -> None:
     """Requeue a pre-submission pipeline suffix after user-supplied facts change."""
     from .status import load_status, normalize, save_status
     from .steps import PIPELINE_STEPS
+    from .listing_draft import submission_editable
 
     if step not in PIPELINE_STEPS:
         raise ValueError("未知流水线步骤")
     directory = Path(directory)
     current = normalize(load_status(directory))
-    if int(current.get("api_write_count") or 0) > 0:
-        raise ValueError("此商品已有 Ozon 写入，不能在原商品流程中回退重跑")
+    if not submission_editable(directory):
+        raise ValueError("此商品已有 Ozon 写入或提交状态待核实，不能在原商品流程中回退重跑")
     index = PIPELINE_STEPS.index(step)
     current["completed_steps"] = [name for name in current["completed_steps"]
                                   if name in PIPELINE_STEPS and PIPELINE_STEPS.index(name) < index]

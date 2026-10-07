@@ -118,7 +118,7 @@ class LaunchStepTests(DayFixture):
                 "source_url": "https://detail.1688.com/offer/555555555.html",
                 "title_zh": "316 保温杯",
                 "category": {"category_id": "1001", "type_id": "2001"},
-                "skus": [{"sku_id": "S1", "color_ru": "красный", "capacity": "500 мл", "purchase_price_cny": 18.0}],
+                "skus": [{"sku_id": "S1", "color_ru": "красный", "capacity": "500 мл", "purchase_price_cny": 18.0, "image_path": "input/sku-images/01.png"}],
                 "keywords": [keyword],
             },
         )

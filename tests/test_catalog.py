@@ -46,6 +46,7 @@ def capture_payload(*, skus: int = 2, colors=("красный", "синий"), c
                 "color_ru": colors[index % len(colors)],
                 "capacity": capacities[index % len(capacities)],
                 "purchase_price_cny": 18.0 + index,
+                "image_path": f"input/sku-images/{index + 1:02d}.png",
             }
             for index in range(skus)
         ],

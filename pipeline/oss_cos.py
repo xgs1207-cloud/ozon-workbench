@@ -38,6 +38,7 @@ from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import quote, urlsplit
 
 SCHEMA_VERSION = "1.0.0"
+IMAGE_MANIFEST_VERSION = 2
 URLS_FILE = "output/image-public-urls.json"
 PLAN_FILE = "output/image-plan.json"
 DEFAULT_KEY_PREFIX = "ozon-images"
@@ -138,6 +139,80 @@ def planned_slots(product_dir: Path | str) -> list[dict[str, Any]]:
                 }
             )
     return rows
+
+
+def image_publication_version(directory: Path | str) -> dict[str, Any]:
+    """Exact reviewed image inputs, independent of when media was published."""
+    from .guided_review import digest
+
+    root = Path(directory).resolve()
+    plan = root / PLAN_FILE
+    return {
+        "image_plan_sha256": hashlib.sha256(plan.read_bytes()).hexdigest() if plan.is_file() else None,
+        "images_review_sha256": digest(root, "images"),
+    }
+
+
+def image_publication_binding(directory: Path | str, manifest: Mapping[str, Any]) -> dict[str, Any]:
+    """Refuse legacy URLs or URLs bound to different reviewed image bytes."""
+    from .guided_review import slot_fingerprint, status as review_status
+
+    root = Path(directory).resolve()
+    issues: list[str] = []
+    checks: list[dict[str, Any]] = []
+    current = image_publication_version(root)
+    if manifest.get("image_manifest_version") != IMAGE_MANIFEST_VERSION:
+        return {"ok": False, "problems": ["图片公开地址缺少内容版本校验；请重新公开已确认图片的 HTTPS 地址"],
+                "files": [], "expected_content": {}}
+    if manifest.get("product_id") != root.name:
+        issues.append("图片发布清单不属于当前商品，请重新公开图片")
+    if not current["image_plan_sha256"] or manifest.get("image_plan_sha256") != current["image_plan_sha256"]:
+        issues.append("图片规划已变化，公开地址仍对应旧规划；请重新公开图片")
+    if not current["images_review_sha256"] or manifest.get("images_review_sha256") != current["images_review_sha256"]:
+        issues.append("图片已变化，公开地址仍对应旧图片；请重新审核并公开图片")
+    if not review_status(root)["sections"]["images"]["approved"]:
+        issues.append("当前图片尚未审核确认，不能使用公开地址提交")
+    plan = _read_json(root / PLAN_FILE)
+    specs = [row for row in list(plan.get("main_images") or []) + list(plan.get("detail_images") or [])
+             if isinstance(row, Mapping)]
+    files = manifest.get("files") if isinstance(manifest.get("files"), Mapping) else {}
+    urls = manifest.get("urls") if isinstance(manifest.get("urls"), Mapping) else {}
+    expected_content: dict[str, Any] = {}
+    for spec in specs:
+        slot = str(spec.get("slot") or "")
+        record = files.get(slot)
+        check = {"slot": slot, "ok": False}
+        checks.append(check)
+        if not isinstance(record, Mapping):
+            issues.append(f"图位 {slot} 缺少发布版本，请重新公开图片")
+            continue
+        relative = spec.get("output_path")
+        source = (root / relative).resolve() if isinstance(relative, str) else root
+        if not source.is_relative_to(root) or not source.is_file():
+            issues.append(f"图位 {slot} 的当前图片文件无效")
+            continue
+        try:
+            body = source.read_bytes()
+        except OSError:
+            issues.append(f"图位 {slot} 的当前图片文件无法读取")
+            continue
+        sha256 = hashlib.sha256(body).hexdigest()
+        size = record.get("size_bytes")
+        url = str(urls.get(slot) or "")
+        if (record.get("output_path") != relative or record.get("slot_fingerprint") != slot_fingerprint(spec)
+                or record.get("sha256") != sha256 or isinstance(size, bool) or not isinstance(size, int) or size != len(body)
+                or size <= 0 or record.get("url") != url or not url.startswith("https://")):
+            issues.append(f"图位 {slot} 的公开地址与当前已审核图片不一致，请重新公开图片")
+            continue
+        if url in expected_content and expected_content[url] != {"sha256": sha256, "size_bytes": size}:
+            issues.append(f"图位 {slot} 与另一张不同图片共用公开地址，请重新公开图片")
+            continue
+        check.update(ok=True, sha256=sha256, size_bytes=size, url=url)
+        expected_content[url] = {"sha256": sha256, "size_bytes": size}
+    if not specs:
+        issues.append("当前图片规划没有图位")
+    return {"ok": not issues, "problems": list(dict.fromkeys(issues)), "files": checks,
+            "expected_content": expected_content, **current}
 
 
 def build_client(config: Mapping[str, Any]) -> Any:
@@ -295,7 +370,8 @@ class CosObjectStorage:
         except (CosError, TypeError, ValueError, AttributeError):
             pass
         if remote_matches:
-            return {"slot": slot, "status": "unchanged", "key": key, "url": url, "sha256": digest}
+            return {"slot": slot, "status": "unchanged", "key": key, "url": url,
+                    "sha256": digest, "bytes": size}
         if self.dry_run:
             return {"slot": slot, "status": "would_upload", "key": key, "url": url, "sha256": digest}
 
@@ -414,12 +490,35 @@ class CosObjectStorage:
             wanted = {str(item) for item in slots}
             rows = [row for row in rows if row["slot"] in wanted]
 
+        version = image_publication_version(directory)
         results = [self.publish_slot(directory, row) for row in rows]
         ok = [item for item in results if item["status"] in {"uploaded", "unchanged"}]
         urls = {item["slot"]: item["url"] for item in ok if item.get("url")}
 
         written = None
         if write_urls and urls and not self.dry_run:
+            from .guided_review import slot_fingerprint
+
+            if image_publication_version(directory) != version:
+                raise CosError("图片规划或审核内容在上传期间变化，请重新核对并公开图片")
+            plan = _read_json(directory / PLAN_FILE)
+            specs = {str(row.get("slot")): row for row in
+                     list(plan.get("main_images") or []) + list(plan.get("detail_images") or [])
+                     if isinstance(row, Mapping)}
+            bindings: dict[str, Any] = {}
+            for item in ok:
+                spec = specs[item["slot"]]
+                source = (directory / spec["output_path"]).resolve()
+                if not source.is_relative_to(directory.resolve()) or not source.is_file():
+                    raise CosError("当前图片文件在上传期间变化，请重新公开图片")
+                body = source.read_bytes()
+                if hashlib.sha256(body).hexdigest() != item["sha256"] or len(body) != item["bytes"]:
+                    raise CosError("图片内容在上传期间变化，请重新审核并公开图片")
+                bindings[item["slot"]] = {
+                    "output_path": spec["output_path"], "slot_fingerprint": slot_fingerprint(spec),
+                    "sha256": item["sha256"], "size_bytes": item["bytes"],
+                    "url": item["url"], "object_key": item["key"],
+                }
             payload = {
                 "schema_version": SCHEMA_VERSION,
                 "product_id": directory.name,
@@ -431,6 +530,9 @@ class CosObjectStorage:
                 "published_at": now_iso(),
                 "note": "腾讯云 COS（官方 SDK 签名）；上传载荷只接受 https 地址",
                 "urls": urls,
+                "image_manifest_version": IMAGE_MANIFEST_VERSION,
+                **version,
+                "files": bindings,
                 "skipped_slots": [item["slot"] for item in results if item["status"] not in {"uploaded", "unchanged"}],
             }
             path = directory / URLS_FILE

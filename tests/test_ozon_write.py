@@ -298,6 +298,7 @@ class RetryPolicyTests(unittest.TestCase):
             post_import(transport, self.body(), max_attempts=3, sleep=lambda _: None)
         self.assertEqual(ctx.exception.attempts, 3)
         self.assertFalse(ctx.exception.ambiguous)
+        self.assertEqual(ctx.exception.http_status, 500)
         self.assertEqual(len(transport.calls), 3)
 
     def test_connection_error_is_not_retried_and_marked_ambiguous(self):
@@ -305,6 +306,7 @@ class RetryPolicyTests(unittest.TestCase):
         with self.assertRaises(OzonWriteError) as ctx:
             post_import(transport, self.body(), max_attempts=3, sleep=lambda _: None)
         self.assertTrue(ctx.exception.ambiguous)
+        self.assertIsNone(ctx.exception.http_status)
         self.assertEqual(len(transport.calls), 1)  # 写请求绝不盲目重试
 
     def test_4xx_other_than_429_is_not_retried(self):
@@ -313,6 +315,7 @@ class RetryPolicyTests(unittest.TestCase):
             post_import(transport, self.body(), max_attempts=3, sleep=lambda _: None)
         self.assertEqual(len(transport.calls), 1)
         self.assertFalse(ctx.exception.ambiguous)
+        self.assertEqual(ctx.exception.http_status, 400)
 
 
 class UploaderTests(unittest.TestCase):
@@ -355,6 +358,14 @@ class UploaderTests(unittest.TestCase):
         self.assertEqual(receipt["status"], "failed")
         self.assertEqual(receipt["errors"][0]["code"], "AMBIGUOUS")
         self.assertIn("人工核对", receipt["note"])
+        self.assertEqual(len(transport.calls), 1)
+
+    def test_explicit_http_status_is_preserved_for_safe_recovery(self):
+        transport = RecordingTransport([OzonHttpError("bad request", status=400)])
+        receipt = self.uploader(transport).submit(sample_payload(), store_id="default")
+        self.assertEqual(receipt["http_status"], 400)
+        self.assertFalse(receipt["ambiguous"])
+        self.assertEqual(receipt["raw_response"]["http_status"], 400)
         self.assertEqual(len(transport.calls), 1)
 
     def test_missing_credentials_raise_clear_error(self):

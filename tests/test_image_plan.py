@@ -118,6 +118,26 @@ class ImagePlanContractTests(unittest.TestCase):
         layout_types = [item["layout_type"] for item in plan["detail_images"]]
         self.assertNotIn("sku_comparison", layout_types)
 
+    def test_main_and_details_bind_only_the_selected_sku_identity(self):
+        from models.image_plan import _references_for_sku
+        references = [{"id": "sku-001", "role": "sku", "path": "input/sku-images/001-S1.jpg"},
+                      {"id": "sku-002", "role": "sku", "path": "input/sku-images/002-S10.jpg"}]
+        self.assertEqual([ref["id"] for ref in _references_for_sku({"sku_id": "S1"}, references)], ["sku-001"])
+        source = json.loads((self.product_dir / "input/source.json").read_text(encoding="utf-8"))
+        source["skus"] = [source["skus"][0]]
+        source["skus"][0]["image_path"] = "input/sku-images/01.png"
+        plan = build_image_plan(product_dir=self.product_dir, source=source, source_refs=["input/source.json"],
+                                copy_bundle={"core_keyword": "термос"})
+        self.assertEqual(plan["main_images"][0]["reference_image_ids"], ["sku-001"])
+        for slot in plan["detail_images"]:
+            self.assertEqual(slot["reference_image_ids"], ["sku-001"])
+
+    def test_unknown_sku_image_order_is_not_identity_evidence(self):
+        plan = self._plan()
+        for slot in plan["main_images"]:
+            self.assertEqual(slot["reference_image_ids"], [])
+            self.assertEqual(slot["operation"], "needs_human_input")
+
     def test_reference_images_only_from_input(self):
         plan = self._plan()
         roles = {item["role"] for item in plan["reference_images"]}
@@ -286,6 +306,11 @@ class ImagePlanHandlerTests(unittest.TestCase):
             "measurements": stub("measurements"),
             "field_completion": stub("field_completion"),
         }
+        source_file = self.product_dir / "input/source.json"
+        source = json.loads(source_file.read_text(encoding="utf-8"))
+        for index, sku in enumerate(source["skus"], 1):
+            sku["image_path"] = f"input/sku-images/{index:02d}.png"
+        source_file.write_text(json.dumps(source), encoding="utf-8")
         report = run_product(self.product_dir, handlers=handlers, provider=self.provider, step_budget=20)
 
         self.assertIn("image_plan", report["completed_steps"])

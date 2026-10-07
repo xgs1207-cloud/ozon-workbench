@@ -115,6 +115,7 @@ def plan_images(product_id: str, request: GenerateRequest):
 class StoreRequest(BaseModel):
     store: str | None = None
     confirm: str | None = None
+    retry_rejected: bool = False
 
 
 @router.post("/guided/prepare-card")
@@ -181,8 +182,10 @@ def submit(product_id: str, request: StoreRequest):
     directory = directory_for(product_id, edit=False)
     if request.confirm != "SUBMIT":
         raise HTTPException(400, "提交会写入真实 Ozon 店铺，需要确认 SUBMIT")
-    return {"ok": True, "report": run_service(submit_listing, directory,
-                                              shop=api._store_for(directory, request.store))}
+    report = run_service(submit_listing, directory,
+                         shop=api._store_for(directory, request.store),
+                         retry_rejected=request.retry_rejected)
+    return {"ok": bool(report.get("ok")), "report": report}
 
 
 @router.get("/videos")

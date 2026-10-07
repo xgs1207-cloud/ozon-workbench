@@ -144,22 +144,59 @@ def canonical_listing(directory: Path, *, shop: str) -> dict[str, Any]:
     return payload
 
 
-def submit_listing(directory: Path, *, shop: str) -> dict[str, Any]:
+def submission_editable(directory: Path | str) -> bool:
+    """Only an explicitly rejected, never-created submission may be edited.
+
+    Keep the attempt receipt: permission is derived from its structured outcome,
+    never from deleting a lock file or treating a timeout as rejection.
+    """
+    from .publications import load_publications
+    from .status import load_status
+    directory = Path(directory)
+    attempt_path = directory / "runtime/listing-submit-attempt.json"
+    if not attempt_path.is_file():
+        return int(load_status(directory).get("api_write_count") or 0) == 0
+    attempt = read_json(attempt_path)
+    if attempt.get("state") != "rejected" or attempt.get("safe_to_retry") is not True:
+        return False
+    entries = load_publications(directory).get("stores") or {}
+    return not any(entry.get("task_id") or any(row.get("task_id") or row.get("ozon_product_id")
+        for row in entry.get("sku_publications") or []) for entry in entries.values())
+
+
+def submit_listing(directory: Path, *, shop: str, retry_rejected: bool = False) -> dict[str, Any]:
     from .guided_review import status as review_status
     from .preflight import preflight
     from .upload import upload_product
     from .ozon_write import OzonWriteUploader
     from .publications import load_publications
+    from .ozon_status import confirm_product
 
     with product_edit_lock(directory):
         previous = load_publications(directory).get("stores", {}).get(shop, {})
-        if previous.get("task_id") or any(row.get("task_id") for row in previous.get("sku_publications", [])):
-            return {"status": "already_submitted", "publication": previous, "api_writes": 0}
+        receipt_dir = directory / "output/store-runs" / shop
+        receipt_task = (read_json(receipt_dir / "submission-receipt.json").get("task_id")
+                        or read_json(receipt_dir / "ozon-result.json").get("task_id"))
+        known_task = previous.get("task_id") or next((row.get("task_id")
+            for row in previous.get("sku_publications", []) if row.get("task_id")), None) or receipt_task
+        if str(known_task or "").isdigit() and int(known_task) > 0:
+            # A repeated click reconciles the existing task; it never writes a
+            # second import merely because polling was slow or failed earlier.
+            confirmation = confirm_product(directory, shop, max_attempts=1, interval_seconds=0)
+            return {"ok": bool(confirmation.get("ok")), "status": "already_submitted",
+                "publication": load_publications(directory).get("stores", {}).get(shop, {}),
+                "reconciliation": confirmation, "api_writes": 0}
         # An ambiguous result is never retried automatically.
         attempt = directory / "runtime/listing-submit-attempt.json"
-        if attempt.is_file():
-            raise ValueError("此商品已有提交尝试，请先回读 Ozon 结果，不要重复提交")
-        canonical_listing(directory, shop=shop)
+        previous_attempt = read_json(attempt) if attempt.is_file() else {}
+        if previous_attempt and not (retry_rejected and previous_attempt.get("shop") == shop
+                                     and submission_editable(directory)):
+            raise ValueError("此商品已有提交尝试，请先回读 Ozon 结果；明确拒绝后须修正资料并确认重试")
+        payload = canonical_listing(directory, shop=shop)
+        fingerprint = hashlib.sha256(json.dumps({key: value for key, value in payload.items()
+            if key != "generated_at"}, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        if previous_attempt and previous_attempt.get("request_sha256") == fingerprint:
+            raise ValueError("拒绝后的资料尚未改变，请先修正错误，不可原样重复提交")
         review = review_status(directory)
         if not review["ready_to_preflight"]:
             raise ValueError("；".join(review["blockers"][:8]))
@@ -167,18 +204,36 @@ def submit_listing(directory: Path, *, shop: str) -> dict[str, Any]:
         if not checked.get("ok"):
             raise ValueError("提交前预检未通过：" + "；".join([
                 *checked.get("problems", []), *checked.get("production_blockers", [])][:8]))
-        write_json(attempt, {"shop": shop, "state": "started", "no_automatic_retry": True})
+        if previous_attempt:
+            old_hash = hashlib.sha256(json.dumps(previous_attempt, sort_keys=True,
+                ensure_ascii=False).encode()).hexdigest()
+            write_json(directory / "runtime/listing-submit-history" / f"{old_hash}.json", previous_attempt)
+        write_json(attempt, {"shop": shop, "state": "started", "request_sha256": fingerprint,
+                             "safe_to_retry": False, "no_automatic_retry": True})
         try:
             result = upload_product(directory, [shop], OzonWriteUploader(), upload_mode="production",
                                     enabled_store_ids=[shop])
         except Exception:
-            write_json(attempt, {"shop": shop, "state": "unknown_requires_readback", "no_automatic_retry": True})
+            write_json(attempt, {"shop": shop, "state": "unknown_requires_readback",
+                "request_sha256": fingerprint, "safe_to_retry": False, "no_automatic_retry": True})
             raise ValueError("提交结果未确定，已暂停重试；请回读 Ozon 导入结果") from None
         from .status import load_status, save_status
         current = load_status(directory)
         current["api_write_count"] = int(current.get("api_write_count") or 0) + int(result.get("api_writes") or 0)
-        current["guided_submit_state"] = "submitted" if result.get("submitted") else "requires_readback"
+        store_result = (result.get("stores") or {}).get(shop, {})
+        outcome = store_result.get("outcome") or (
+            "processing" if result.get("submitted") else "unknown_requires_readback")
+        confirmation_status = (store_result.get("confirmation") or {}).get("status")
+        if confirmation_status == "created":
+            outcome = "imported"
+        safe_to_retry = bool(outcome == "rejected" and store_result.get("safe_to_retry") is True
+                             and not store_result.get("task_id"))
+        result["ok"] = bool(result.get("ok", result.get("submitted") and not result.get("failed")))
+        result["state"] = outcome
+        result["safe_to_retry"] = safe_to_retry
+        current["guided_submit_state"] = outcome
         save_status(directory, current)
         write_json(directory / "output/upload-summary.json", result)
-        write_json(attempt, {"shop": shop, "state": "finished", "report": result, "no_automatic_retry": True})
+        write_json(attempt, {"shop": shop, "state": outcome, "request_sha256": fingerprint,
+            "safe_to_retry": safe_to_retry, "report": result, "no_automatic_retry": True})
         return result

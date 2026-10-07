@@ -23,6 +23,7 @@ class ListingDraftSubmissionTests(unittest.TestCase):
             patch("pipeline.guided_review.status", return_value={"ready_to_preflight": True}),
             patch("pipeline.preflight.preflight", return_value={"ok": True}),
             patch("pipeline.ozon_write.OzonWriteUploader", return_value=object()),
+            patch("pipeline.ozon_status.confirm_product", return_value={"ok": True, "stores": {}}),
         ]
         for item in self.patches:
             item.start()
@@ -33,14 +34,15 @@ class ListingDraftSubmissionTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_success_records_one_write_and_receipt_prevents_repeat(self):
-        response = {"submitted": 1, "api_writes": 1, "stores": [{"store_id": "qa-store", "task_id": 123}]}
+        response = {"submitted": 1, "api_writes": 1, "stores": {"qa-store": {"task_id": 123}}}
         with patch("pipeline.publications.load_publications", side_effect=[{}, {
+            "stores": {"qa-store": {"task_id": 123}}}, {
             "stores": {"qa-store": {"task_id": 123}}}]), patch(
                 "pipeline.upload.upload_product", return_value=response) as uploader:
             first = submit_listing(self.directory, shop="qa-store")
             self.assertEqual(first["api_writes"], 1)
             self.assertEqual(read_json(self.directory / "status.json")["api_write_count"], 1)
-            self.assertEqual(read_json(self.directory / "runtime/listing-submit-attempt.json")["state"], "finished")
+            self.assertEqual(read_json(self.directory / "runtime/listing-submit-attempt.json")["state"], "processing")
             second = submit_listing(self.directory, shop="qa-store")
             self.assertEqual(second["status"], "already_submitted")
             self.assertEqual(second["api_writes"], 0)

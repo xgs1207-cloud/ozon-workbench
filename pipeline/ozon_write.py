@@ -54,12 +54,14 @@ FORBIDDEN_FIELD_PATTERN = re.compile(r'"(stock|stocks|inventory|warehouse|wareho
 class OzonWriteError(RuntimeError):
     """写请求的确定性失败（已重试或不该重试）。"""
 
-    def __init__(self, message: str, *, ambiguous: bool = False, attempts: int = 1, raw: Any = None) -> None:
+    def __init__(self, message: str, *, ambiguous: bool = False, attempts: int = 1,
+                 raw: Any = None, http_status: int | None = None) -> None:
         super().__init__(message)
         #: True 表示"结果未知"（连接层异常），调用方必须人工核对而不是重试
         self.ambiguous = ambiguous
         self.attempts = attempts
         self.raw = raw
+        self.http_status = http_status
 
 
 # --------------------------------------------------------------------- 请求构建
@@ -417,6 +419,7 @@ def post_import(
         f"提交失败（HTTP {last_error.status}，尝试 {attempts} 次）：{last_error}",
         attempts=attempts,
         raw=last_error.body,
+        http_status=last_error.status,
     )
 
 
@@ -480,9 +483,12 @@ class OzonWriteUploader:
                 "task_id": None,
                 "api_writes_performed": True,
                 "api_writes": int(error.attempts),
+                "ambiguous": error.ambiguous,
+                "http_status": error.http_status,
                 "items": [],
                 "errors": [{"code": "AMBIGUOUS" if error.ambiguous else "OZON_HTTP_ERROR", "message": str(error)}],
-                "raw_response": {"ambiguous": error.ambiguous, "attempts": error.attempts, "raw": error.raw},
+                "raw_response": {"ambiguous": error.ambiguous, "attempts": error.attempts,
+                                 "http_status": error.http_status, "raw": error.raw},
                 "note": "结果未知：请人工核对" if error.ambiguous else "Ozon 拒绝了本次提交（已按策略重试）",
             }
 

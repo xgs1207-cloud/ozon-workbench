@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
@@ -75,8 +77,80 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 def _write_json(path: Path, payload: Any) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2, allow_nan=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
     return path
+
+
+def _persist_submission_receipt(directory: Path, store_id: str, payload: Mapping[str, Any],
+                                receipt: Mapping[str, Any]) -> None:
+    """Save the recoverable task before polling; task-only responses are normal."""
+    task = str(receipt.get("task_id") or "") or None
+    if not task:
+        return
+    request_hash = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False,
+        default=str).encode()).hexdigest()
+    _write_json(directory / "output/store-runs" / store_id / "submission-receipt.json", {
+        "schema_version": SCHEMA_VERSION, "shop_name": store_id, "task_id": task,
+        "request_sha256": request_hash, "received_at": now_iso(),
+        "expected_offers": [{"source_sku_id": str(row.get("source_sku_id") or ""),
+                             "offer_id": str(row.get("offer_id") or "")}
+                            for row in payload.get("variants") or [] if isinstance(row, Mapping)],
+        "api_writes": int(receipt.get("api_writes") or 0),
+    })
+    ledger = load_publications(directory)
+    entry = ledger.setdefault("stores", {}).setdefault(store_id,
+        {"selected": True, "status": "processing", "sku_publications": []})
+    rows = {str(row.get("sku_id")): dict(row) for row in entry.get("sku_publications") or []
+            if isinstance(row, Mapping) and str(row.get("sku_id")) != "*"}
+    returned = {str(row.get("offer_id")): row for row in receipt.get("items") or []
+                if isinstance(row, Mapping)}
+    for variant in payload.get("variants") or []:
+        if not isinstance(variant, Mapping):
+            continue
+        sku, offer = str(variant.get("source_sku_id") or ""), str(variant.get("offer_id") or "")
+        item = returned.get(offer) or {}
+        product = item.get("product_id")
+        rows[sku] = {"sku_id": sku, "offer_id": offer, "task_id": task,
+            "ozon_product_id": str(product) if product else None,
+            "status": "pending", "errors": list(item.get("errors") or [])}
+    entry.update(task_id=task, status="processing", sku_publications=list(rows.values()),
+                 submission_outcome="processing", safe_to_retry=False)
+    ledger["updated_at"] = now_iso()
+    _write_json(directory / "output/store-publications.json", ledger)
+
+
+def _receipt_outcome(receipt: Mapping[str, Any]) -> str:
+    """Do not call an empty/uncertain receipt a successful submission."""
+    if receipt.get("task_id"):
+        return "processing"
+    errors = [row for row in receipt.get("errors") or [] if isinstance(row, Mapping)]
+    codes = {str(row.get("code") or "") for row in errors}
+    if "AMBIGUOUS" in codes or "OZON_EMPTY_RESPONSE" in codes:
+        return "unknown_requires_readback"
+    raw = receipt.get("raw_response") or {}
+    if isinstance(raw, Mapping) and raw.get("ambiguous") is True:
+        return "unknown_requires_readback"
+    http_status = receipt.get("http_status")
+    if http_status in {400, 401, 403, 404, 422}:
+        return "rejected"
+    if receipt.get("status") in {"failed", "rejected"}:
+        # A 5xx is not evidence that the create/update did not reach Ozon.
+        return "rejected" if not receipt.get("api_writes_performed") else "unknown_requires_readback"
+    if receipt.get("status") in {"created", "updated"} and receipt.get("items"):
+        return str(receipt["status"])
+    if not receipt.get("api_writes_performed"):
+        return "skipped"
+    return "unknown_requires_readback"
 
 
 def offer_id_for(product_id: str, sku: Mapping[str, Any], index: int) -> str:
@@ -597,6 +671,13 @@ def upload_product(
 
     for row in plan:
         store_id = str(row["store_id"])
+        previous_store = load_publications(directory).get("stores", {}).get(store_id, {})
+        if previous_store.get("submission_outcome") in {"unknown_requires_readback", "started"}:
+            failed += 1
+            results[store_id] = {"action": "blocked", "status": "failed", "ok": False,
+                "outcome": "unknown_requires_readback", "api_writes": 0,
+                "reason": "此前提交结果未知，须先只读核对，不能自动再次写入"}
+            continue
         if row["action"] == ACTION_SKIP:
             skipped += 1
             results[store_id] = {"action": "skip", "status": "skipped", "reason": row["reason"]}
@@ -637,11 +718,22 @@ def upload_product(
             )
             continue
 
+        if upload_mode == UPLOAD_MODE_PRODUCTION:
+            # Persist in-flight intent before crossing the network boundary.
+            # A process crash after Ozon receives the body must not make a
+            # future CLI run look like a never-submitted product.
+            ledger = load_publications(directory)
+            entry = ledger.setdefault("stores", {}).setdefault(store_id,
+                {"selected": True, "status": "not_started", "sku_publications": []})
+            entry.update(status="uploading", submission_outcome="started", safe_to_retry=False)
+            ledger["updated_at"] = now_iso()
+            _write_json(directory / "output/store-publications.json", ledger)
         try:
             receipt = uploader.submit(payload, store_id=store_id)
         except Exception as error:  # 单店失败隔离
             failed += 1
-            results[store_id] = {"action": "create", "status": "failed", "reason": str(error)}
+            results[store_id] = {"action": "create", "status": "failed", "reason": str(error),
+                "ok": False, "outcome": "unknown_requires_readback", "safe_to_retry": False}
             _write_json(
                 run_dir / "ozon-result.json",
                 _result_document(
@@ -655,9 +747,16 @@ def upload_product(
                 ),
             )
             record_publication(directory, store_id, sku_id="*", status="failed", errors=[{"message": str(error)}])
+            if upload_mode == UPLOAD_MODE_PRODUCTION:
+                ledger = load_publications(directory)
+                ledger["stores"][store_id]["submission_outcome"] = "unknown_requires_readback"
+                ledger["stores"][store_id]["safe_to_retry"] = False
+                ledger["updated_at"] = now_iso()
+                _write_json(directory / "output/store-publications.json", ledger)
             continue
 
         task_id = receipt.get("task_id")
+        outcome = _receipt_outcome(receipt)
         status = str(receipt.get("status") or "submitted")
         if upload_mode == UPLOAD_MODE_PRODUCTION and not receipt.get("api_writes_performed"):
             # 危险配置保护：production 模式下 uploader 必须声明发生了写请求
@@ -680,6 +779,7 @@ def upload_product(
                 directory, store_id, sku_id="*", status="failed", errors=[{"message": reason}]
             )
             continue
+        _persist_submission_receipt(directory, store_id, payload, receipt)
         items = [
             {
                 "source_sku_id": str(item.get("source_sku_id") or ""),
@@ -701,14 +801,22 @@ def upload_product(
                 status="submitted" if task_id else status,
                 errors=item.get("errors") or [],
             )
-        if not items:
+        if not items and not task_id:
             record_publication(
                 directory,
                 store_id,
                 sku_id="*",
-                status="submitted" if task_id else status,
-                errors=[],
+                status="failed" if outcome in {"rejected", "unknown_requires_readback"} else status,
+                errors=list(receipt.get("errors") or []),
             )
+        if not task_id:
+            ledger = load_publications(directory)
+            entry = ledger.setdefault("stores", {}).setdefault(store_id,
+                {"selected": True, "status": "failed", "sku_publications": []})
+            entry["submission_outcome"] = outcome
+            entry["safe_to_retry"] = outcome == "rejected" and receipt.get("http_status") in {400, 401, 403, 404, 422}
+            ledger["updated_at"] = now_iso()
+            _write_json(directory / "output/store-publications.json", ledger)
         _write_json(
             run_dir / "ozon-result.json",
             _result_document(
@@ -723,6 +831,8 @@ def upload_product(
         )
         if task_id:
             submitted += 1
+        elif outcome in {"rejected", "unknown_requires_readback"}:
+            failed += 1
         else:
             skipped += 1
         results[store_id] = {
@@ -732,6 +842,10 @@ def upload_product(
             "api_writes_performed": bool(receipt.get("api_writes_performed")),
             "api_writes": int(receipt.get("api_writes") or 0),
             "note": receipt.get("note"),
+            "outcome": outcome,
+            "ok": outcome in {"processing", "created", "updated", "skipped"},
+            "errors": list(receipt.get("errors") or []),
+            "safe_to_retry": outcome == "rejected" and receipt.get("http_status") in {400, 401, 403, 404, 422},
         }
 
         # 拿到 task_id 后确认最终状态（只读；失败不影响"已提交"这个事实）
@@ -759,10 +873,17 @@ def upload_product(
                 "counts": applied["counts"],
                 "error": confirmation.get("error"),
             }
+            if applied["status"] == "failed":
+                results[store_id]["ok"] = False
+                results[store_id]["outcome"] = "rejected"
+            elif confirmation.get("error"):
+                results[store_id]["outcome"] = "requires_readback"
 
     payload_ref = load_publications(directory)
-    save_publications(directory, payload_ref)
+    payload_ref["updated_at"] = now_iso()
+    _write_json(directory / "output/store-publications.json", payload_ref)
     return {
+        "ok": not failed and all(row.get("ok", row.get("status") != "failed") for row in results.values()),
         "schema_version": SCHEMA_VERSION,
         "product_id": product_id,
         "uploader": getattr(uploader, "name", "unknown"),

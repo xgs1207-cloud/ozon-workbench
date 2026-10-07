@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -49,7 +51,17 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 def _write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2, allow_nan=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 # --------------------------------------------------------------------- 解析
@@ -79,18 +91,29 @@ def parse_import_info(
                 "code": str(item.get("code") or "OZON_ITEM_ERROR"),
                 "message": str(item.get("message") or ""),
                 "attribute_id": item.get("attribute_id"),
+                "level": item.get("level"),
+                "field": item.get("field"),
+                "description": item.get("description"),
             }
             for item in (raw.get("errors") or [])
             if isinstance(item, Mapping)
         ]
         status = str(raw.get("status") or "unknown").strip().lower()
         product_id = raw.get("product_id")
+        # An "imported" label cannot erase an attached error. Preserve the raw
+        # label for diagnosis; only a clean item counts as imported.
+        blocking_errors = [item for item in item_errors
+            if str(item.get("level") or "").casefold() not in {"warning", "warn", "info", "information"}]
+        effective_status = "failed" if status == "imported" and blocking_errors else status
+        if effective_status == "imported" and not (type(product_id) is int and product_id > 0):
+            effective_status = "unknown"
         items.append(
             {
                 "source_sku_id": offer_to_sku.get(offer_id) or offer_id or "unknown",
                 "offer_id": offer_id or "unknown",
                 "product_id": int(product_id) if isinstance(product_id, int) and product_id > 0 else None,
-                "status": status,
+                "status": effective_status,
+                "raw_status": status,
                 "errors": item_errors,
             }
         )
@@ -107,7 +130,16 @@ def parse_import_info(
         for item in items
         if item["status"] not in TERMINAL_ITEM_STATUSES and item["status"] not in PENDING_ITEM_STATUSES
     ]
-    terminal = bool(items) and counts["pending"] == 0 and not unknown
+    returned_offers = [item["offer_id"] for item in items]
+    expected_offers = set(offer_to_sku)
+    missing_offers = sorted(expected_offers - set(returned_offers))
+    unexpected_offers = sorted(set(returned_offers) - expected_offers) if expected_offers else []
+    duplicate_offers = sorted(offer for offer in set(returned_offers) if returned_offers.count(offer) > 1)
+    total = result.get("total")
+    reported_total = total if type(total) is int and total >= 0 else None
+    incomplete_total = reported_total is not None and reported_total != len(items)
+    terminal = bool(items) and counts["pending"] == 0 and not unknown and not (
+        missing_offers or unexpected_offers or duplicate_offers or incomplete_total)
     return {
         "task_id": str(task_id) if task_id not in (None, "", 0) else None,
         "items": items,
@@ -115,6 +147,11 @@ def parse_import_info(
         "counts": counts,
         "unknown_statuses": sorted(set(unknown)),
         "terminal": terminal,
+        "missing_offers": missing_offers,
+        "unexpected_offers": unexpected_offers,
+        "duplicate_offers": duplicate_offers,
+        "reported_total": reported_total,
+        "response_complete": not (missing_offers or unexpected_offers or duplicate_offers or incomplete_total),
     }
 
 
@@ -169,6 +206,8 @@ def confirm_task(
         "counts": parsed.get("counts") or {"total": 0, "imported": 0, "failed": 0, "pending": 0},
         "errors": parsed.get("errors") or [],
         "unknown_statuses": parsed.get("unknown_statuses") or [],
+        "missing_offers": parsed.get("missing_offers") or [],
+        "response_complete": parsed.get("response_complete", False),
         "history": history,
         "raw_response": dict(raw_response) if isinstance(raw_response, Mapping) else None,
         "checked_at": now_iso(),
@@ -251,23 +290,31 @@ def apply_confirmation(
     payload = load_publications(directory)
     entry = (payload.get("stores") or {}).get(store_id) or {}
     rows = entry.get("sku_publications") or []
+    if items:
+        # Old task-only ledgers used a '*' placeholder. Once real offers are
+        # available it must not prevent an otherwise complete task becoming
+        # terminal, or be mistaken for another submitted SKU.
+        rows = [row for row in rows if str(row.get("sku_id") or "") != "*"]
+        entry["sku_publications"] = rows
     statuses = {str(row.get("status") or "") for row in rows}
     imported = counts.get("imported") or 0
     failed = counts.get("failed") or 0
-    if rows and statuses and statuses <= {"imported"}:
+    if confirmation.get("error") or not confirmation.get("terminal"):
+        store_status = "processing"
+    elif rows and statuses and statuses <= {"imported"}:
         store_status = "created"
     elif failed and not imported:
         store_status = "failed"
-    elif confirmation.get("timed_out"):
-        store_status = "processing"
     elif imported:
         store_status = "partially_created"
     else:
         store_status = entry.get("status") or "submitted"
     entry["status"] = store_status
+    entry["task_id"] = resolved_task
     entry["import_confirmed_at"] = confirmation.get("checked_at") or now_iso()
     entry["import_counts"] = counts
-    save_publications(directory, payload)
+    payload["updated_at"] = now_iso()
+    _write_json(directory / "output/store-publications.json", payload)
 
     result_path = run_dir / "ozon-result.json"
     if result_path.is_file():
@@ -299,6 +346,9 @@ def apply_confirmation(
         "counts": counts,
         "terminal": bool(confirmation.get("terminal")),
         "items": items,
+        "ok": store_status not in {"failed"} and not bool(confirmation.get("error")),
+        "error": confirmation.get("error"),
+        "missing_offers": list(confirmation.get("missing_offers") or []),
     }
 
 
@@ -331,10 +381,15 @@ def confirm_product(
     for target in targets:
         entry = stores.get(target) or {}
         payload = _read(directory / "output" / "store-runs" / str(target) / "payload.json")
-        resolved = task_id or next(
+        run_dir = directory / "output/store-runs" / str(target)
+        receipt = _read(run_dir / "submission-receipt.json")
+        legacy_result = _read(run_dir / "ozon-result.json")
+        resolved = task_id or entry.get("task_id") or receipt.get("task_id") or next(
             (str(row.get("task_id")) for row in (entry.get("sku_publications") or []) if row.get("task_id")),
             None,
-        )
+        ) or legacy_result.get("task_id")
+        if str(resolved or "").strip() in {"", "unknown", "0"}:
+            resolved = None
         if not resolved:
             results[target] = {"status": "skipped", "reason": "该店铺没有 task_id（还没提交成功）"}
             continue
@@ -360,6 +415,7 @@ def confirm_product(
             directory, store_id=target, confirmation=confirmation, task_id=resolved
         )
     return {
+        "ok": bool(results) and all(row.get("ok", False) for row in results.values()),
         "schema_version": SCHEMA_VERSION,
         "product_id": directory.name,
         "checked_at": now_iso(),

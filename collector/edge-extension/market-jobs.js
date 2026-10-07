@@ -135,10 +135,7 @@ async function selectMarketKeywordCategory(categoryId) {
 }
 
 async function marketJobTabMessage(tabId, message) {
-    const tab = await chrome.tabs.get(tabId);
-    if (!/^https:\/\/(?:www\.)?seerfar\.cn\/admin\//.test(tab.url || ''))
-        throw new Error('采集页面已关闭或离开 Seerfar；已停止');
-    return chrome.tabs.sendMessage(tabId, message);
+    return sendSeerfarTabMessage(tabId, message);
 }
 
 async function marketJobStopped() {

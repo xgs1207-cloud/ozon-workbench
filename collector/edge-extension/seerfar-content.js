@@ -1,3 +1,14 @@
+(() => {
+const bridgeVersion = '0.4.31';
+const previousBridge = globalThis.__seerfarMarketBridge;
+try {
+    if (previousBridge?.version === bridgeVersion && previousBridge.isCurrent?.()) return;
+} catch { /* a saved closure may belong to an invalidated extension context */ }
+// A statically declared script and manual recovery may race. Scope lexical
+// bindings locally and register only one listener in this extension world.
+if (previousBridge?.listener) {
+    try { chrome.runtime.onMessage.removeListener(previousBridge.listener); } catch { /* old extension context */ }
+}
 const SEERFAR_POLL_INTERVAL_MS = 5000;
 let seerfarBusy = false;
 let marketPageStopRequested = false;
@@ -146,7 +157,11 @@ function captureVisibleMarketTable() {
         ? "已找到 Seerfar 报表表头，但未找到相同列数的数据行；请等待加载完成或反馈页面结构"
         : "未找到匹配表格；请先打开 Seerfar 类目、关键词或商品报表并等待加载完成" };
 }
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+const marketMessageListener = (message, _sender, sendResponse) => {
+    if (message?.type === 'SEERFAR_MARKET_PING') {
+        sendResponse({ ready: true, version: bridgeVersion });
+        return false;
+    }
     if (message?.type === "SEERFAR_MARKET_CAPTURE") {
         marketPageStopRequested = false;
         sendResponse(captureVisibleMarketTable());
@@ -170,7 +185,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         return true;
     }
     return undefined;
-});
+};
+chrome.runtime.onMessage.addListener(marketMessageListener);
+const runtimeId = chrome.runtime.id;
+globalThis.__seerfarMarketBridge = { version: bridgeVersion, listener: marketMessageListener,
+    isCurrent: () => chrome.runtime.id === runtimeId };
 
 async function waitForMarketSnapshot(dataset) {
     const deadline = Date.now() + 20000;
@@ -633,3 +652,4 @@ async function pollSeerfarJob() {
 }
 // Search-visibility jobs have no matching API in this workbench yet. Do not
 // poll a nonexistent endpoint every five seconds from each Seerfar tab.
+})();

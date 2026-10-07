@@ -290,6 +290,8 @@ async function getActiveTab() {
     return tabs[0];
 }
 function sendToTab(tabId, message) {
+    if (message?.type?.startsWith('SEERFAR_MARKET_'))
+        return sendSeerfarTabMessage(tabId, message);
     return new Promise((resolve, reject) => {
         chrome.tabs.sendMessage(tabId, message, (response) => {
             const err = chrome.runtime.lastError;
@@ -629,7 +631,6 @@ els.captureMarket.addEventListener("click", async () => {
         els.progress.textContent = received
             ? `采集中断：已提交 ${received} 行、新入库 ${inserted} 行；后续页面未处理`
             : "市场报表入库失败";
-        els.marketTokenStatus.textContent = safeError;
         setResult({ error: safeError, pages, received, inserted });
     }
     finally {

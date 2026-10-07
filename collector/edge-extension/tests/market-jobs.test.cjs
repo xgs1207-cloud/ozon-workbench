@@ -5,11 +5,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '../market-jobs.js'), 'utf8');
 
-function harness({ origin = 'http://127.0.0.1:8766', failUpload = false, stopUpload = false } = {}) {
+function harness({ origin = 'http://127.0.0.1:8766', failUpload = false, stopUpload = false, missingReceiver = false } = {}) {
     const stored = { marketIngestToken: 'qa-private-token' }, requests = [], listeners = [], nexts = [];
     const category = (id) => ({ '类目': `类目${id}\nкатегория`, '销量': '100', '销售额': '10000',
         '类目链接': [`https://www.seerfar.cn/admin/category-detail?categoryId=${id}&platform=OZON`] });
     let page = 0, keywordPage = 0, selected = '';
+    let receiverReady = !missingReceiver, injections = 0;
     const snapshot = (dataset, records, route) => ({ dataset, records,
         page_url: `https://www.seerfar.cn/admin/${route}`, captured_at: '2026-10-07T00:00:00Z' });
     const cat = () => snapshot('categories', [category(page ? '22' : '11')], 'category-search');
@@ -40,6 +41,10 @@ function harness({ origin = 'http://127.0.0.1:8766', failUpload = false, stopUpl
                 create: async () => { keywordPage = 0; return { id: 2 }; },
                 update: async () => { keywordPage = 0; },
                 sendMessage: async (id, msg) => {
+                    if (msg.type === 'SEERFAR_MARKET_PING') {
+                        if (!receiverReady) throw new Error('Could not establish connection. Receiving end does not exist.');
+                        return { ready: true, version: '0.4.31' };
+                    }
                     if (msg.type === 'SEERFAR_MARKET_NEXT_PAGE') {
                         nexts.push(id);
                         if (id === 1) page++; else keywordPage++;
@@ -48,12 +53,14 @@ function harness({ origin = 'http://127.0.0.1:8766', failUpload = false, stopUpl
                     return id === 1 ? cat() : key();
                 },
             },
-            scripting: { executeScript: async ({ func, args }) => {
+            scripting: { executeScript: async ({ func, args, files }) => {
+                if (files) { injections++; receiverReady = true; return [{}]; }
                 if (func.name === 'selectMarketKeywordCategory') { selected = args[0]; return [{ result: { selected: true, categoryId: selected } }]; }
                 return [{ result: true }];
             } },
         },
     });
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '../seerfar-bridge.js'), 'utf8'), context);
     vm.runInContext(source, context);
     async function settle() {
         for (let i = 0; i < 100; i++) {
@@ -62,7 +69,7 @@ function harness({ origin = 'http://127.0.0.1:8766', failUpload = false, stopUpl
         }
         throw new Error('job did not settle');
     }
-    return { context, stored, requests, nexts, settle,
+    return { context, stored, requests, nexts, settle, injections: () => injections,
         start: () => vm.runInContext(`startMarketJob({tabId:1,period:'2026-09',maxPages:2,keywordPages:2,maxCategories:2})`, context),
         run: () => vm.runInContext('runMarketJob()', context),
         advanceSource: () => { page = 1; },
@@ -123,6 +130,16 @@ test('background refuses public HTTP before sending any token', async () => {
     const h = harness({ origin: 'http://43.132.190.110:8088' });
     await assert.rejects(h.start(), /公网 HTTP/);
     assert.equal(h.requests.length, 0);
+});
+
+test('background reconnects a missing category receiver then finishes the keyword chain', async () => {
+    const h = harness({ missingReceiver: true });
+    await h.start();
+    const job = await h.settle();
+    assert.equal(job.status, 'done');
+    assert.equal(job.pages, 6);
+    assert.equal(h.injections(), 1);
+    assert.equal(h.nexts.length, 3);
 });
 
 test('stop during upload prevents subsequent page clicks and preserves a checkpoint', async () => {

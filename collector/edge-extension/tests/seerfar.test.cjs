@@ -5,7 +5,13 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const extensionRoot = path.resolve(__dirname, '..');
-const read = (name) => fs.readFileSync(path.join(extensionRoot, name), 'utf8');
+const read = (name) => {
+    const source = fs.readFileSync(path.join(extensionRoot, name), 'utf8');
+    // Expose parser seams only inside these VM tests; the browser content
+    // script keeps its parser/state private inside an idempotent closure.
+    return name === 'seerfar-content.js' ? source.replace(/\}\)\(\);\s*$/,
+        'Object.assign(globalThis, {captureVisibleMarketTable, advanceMarketPage, marketPager});})();') : source;
+};
 
 function settingsContext(name, cutoff, chrome = {}) {
     const source = read(name);
@@ -359,7 +365,7 @@ test('popup deduplicates repeated rows and splits uploads below the size cap', (
     assert.deepEqual({ ...result, chunks: Array.from(result.chunks) }, { first: 2, second: 1, chunks: [1, 1] });
 });
 
-test('user-started popup capture uploads two pages and obeys the configured cap', async () => {
+test('user-started popup recovers a missing receiver, uploads two pages and obeys the cap', async () => {
     const elements = new Map();
     const element = (id) => {
         if (!elements.has(id))
@@ -380,6 +386,7 @@ test('user-started popup capture uploads two pages and obeys the configured cap'
     ];
     const messages = [];
     const uploaded = [];
+    let receiverReady = false, injections = 0;
     const chrome = {
         storage: { local: {
             get: async (keys) => Object.fromEntries(keys.map((key) => [key, stored[key]])),
@@ -387,14 +394,20 @@ test('user-started popup capture uploads two pages and obeys the configured cap'
         } },
         tabs: {
             query: async () => [{ id: 1, url: 'https://www.seerfar.cn/admin/market' }],
-            sendMessage: (_tabId, message, callback) => {
+            get: async () => ({ id: 1, url: 'https://www.seerfar.cn/admin/market' }),
+            sendMessage: async (_tabId, message) => {
+                if (message.type === 'SEERFAR_MARKET_PING') {
+                    if (!receiverReady) throw new Error('Could not establish connection. Receiving end does not exist.');
+                    return { ready: true, version: '0.4.31' };
+                }
                 messages.push(message.type);
-                callback(message.type === 'SEERFAR_MARKET_CAPTURE' ? snapshots[0]
+                return message.type === 'SEERFAR_MARKET_CAPTURE' ? snapshots[0]
                     : message.type === 'SEERFAR_MARKET_NEXT_PAGE'
-                        ? { advanced: true, snapshot: snapshots[1] } : { stopped: true });
+                        ? { advanced: true, snapshot: snapshots[1] } : { stopped: true };
             },
         },
         runtime: { lastError: null },
+        scripting: { executeScript: async () => { injections++; receiverReady = true; } },
     };
     const context = vm.createContext({
         URL, TextEncoder, btoa, chrome,
@@ -408,10 +421,12 @@ test('user-started popup capture uploads two pages and obeys the configured cap'
         },
         window: { close: () => {} },
     });
+    vm.runInContext(read('seerfar-bridge.js'), context);
     vm.runInContext(read('popup.js'), context);
     await new Promise((resolve) => setImmediate(resolve)); // initialize() fills the saved token
     await element('capture-market').handlers.click();
     assert.equal(uploaded.length, 2);
+    assert.equal(injections, 1);
     assert.deepEqual(messages, ['SEERFAR_MARKET_CAPTURE', 'SEERFAR_MARKET_NEXT_PAGE']);
     assert.equal(uploaded[0].records[0]['关键词'], 'плед');
     assert.equal(uploaded[1].records[0]['关键词'], 'подушка');
@@ -421,6 +436,7 @@ test('user-started popup capture uploads two pages and obeys the configured cap'
     assert.equal(element('market-rolling-period').hidden, false);
     assert.match(element('progress').textContent, /采集结束：2 页，接收 2 行，新入库 2 行/);
     assert.equal(element('stop-market').disabled, true);
+    assert.match(element('market-token-status').textContent, /令牌已验证/);
 });
 
 function popupTokenHarness({ baseUrl = 'http://127.0.0.1:8766', savedToken, verifyResponse,
@@ -446,7 +462,9 @@ function popupTokenHarness({ baseUrl = 'http://127.0.0.1:8766', savedToken, veri
         } },
         tabs: {
             query: async () => [{ id: 1, url: 'https://www.seerfar.cn/admin/market' }],
-            sendMessage: (_tabId, _message, callback) => callback({ records: [], reason: '未识别表格' }),
+            get: async () => ({ id: 1, url: 'https://www.seerfar.cn/admin/market' }),
+            sendMessage: async (_tabId, message) => message.type === 'SEERFAR_MARKET_PING'
+                ? { ready: true, version: '0.4.31' } : { records: [], reason: '未识别表格' },
         },
         runtime: { lastError: null },
     };
@@ -460,6 +478,7 @@ function popupTokenHarness({ baseUrl = 'http://127.0.0.1:8766', savedToken, veri
         },
         window: { close: () => {} },
     });
+    vm.runInContext(read('seerfar-bridge.js'), context);
     vm.runInContext(read('popup.js'), context);
     return { element, stored, requests };
 }

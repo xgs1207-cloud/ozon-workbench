@@ -168,4 +168,4 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     })();
     return true;
 });
-importScripts('market-jobs.js');
+importScripts('seerfar-bridge.js', 'market-jobs.js');

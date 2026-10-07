@@ -313,6 +313,22 @@ def apply_confirmation(
     entry["task_id"] = resolved_task
     entry["import_confirmed_at"] = confirmation.get("checked_at") or now_iso()
     entry["import_counts"] = counts
+    # A clean import creates the card, not proof that asynchronous video
+    # ingestion/moderation has completed. Only explicit media readback can add
+    # that separate observational evidence; never submit again from polling.
+    video_payload = _read_json(run_dir / "payload.json")
+    from .ozon_write import media_for_variant
+    video_expected = any(media_for_variant(video_payload, row)[0]
+                         for row in video_payload.get("variants") or [] if isinstance(row, Mapping))
+    if video_expected:
+        # Keep observational extensions outside the strict upstream result and
+        # publication contracts. Import polling never claims video acceptance.
+        _write_json(run_dir / "video-import-status.json", {
+            "product_id": directory.name, "store": store_id,
+            "video_readback_status": "awaiting_readback", "video_readback_required": True,
+            "import_status": store_status, "buyer_playback_verified": False,
+            "automatic_resubmit": False, "updated_at": now_iso(),
+        })
     payload["updated_at"] = now_iso()
     _write_json(directory / "output/store-publications.json", payload)
 
@@ -349,6 +365,8 @@ def apply_confirmation(
         "ok": store_status not in {"failed"} and not bool(confirmation.get("error")),
         "error": confirmation.get("error"),
         "missing_offers": list(confirmation.get("missing_offers") or []),
+        "video_readback_required": video_expected,
+        "import_success_is_video_success": False,
     }
 
 

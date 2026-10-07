@@ -1,5 +1,5 @@
 (() => {
-const PLUGIN_VERSION = "0.4.33";
+const PLUGIN_VERSION = "0.4.34";
 const previousProductBridge = globalThis.__workbenchProductBridge;
 try {
     if (previousProductBridge?.version === PLUGIN_VERSION && previousProductBridge.isCurrent?.()) return;
@@ -3097,11 +3097,13 @@ function extractVideos(structured = [], collectedSkuIds = []) {
         const providerId = /^[a-zA-Z0-9_-]{1,100}$/.test(String(raw.provider_video_id || ''))
             ? String(raw.provider_video_id) : null;
         if (!url && !providerId && !raw.empty_player) return;
-        let key = providerId ? `provider:${providerId}` : url || `empty:${source}`;
-        if (!providerId && url && !url.startsWith('blob:')) {
+        let urlKey = url;
+        if (url && !url.startsWith('blob:')) {
             const parsed = new URL(url);
-            key = parsed.hostname + parsed.pathname;
+            urlKey = parsed.hostname + parsed.pathname;
         }
+        const keys = [providerId ? `provider:${providerId}` : null, urlKey,
+            !url && !providerId ? `empty:${source}` : null].filter(Boolean);
         const status = raw.drm === true ? 'protected_media' : !url ? 'not_loaded'
             : url.startsWith('blob:') ? 'unsupported_blob'
             : /\.(m3u8|mpd)(?:[?#]|$)/i.test(url) || /mpegurl|dash\+xml/i.test(raw.mime_type || '') ? 'unsupported_stream'
@@ -3116,21 +3118,32 @@ function extractVideos(structured = [], collectedSkuIds = []) {
             status, drm: raw.drm === true, poster_is_ozon_video_cover: false,
             captured_at: new Date().toISOString(),
         };
-        if (seen.has(key)) {
-            const previous = values[seen.get(key)];
+        const existing = keys.map(key => seen.get(key)).find(index => index != null);
+        if (existing != null) {
+            const previous = values[existing];
             // Same provider/config: prefer a direct URL over a temporary player blob.
-            if (status === 'metadata_only' && previous.status !== 'metadata_only') values[seen.get(key)] = row;
+            if (row.drm) { previous.drm = true; previous.status = 'protected_media'; }
+            else if (status === 'metadata_only' && previous.status !== 'metadata_only' && !previous.drm) {
+                values[existing] = {...previous, ...row, provider_video_id: providerId || previous.provider_video_id,
+                    poster_url: row.poster_url || previous.poster_url};
+            }
             else if (!previous.poster_url && row.poster_url) previous.poster_url = row.poster_url;
+            if (!values[existing].provider_video_id && providerId) values[existing].provider_video_id = providerId;
+            keys.forEach(key => seen.set(key, existing));
             return;
         }
-        seen.set(key, values.length);
+        keys.forEach(key => seen.set(key, values.length));
         values.push(row);
     };
     const scopes = [
         ['.od-picture-gallery, .module-od-picture-gallery, .detail-gallery, .mod-detail-gallery', 'main'],
         ['#desc-lazyload-container, #detailContent, .detail-description, .desc-lazyload-container, .module-od-product-description, v-detail-h.html-description', 'detail'],
     ];
+    const visitedScopes = new WeakSet();
+    let scannedHosts = 0;
     const readScope = (scope, role, selector) => {
+        if (!scope || visitedScopes.has(scope)) return;
+        visitedScopes.add(scope);
         (scope.querySelectorAll?.('video') || []).forEach(video => {
             const ancestor = video.closest?.('[class*="recommend"], [class*="advert"], [class*="live"], [id*="recommend"], [id*="advert"], [id*="live"]');
             if (ancestor) return;
@@ -3146,7 +3159,22 @@ function extractVideos(structured = [], collectedSkuIds = []) {
                 mime_type: video.querySelector?.('source')?.type || null,
                 provider_video_id: video.getAttribute?.('data-video-id'), empty_player: true }, role, 'product_video_dom'));
         });
+        // Lazy gallery players can expose only an ID/source attribute until the
+        // seller opens the video. Read evidence, never autoplay or fetch it.
+        (scope.querySelectorAll?.('[data-video-id], [data-video-url], [data-play-url]') || []).forEach(player => {
+            if (player.closest?.('[class*="recommend"], [class*="advert"], [class*="live"], [id*="recommend"], [id*="advert"], [id*="live"]')) return;
+            add({provider_video_id: player.getAttribute?.('data-video-id'),
+                source_url: player.getAttribute?.('data-video-url') || player.getAttribute?.('data-play-url'),
+                empty_player: true}, role, 'product_video_player_attribute');
+        });
         if (scope.shadowRoot) readScope(scope.shadowRoot, role, selector);
+        // Actual 1688 detail components can nest their open shadow host beneath
+        // a gallery/description root rather than on that root itself.
+        for (const host of scope.querySelectorAll?.('*') || []) {
+            if (scannedHosts >= 1500) break;
+            scannedHosts++;
+            if (host.shadowRoot && !host.closest?.('[class*="recommend"], [class*="advert"], [class*="live"], [id*="recommend"], [id*="advert"], [id*="live"]')) readScope(host.shadowRoot, role, selector);
+        }
     };
     if (typeof document !== 'undefined') scopes.forEach(([selector, role]) => {
         const roots = Array.from(document.querySelectorAll(selector));
@@ -3203,7 +3231,38 @@ function extractVideos(structured = [], collectedSkuIds = []) {
         });
     };
     structured.forEach(item => walk(item?.data ?? item));
+    // Passive resource timing only. A media request alone does not prove that
+    // it belongs to this offer (recommendation/ad widgets share the page).
+    // Enrich only an already bound product player/config, never sweep all URLs.
+    let unboundResources = 0;
+    try {
+        const resources = typeof performance !== 'undefined' && performance.getEntriesByType
+            ? performance.getEntriesByType('resource').slice(-400) : [];
+        for (const resource of resources) {
+            const url = safeUrl(resource.name);
+            if (!url || !/^https:/.test(url) || !/\.(?:mp4|mov)(?:[?#]|$)/i.test(url)) continue;
+            const parsed = new URL(url);
+            const matches = values.filter(row => {
+                if (row.source_url && !row.source_url.startsWith('blob:')) {
+                    const previous = new URL(row.source_url);
+                    if (previous.hostname === parsed.hostname && previous.pathname === parsed.pathname) return true;
+                }
+                const id = row.provider_video_id;
+                return id && parsed.pathname.split('/').some(part =>
+                    part === id || part.replace(/\.(?:mp4|mov)$/i, '') === id);
+            });
+            if (matches.length !== 1) { unboundResources++; continue; }
+            const row = matches[0];
+            if (row.drm || row.status === 'protected_media') continue;
+            row.source_url = url;
+            row.status = 'metadata_only';
+            row.network_source = 'loaded_resource_timing_bound_to_product_player';
+            selectors.push('performance.resource_timing:matched-product-video');
+        }
+    } catch { warnings.push('已加载视频资源读取失败，保留已采集的播放器资料'); }
+    if (unboundResources) warnings.push('发现未能确认商品归属的视频网络资源，未自动采集；请正常打开当前商品视频后重新采集或上传原文件');
     if (values.length > 30) warnings.push('商品视频超过30条，采集前30条；请在后台核对');
+    if (!values.length) warnings.push('当前商品未发现已加载的视频；若页面有视频，请正常打开视频后重新采集，不会自动播放或抓取推荐视频');
     return {values: values.slice(0, 30), selectors, warnings: Array.from(new Set(warnings))};
 }
 function buildCapture() {

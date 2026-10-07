@@ -155,6 +155,15 @@ def collect_measurements(
         ) and package_dims["weight_g"] >= product_dims["weight_g"]
         if not hierarchy_ok:
             warnings.append("包装尺寸/重量小于商品本体：请检查填写值（上传门禁要求包装 ≥ 商品）")
+    elif isinstance(product_block, Mapping):
+        # Optional partial item measurements still constrain the corresponding
+        # known shipping axis; missing item axes are never inferred from package.
+        for axis in ("length_mm", "width_mm", "height_mm", "weight_g"):
+            item_value = _positive_int(product_block.get(f"product_{axis}"))
+            package_value = _positive_int(product_block.get(f"package_{axis}")) or (package_dims or {}).get(axis)
+            if item_value is not None and package_value is not None and item_value > package_value:
+                hierarchy_ok = False
+                warnings.append("已确认商品尺寸/重量大于对应包装值，请核对实测资料")
 
     if product_dims and package_dims:
         origin = "user_confirmed" if overrides else "capture_structured"

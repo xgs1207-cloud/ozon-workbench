@@ -144,6 +144,8 @@ def normalize_videos(rows: Any, source_url: str, *, sku_ids: set[str] | None = N
             "role": role if role in {"main", "detail", "product"} else "product",
             "title": str(raw.get("title") or "商品视频")[:200],
             "source": str(raw.get("source") or "page_video")[:120],
+            "network_source": "loaded_resource_timing_bound_to_product_player"
+                if raw.get("network_source") == "loaded_resource_timing_bound_to_product_player" else None,
             "sku_ids": list(dict.fromkeys(bound)), "mime_type": mime or None,
             "sku_binding_unresolved": len(bound) != len(bindings),
             "duration_seconds": _finite(raw.get("duration_seconds")),
@@ -155,13 +157,33 @@ def normalize_videos(rows: Any, source_url: str, *, sku_ids: set[str] | None = N
         }
         if stable in seen:
             previous = videos[seen[stable]]
-            if status == "metadata_only" and previous["status"] != "metadata_only":
+            # A later direct URL or DOM record must never erase an earlier
+            # protected-player diagnostic for the same provider video.
+            if status == "protected_media" or previous["status"] == "protected_media":
+                previous["status"] = "protected_media"
+                previous["message"] = _MESSAGES["protected_media"]
+            elif status == "metadata_only" and previous["status"] != "metadata_only":
                 videos[seen[stable]] = normalized
             elif not previous.get("poster_url") and normalized.get("poster_url"):
                 previous["poster_url"] = normalized["poster_url"]
             continue
         seen[stable] = len(videos)
         videos.append(normalized)
+    # A DOM URL can have no provider ID while the JSON record has one. Keep
+    # their distinct identifiers/bindings, but never offer a direct-download
+    # alias of an explicitly protected asset endpoint. Query signatures are
+    # transient; only the same supported CDN host/path shares this restriction.
+    def endpoint(row):
+        address = _safe_url(row.get("source_url"))
+        if not address:
+            return None
+        parsed = urlsplit(address)
+        return parsed.hostname.lower(), parsed.path
+    protected_endpoints = {endpoint(row) for row in videos if row["status"] == "protected_media"} - {None}
+    for row in videos:
+        if endpoint(row) in protected_endpoints:
+            row["status"] = "protected_media"
+            row["message"] = _MESSAGES["protected_media"]
     if len(videos) > MAX_CAPTURE_VIDEOS:
         warnings.append(f"页面视频超过 {MAX_CAPTURE_VIDEOS} 条，仅保存前 {MAX_CAPTURE_VIDEOS} 条；原始快照保留")
         videos = videos[:MAX_CAPTURE_VIDEOS]
@@ -221,7 +243,7 @@ def _public_row(row: Mapping[str, Any]) -> dict[str, Any]:
     poster = _safe_url(row.get("poster_url"))
     if poster and _AUTH_QUERY.search(poster):
         poster = None
-    keys = ("video_id", "provider_video_id", "offer_id", "role", "title", "source", "sku_ids",
+    keys = ("video_id", "provider_video_id", "offer_id", "role", "title", "source", "network_source", "sku_ids",
             "mime_type", "duration_seconds", "width", "height", "captured_at", "status", "message",
             "sha256", "size_bytes", "media_verified", "stored_at", "transfer_source", "source_expires_at",
             "sku_binding_unresolved")

@@ -63,7 +63,7 @@ def planned_slots(product_dir: Path | str) -> list[dict[str, Any]]:
         slot = str(item.get("slot") or "").strip()
         relative = str(item.get("output_path") or "").strip()
         if slot and relative:
-            rows.append({"slot": slot, "output_path": relative, "role": item["role"]})
+            rows.append({**item, "studio_mode": plan.get("studio_mode") is True})
     return rows
 
 
@@ -95,21 +95,42 @@ class LocalObjectStorage:
         prefix = f"{self.url_base_path}/" if self.url_base_path else ""
         return f"{self.base_url}/{prefix}{relative}"
 
+    def _target_and_url(self, product_id: str, row: Mapping[str, Any], source: Path, digest: str) -> tuple[Path, str]:
+        relative = self.layout.format(product_id=product_id, slot=str(row["slot"])).lstrip("/")
+        if row.get("studio_mode") or row.get("origin") == "captured":
+            # Exact source extension and immutable content-addressed key: a JPEG
+            # must not be labelled PNG, and a redo cannot overwrite an old URL.
+            relative = str(Path(relative).with_suffix("") / (digest + source.suffix.lower())).replace("\\", "/")
+        target = (self.root / relative).resolve()
+        if not target.is_relative_to(self.root.resolve()):
+            raise ValueError("静态图片目标路径必须位于配置的存储目录内")
+        prefix = f"{self.url_base_path}/" if self.url_base_path else ""
+        return target, f"{self.base_url}/{prefix}{relative}"
+
     def publish_slot(self, product_dir: Path, row: Mapping[str, Any]) -> dict[str, Any]:
         product_id = product_dir.name
         slot = str(row["slot"])
-        source = product_dir / str(row["output_path"])
+        source = (product_dir / str(row["output_path"])).resolve()
+        if not source.is_relative_to(product_dir.resolve()):
+            raise ValueError("图片来源必须位于当前商品目录内")
         if not source.is_file():
             return {"slot": slot, "status": "missing", "reason": f"本地文件不存在：{row['output_path']}"}
+        if row.get("origin") == "captured":
+            from .captured_images import validate_captured_image
+            receipt = next((entry for entry in _read_json(product_dir / "output/image-generation-report.json").get("files") or []
+                            if entry.get("slot") == slot), {})
+            errors = validate_captured_image(product_dir, row, receipt)
+            if errors:
+                raise ValueError("；".join(errors))
 
-        relative = self.layout.format(product_id=product_id, slot=slot).lstrip("/")
-        target = self.root / relative
         source_hash = sha256_file(source)
+        target, url = self._target_and_url(product_id, row, source, source_hash)
         unchanged = target.is_file() and target.stat().st_size == source.stat().st_size and sha256_file(target) == source_hash
         if unchanged:
-            return {"slot": slot, "status": "unchanged", "path": str(target), "url": self.url_for(product_id, slot)}
+            return {"slot": slot, "status": "unchanged", "path": str(target), "url": url,
+                    "sha256": source_hash, "bytes": target.stat().st_size}
         if self.dry_run:
-            return {"slot": slot, "status": "would_copy", "path": str(target), "url": self.url_for(product_id, slot)}
+            return {"slot": slot, "status": "would_copy", "path": str(target), "url": url}
 
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
@@ -119,7 +140,7 @@ class LocalObjectStorage:
             "path": str(target),
             "bytes": target.stat().st_size,
             "sha256": source_hash,
-            "url": self.url_for(product_id, slot),
+            "url": url,
         }
 
     def publish_product(
@@ -138,12 +159,28 @@ class LocalObjectStorage:
         if wanted:
             rows = [row for row in rows if row["slot"] in wanted]
 
+        from .oss_cos import image_publication_version, IMAGE_MANIFEST_VERSION
+        version = image_publication_version(directory)
         results = [self.publish_slot(directory, row) for row in rows]
         published = [item for item in results if item["status"] in {"published", "unchanged"}]
         urls = {item["slot"]: item["url"] for item in published if item.get("url")}
 
         written = None
         if write_urls and urls and not self.dry_run:
+            from .guided_review import slot_fingerprint
+            if image_publication_version(directory) != version:
+                raise ValueError("图片或审核内容在公开期间变化，请重新审核并公开")
+            by_slot = {row["slot"]: row for row in rows}
+            bindings = {}
+            for result in published:
+                spec = by_slot[result["slot"]]
+                source = directory / spec["output_path"]
+                if sha256_file(source) != result["sha256"] or sha256_file(Path(result["path"])) != result["sha256"]:
+                    raise ValueError("公开副本与当前已审核图片不一致")
+                bindings[result["slot"]] = {"output_path": spec["output_path"], "slot_fingerprint": slot_fingerprint(spec),
+                    "sha256": result["sha256"], "size_bytes": result["bytes"], "url": result["url"],
+                    **({"origin": "captured", "capture_receipt": spec.get("capture_receipt")}
+                       if spec.get("origin") == "captured" else {})}
             payload = {
                 "schema_version": SCHEMA_VERSION,
                 "product_id": directory.name,
@@ -153,6 +190,7 @@ class LocalObjectStorage:
                 "published_at": now_iso(),
                 "note": "自建静态站点（nginx 目录）；上传载荷只接受 https 地址",
                 "urls": urls,
+                "image_manifest_version": IMAGE_MANIFEST_VERSION, **version, "files": bindings,
                 "skipped_slots": [item["slot"] for item in results if item["status"] not in {"published", "unchanged"}],
             }
             path = directory / URLS_FILE

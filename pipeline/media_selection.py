@@ -62,4 +62,6 @@ def selected_media_version(plan: Mapping[str, Any]) -> dict[str, Any]:
     return {"selected_slots": [row.get("slot") for row in specs],
             "specs": [{"slot": row.get("slot"), "role": row["role"],
                        "source_sku_id": row.get("source_sku_id"),
-                       "slot_fingerprint": slot_fingerprint(row)} for row in specs]}
+                       "slot_fingerprint": slot_fingerprint(row),
+                       **({"origin": "captured", "capture_receipt": row.get("capture_receipt")}
+                          if row.get("origin") == "captured" else {})} for row in specs]}

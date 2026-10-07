@@ -1,6 +1,6 @@
 /* Product-page connection recovery. Inspect readiness in the isolated world:
  * legacy content.js held unknown ping messages open indefinitely. */
-const PRODUCT_BRIDGE_VERSION = '0.4.33';
+const PRODUCT_BRIDGE_VERSION = '0.4.34';
 const productBridgeConnections = new Map();
 const PRODUCT_PAGE_COMMANDS = new Set(['COLLECTOR_PREVIEW', 'COLLECTOR_CAPTURE',
     'COLLECTOR_OZON_PREVIEW', 'COLLECTOR_OZON_CAPTURE', 'OPEN_SKU_SELECTOR', 'EXPORT_SKU_DEBUG']);

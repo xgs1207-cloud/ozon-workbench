@@ -967,7 +967,7 @@ class Dimensions(BaseModel):
 
 
 class ConfirmedMeasurementsRequest(BaseModel):
-    product: Dimensions
+    product: Dimensions | None = None
     package: Dimensions
 
 
@@ -982,13 +982,16 @@ def get_confirmed_measurements(product_id: str) -> dict[str, Any]:
 def set_confirmed_measurements(product_id: str, request: ConfirmedMeasurementsRequest) -> dict[str, Any]:
     directory = _require_product(product_id)
     _require_pre_submission_edit(directory)
-    product = request.product.model_dump()
+    target = directory / "input" / "workbench-sku-overrides.json"
+    current = _read_json_file(target)
+    saved = current.get("product") or {}
+    product = (request.product.model_dump() if request.product is not None else
+               {name: saved[f"product_{name}"] for name in ("length_mm", "width_mm", "height_mm", "weight_g")
+                if isinstance(saved.get(f"product_{name}"), (int, float)) and saved[f"product_{name}"] > 0})
     package = request.package.model_dump()
     if any(package[name] < product[name] for name in product):
         raise HTTPException(status_code=422, detail="包装尺寸和重量不能小于商品本体")
-    target = directory / "input" / "workbench-sku-overrides.json"
-    current = _read_json_file(target)
-    current["product"] = {**{f"product_{key}": value for key, value in product.items()},
+    current["product"] = {**saved, **{f"product_{key}": value for key, value in product.items()},
                           **{f"package_{key}": value for key, value in package.items()}}
     target.write_text(json.dumps(current, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     from pipeline.guided_review import invalidate_from
@@ -2383,8 +2386,32 @@ app.include_router(listing_flow_router)
 from workbench_prompt_api import router as prompt_library_router
 app.include_router(prompt_library_router)
 
+from workbench_card_api import router as card_document_router
+app.include_router(card_document_router)
+
+from workbench_media_api import router as media_workspace_router
+app.include_router(media_workspace_router)
+
 
 @app.get("/assets/listing-flow.js", include_in_schema=False)
 def listing_flow_script():
     from fastapi.responses import FileResponse
     return FileResponse(Path(__file__).resolve().parent / "web/listing-flow.js", media_type="text/javascript")
+
+
+@app.get("/assets/listing-card.js", include_in_schema=False)
+def listing_card_script():
+    from fastapi.responses import FileResponse
+    return FileResponse(Path(__file__).resolve().parent / "web/listing-card.js", media_type="text/javascript")
+
+
+@app.get("/assets/listing-media.js", include_in_schema=False)
+def listing_media_script():
+    from fastapi.responses import FileResponse
+    return FileResponse(Path(__file__).resolve().parent / "web/listing-media.js", media_type="text/javascript")
+
+
+@app.get("/assets/listing-bench.css", include_in_schema=False)
+def listing_bench_styles():
+    from fastapi.responses import FileResponse
+    return FileResponse(Path(__file__).resolve().parent / "web/listing-bench.css", media_type="text/css")

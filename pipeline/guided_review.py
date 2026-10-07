@@ -24,6 +24,7 @@ REVIEW_FILE = "input/guided-review.json"
 # this list explicit so an unknown/local-placeholder backend cannot be promoted
 # simply by regenerating one slot with a supported paid backend.
 REAL_IMAGE_GENERATORS = frozenset({"doubao", "rightapi"})
+FINAL_IMAGE_SOURCES = REAL_IMAGE_GENERATORS | {"captured-original"}
 DEPENDENCIES = {
     "grouping": ("input/selected-skus.json", "input/category-selection.json", "output/platform-grouping-result.json"),
     "copy": ("input/source.json", "input/selected-skus.json", "input/selected-keywords.json",
@@ -179,8 +180,8 @@ def problems(directory: Path | str, section: str) -> list[str]:
         generator = generation.get("generator")
         if (generation.get("final_images") is not True
                 or not isinstance(generator, str)
-                or generator not in REAL_IMAGE_GENERATORS | {"mixed"}):
-            return ["当前不是支持的生图后端生成的正式图片；占位图或未知来源图片不能用于批次自动上架"]
+                or generator not in FINAL_IMAGE_SOURCES | {"mixed"}):
+            return ["当前不是有真实来源凭据的正式图片；占位图或未知来源图片不能用于自动上架"]
         if not studio and generation.get("generated_slots") != generation.get("planned_slots"):
             return ["图片尚未覆盖整套规划图位"]
         expected = {str(item.get("slot")): item for item in
@@ -190,13 +191,20 @@ def problems(directory: Path | str, section: str) -> list[str]:
                     if isinstance(item, Mapping) and (not studio or str(item.get("slot")) in expected)}
         if set(produced) != set(expected) or any(
             not isinstance(produced[slot].get("generator"), str)
-            or produced[slot].get("generator") not in REAL_IMAGE_GENERATORS
+            or produced[slot].get("generator") not in FINAL_IMAGE_SOURCES
+            or (spec.get("origin") == "captured" and produced[slot].get("generator") != "captured-original")
             or produced[slot].get("path") != spec.get("output_path")
             or ("source_sku_id" in produced[slot] and produced[slot].get("source_sku_id") != spec.get("source_sku_id"))
             or produced[slot].get("slot_fingerprint") != slot_fingerprint(spec)
             for slot, spec in expected.items()
         ):
             return ["图片与当前图位提示词/参考图不一致，须重做变更的图位"]
+        from .captured_images import validate_captured_image
+        for slot, spec in expected.items():
+            if produced[slot].get("generator") == "captured-original":
+                errors = validate_captured_image(directory, spec, produced[slot])
+                if errors:
+                    return errors
         generators = {item["generator"] for item in produced.values()}
         report_generator = next(iter(generators)) if len(generators) == 1 else "mixed"
         if not studio and generation.get("generator") != report_generator:
@@ -378,8 +386,8 @@ def update_plan_slot(directory: Path | str, *, slot: str, prompt: str,
         raise ValueError("尚未生成图片计划")
     reference_index = {str(item.get("id")): str(item.get("path")) for item in plan.get("reference_images") or []
                        if isinstance(item, Mapping)}
-    ids = list(dict.fromkeys(str(item) for item in reference_ids))
-    if not ids or len(ids) > 3 or any(item not in reference_index for item in ids):
+    ids = [str(item) for item in reference_ids]
+    if not ids or len(ids) > 3 or len(set(ids)) != len(ids) or any(item not in reference_index for item in ids):
         raise ValueError("须选 1–3 张此商品真实采集的参考图")
     root = directory.resolve()
     if any(not (directory / reference_index[item]).resolve().is_relative_to(root / "input")

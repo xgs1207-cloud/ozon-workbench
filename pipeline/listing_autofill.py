@@ -444,10 +444,17 @@ def _build(directory: Path, cache_root: Path, *, shop_id: str | None, resolve_di
                               "seller_offer_ids": {}, "api_writes_performed": False}
     for index, sku in enumerate(skus, 1):
         sku_id = str(sku["sku_id"])
+        selection = read_json(directory / "input/category-selection.json")
+        bound_shop = shop_id or selection.get("shop_id") or selection.get("shop")
+        if bound_shop:
+            from .listing_offer_ids import offer_for_variant
+            offer = offer_for_variant(directory, bound_shop, sku, index)
+        else:
+            offer = None if (directory / "input/guided-workflow.json").is_file() else offer_id_for(directory.name, sku, index)
         result["seller_offer_ids"][sku_id] = {
-            "value": offer_id_for(directory.name, sku, index), "source": "workbench_internal",
-            "evidence": "input/source.json 的商品编号和真实 SKU 标识；工作台内部货号，不是条形码或型号",
-            "status": "internal_generated",
+            "value": offer, "source": "workbench_offer_registry" if (directory / "input/listing-offer-ids.json").is_file() else "workbench_internal",
+            "evidence": "店铺绑定的持久工作台货号；不是 1688 规格 ID、条形码或型号" if (directory / "input/listing-offer-ids.json").is_file() else "input/source.json 的商品编号和真实 SKU 标识；工作台内部货号，不是条形码或型号",
+            "status": "reserved" if (directory / "input/listing-offer-ids.json").is_file() and offer else "internal_generated" if offer else "unreserved",
         }
     selection = read_json(directory / "input/category-selection.json")
     bound_shop = selection.get("shop_id") or selection.get("shop")

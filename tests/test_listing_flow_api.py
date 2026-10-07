@@ -98,6 +98,9 @@ class ListingFlowApiTests(unittest.TestCase):
         planned = self.client.post(self.base + "/guided/plan", json={})
         self.assertEqual(planned.status_code, 200, planned.text)
         self.assertEqual(len(planned.json()["plan"]["payload"]["main_images"]), len(self.selected_ids))
+        reserved = self.client.post(self.base + "/offer-ids/reserve", json={"profile_id": "qa-employee", "shop": "qa-store"})
+        self.assertEqual(reserved.status_code, 200, reserved.text)
+        self.assertTrue(reserved.json()["offer_ids"]["complete"])
         return planned.json()
 
     def save_form(self):
@@ -156,6 +159,26 @@ class ListingFlowApiTests(unittest.TestCase):
         self.assertFalse(prepared.json()["report"]["ok"], prepared.text)
         self.assertTrue(prepared.json()["report"]["blockers"])
         self.assertFalse(self.client.get(self.base + "/guided").json()["review"]["ready_to_preflight"])
+        self.assert_no_write()
+
+    def test_package_only_dimensions_prepare_card_without_inventing_product_measurements(self):
+        self.collect(measurements=False)
+        saved = self.client.put(self.base + "/listing-details", json={"details": {
+            "package_length_mm": 50, "package_width_mm": 50,
+            "package_height_mm": 70, "package_weight_g": 120}})
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.copy_and_plan()
+        self.save_form()
+        prepared = self.client.post(self.base + "/guided/prepare-card", json={"store": "qa-store"})
+        self.assertEqual(prepared.status_code, 200, prepared.text)
+        self.assertTrue(prepared.json()["report"]["ok"], prepared.text)
+        measurements = read_json(self.directory / "output/measurements.json")
+        self.assertIsNone(measurements["product"])
+        self.assertEqual(measurements["package"], {
+            "length_mm": 50, "width_mm": 50, "height_mm": 70, "weight_g": 120})
+        document = self.client.get(self.base + "/listing-document?shop=qa-store").json()["document"]
+        self.assertTrue(document["operational_fields"]["product_optional"])
+        self.assertEqual(set(document["operational_fields"]["product"].values()), {None})
         self.assert_no_write()
 
     def test_missing_confirmation_and_unreviewed_modern_submit_do_not_write_or_legacy_bypass(self):

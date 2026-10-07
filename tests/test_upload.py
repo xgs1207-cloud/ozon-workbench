@@ -259,6 +259,44 @@ class PayloadTests(UploadFixture):
         # 载荷里不允许出现库存字段
         self.assertEqual(payload_problems(payload), [])
 
+    def test_registered_offers_reach_payload_and_api_request_without_raw_sku_ids(self):
+        from pipeline.listing_form import write_json
+        from pipeline.listing_offer_ids import reserve_offer_ids
+        from pipeline.ozon_write import build_import_request
+        write_json(self.product_dir / "input/guided-workflow.json", {})
+        offers = reserve_offer_ids(self.product_dir, "shop-a", "qa-employee")["offers"]
+        payload = build_upload_payload(self.product_dir, shop_name="shop-a")
+        self.assertEqual({item["source_sku_id"]: item["offer_id"] for item in payload["variants"]}, offers)
+        request = build_import_request(payload)
+        self.assertEqual({item["offer_id"] for item in request["items"]}, set(offers.values()))
+        self.assertFalse(set(offers.values()) & {"S1", "S2"})
+
+    def test_placeholder_title_suffix_cleared_before_actual_variant_color_is_added(self):
+        from pipeline.listing_form import read_json, write_json
+        path = self.product_dir / "output/copy-ru.json"
+        copy = read_json(path)
+        copy["title_ru"] = "Товар — не указан"
+        write_json(path, copy)
+        payload = build_upload_payload(self.product_dir, shop_name="shop-a")
+        self.assertEqual(payload["title"], "Товар")
+        self.assertTrue(all("не указан" not in item["display_name_ru"] for item in payload["variants"]))
+        self.assertTrue(all(item["display_name_ru"].startswith("Товар — ") for item in payload["variants"]))
+
+    def test_partial_known_product_dimension_still_blocks_smaller_shipping_measurement(self):
+        from pipeline.listing_form import write_json
+        from pipeline.measurements import collect_measurements
+        write_json(self.product_dir / "input/guided-workflow.json", {})
+        overrides = {"product": {"product_weight_g": 130,
+            "package_length_mm": 80, "package_width_mm": 60,
+            "package_height_mm": 100, "package_weight_g": 120}}
+        surface = collect_measurements(product_id=self.product_dir.name,
+            source={}, overrides=overrides, product_dir=self.product_dir)
+        self.assertIsNone(surface["product"])
+        self.assertFalse(surface["hierarchy_ok"])
+        write_json(self.product_dir / "output/measurements.json", surface)
+        payload = build_upload_payload(self.product_dir, shop_name="shop-a")
+        self.assertTrue(any("hierarchy" in blocker for blocker in payload["production_blockers"]))
+
     def test_search_text_has_no_inventory_words(self):
         payload = build_upload_payload(self.product_dir, shop_name="shop-a")
         self.assertFalse(

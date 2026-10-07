@@ -13,7 +13,8 @@ CARD_FILE = "output/listing-card-prepared.json"
 CARD_INPUTS = ("input/selected-skus.json", "input/category-selection.json",
                "input/human-confirmations.json", "input/workbench-sku-overrides.json",
                "input/manual-prices.json", "output/copy-ru.json",
-               "output/ozon-category-attributes.json", "input/listing-grouping-choice.json")
+               "output/ozon-category-attributes.json", "input/listing-grouping-choice.json",
+               "input/listing-offer-ids.json")
 
 
 def grouping_scope(directory: Path) -> str:
@@ -92,7 +93,7 @@ def prepare_listing_card(directory: Path, *, shop: str) -> dict[str, Any]:
         if missing:
             labels = {row["attribute_id"]: row["name"] for row in form["form"]["fields"]}
             blockers.append("官方必填未填写：" + "、".join(labels.get(key, str(key)) for key in missing))
-        for name, label in (("product", "商品本体"), ("package", "含包装")):
+        for name, label in (("package", "含包装"),):
             dimensions = surface.get(name) or {}
             if any(not isinstance(dimensions.get(key), int) or dimensions.get(key, 0) <= 0
                    for key in ("length_mm", "width_mm", "height_mm", "weight_g")):

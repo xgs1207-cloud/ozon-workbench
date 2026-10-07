@@ -88,7 +88,7 @@ class ProductEditorApiTests(unittest.TestCase):
         self.assertEqual(confirmations["material"], "硅胶")
         self.assertEqual(confirmations["package_quantity"], 1)
 
-    def test_partial_dimensions_are_saved_as_draft_not_confirmed_complete_measurements(self):
+    def test_partial_dimensions_preserve_known_axes_without_inventing_complete_measurements(self):
         partial = {"product_height_mm": 100, "product_width_mm": 70}
         response = self.client.put(self.base + "/listing-details", json={"details": partial})
         self.assertEqual(response.status_code, 200, response.text)
@@ -96,9 +96,13 @@ class ProductEditorApiTests(unittest.TestCase):
         self.assertEqual(saved["product_height_mm"], 100)
         self.assertEqual(saved["product_width_mm"], 70)
         self.assertNotIn("product_length_mm", saved)
-        overrides_file = self.directory / "input/workbench-sku-overrides.json"
-        if overrides_file.exists():
-            self.assertFalse(self.read_json("input/workbench-sku-overrides.json").get("product"))
+        overrides = self.read_json("input/workbench-sku-overrides.json")
+        self.assertEqual(overrides["product"], partial)
+        from pipeline.measurements import collect_measurements
+        measurements = collect_measurements(product_id=self.product_id,
+            source=self.read_json("input/source.json"), overrides=overrides,
+            product_dir=self.directory)
+        self.assertIsNone(measurements["product"])
         self.assertFalse(response.json()["api_writes_performed"])
 
     def test_explicit_null_clears_stale_confirmations_and_measurements_but_preserves_other_drafts(self):

@@ -123,6 +123,86 @@ test('video duration from loaded configs requires explicit seconds or an ISO dur
       {videoId:'c',playUrl:'https://tbm-auth.alicdn.com/c.mp4',duration:31,durationUnit:'seconds'}]}}])`,h.context);
     assert.deepEqual(Array.from(result.values,item=>item.duration_seconds),[null,30,31]);
 });
+test('passive loaded resource can enrich only a matching current product player ID',()=>{
+    const h=contentHarness();
+    const lazy=new FakeElement({attrs:{'data-video-id':'V123'}});
+    const root=new FakeElement({all:{'[data-video-id], [data-video-url], [data-play-url]':[lazy]}});
+    h.context.document={querySelectorAll:selector=>selector.startsWith('.od-picture-gallery,')?[root]:[]};
+    h.context.performance={getEntriesByType:()=>[
+        {name:'https://cloud.video.taobao.com/play/V123.mp4?sign=private-current'},
+        {name:'https://cloud.video.taobao.com/play/RECOMMEND.mp4'},
+        {name:'https://foreign.example/V123.mp4'}]};
+    h.context.fetch=()=>{throw new Error('capture must never fetch video');};
+    const result=vm.runInContext('extractVideos([])',h.context);
+    assert.equal(result.values.length,1);
+    assert.equal(result.values[0].source_url,'https://cloud.video.taobao.com/play/V123.mp4?sign=private-current');
+    assert.equal(result.values[0].network_source,'loaded_resource_timing_bound_to_product_player');
+    assert.equal(result.values[0].status,'metadata_only');
+    assert.ok(result.warnings.some(value=>value.includes('未能确认商品归属')));
+});
+test('network resource is never promoted without an already product-bound player or JSON record',()=>{
+    const h=contentHarness();
+    h.context.document={querySelectorAll:()=>[]};
+    h.context.performance={getEntriesByType:()=>[{name:'https://cloud.video.taobao.com/play/AD.mp4?sign=private'}]};
+    const result=vm.runInContext('extractVideos([])',h.context);
+    assert.equal(result.values.length,0);
+    assert.ok(result.warnings.some(value=>value.includes('未能确认商品归属')));
+    assert.ok(!JSON.stringify(result).includes('sign=private'));
+});
+test('loaded current-source query is refreshed while DOM and JSON aliases deduplicate',()=>{
+    const h=contentHarness();
+    const video=new FakeElement({currentSrc:'https://tbm-auth.alicdn.com/V1.mp4?sign=old'});
+    const root=new FakeElement({all:{video:[video]}});
+    h.context.document={querySelectorAll:selector=>selector.startsWith('.od-picture-gallery,')?[root]:[]};
+    h.context.performance={getEntriesByType:()=>[{name:'https://tbm-auth.alicdn.com/V1.mp4?sign=current'}]};
+    const result=vm.runInContext(`extractVideos([{data:{offerId:'1072823232979',videoInfo:{
+        videoId:'V1',playUrl:'https://tbm-auth.alicdn.com/V1.mp4?sign=config'}}}])`,h.context);
+    assert.equal(result.values.length,1);
+    assert.equal(result.values[0].provider_video_id,'V1');
+    assert.match(result.values[0].source_url,/sign=current$/);
+});
+test('protected current video remains protected even when DOM and network expose direct URL',()=>{
+    const h=contentHarness();
+    const video=new FakeElement({currentSrc:'https://tbm-auth.alicdn.com/V1.mp4'});
+    const root=new FakeElement({all:{video:[video]}});
+    h.context.document={querySelectorAll:selector=>selector.startsWith('.od-picture-gallery,')?[root]:[]};
+    h.context.performance={getEntriesByType:()=>[{name:'https://tbm-auth.alicdn.com/V1.mp4?sign=current'}]};
+    const result=vm.runInContext(`extractVideos([{data:{videoInfo:{videoId:'V1',
+        playUrl:'https://tbm-auth.alicdn.com/V1.mp4',drm:true}}}])`,h.context);
+    assert.equal(result.values.length,1);
+    assert.equal(result.values[0].drm,true);
+    assert.equal(result.values[0].status,'protected_media');
+    assert.ok(!result.values[0].network_source);
+});
+test('nested open shadow video player is captured only within product scope',()=>{
+    const h=contentHarness();
+    const video=new FakeElement({currentSrc:'https://tbm-auth.alicdn.com/nested.mp4'});
+    const shadow=new FakeElement({all:{video:[video]}});
+    const host=new FakeElement({shadowRoot:shadow});
+    const root=new FakeElement({all:{'*':[host]}});
+    h.context.document={querySelectorAll:selector=>selector.startsWith('#desc-lazyload-container,')?[root]:[]};
+    const result=vm.runInContext('extractVideos([])',h.context);
+    assert.equal(result.values.length,1);
+    assert.equal(result.values[0].role,'detail');
+});
+test('lazy player in recommendation widget is not product evidence',()=>{
+    const h=contentHarness();
+    const player=new FakeElement({attrs:{'data-video-id':'AD1','data-video-url':'https://tbm-auth.alicdn.com/AD1.mp4'}});
+    player.closest=()=>({});
+    const root=new FakeElement({all:{'[data-video-id], [data-video-url], [data-play-url]':[player]}});
+    h.context.document={querySelectorAll:selector=>selector.startsWith('.od-picture-gallery,')?[root]:[]};
+    h.context.performance={getEntriesByType:()=>[{name:'https://tbm-auth.alicdn.com/AD1.mp4'}]};
+    assert.equal(vm.runInContext('extractVideos([])',h.context).values.length,0);
+});
+test('nested advertisement shadow host is excluded even when inner video closest cannot cross shadow',()=>{
+    const h=contentHarness();
+    const video=new FakeElement({currentSrc:'https://tbm-auth.alicdn.com/AD-shadow.mp4'});
+    const host=new FakeElement({shadowRoot:new FakeElement({all:{video:[video]}})});
+    host.closest=()=>({});
+    const root=new FakeElement({all:{'*':[host]}});
+    h.context.document={querySelectorAll:selector=>selector.startsWith('#desc-lazyload-container,')?[root]:[]};
+    assert.equal(vm.runInContext('extractVideos([])',h.context).values.length,0);
+});
 test('blob, HLS and unloaded players retain explicit non-downloadable diagnostics',()=>{
     const h=contentHarness();
     h.context.document={querySelectorAll:()=>[]};
@@ -222,7 +302,7 @@ test('product script reinjection keeps exactly one runtime and page-data listene
     assert.equal(h.listeners.size, 1);
     assert.equal(h.pageListeners.size, 1);
     assert.equal([...h.listeners][0], listener);
-    assert.equal(h.context.__workbenchProductBridge.version, '0.4.33');
+    assert.equal(h.context.__workbenchProductBridge.version, '0.4.34');
 });
 
 test('invalidated product context is replaced without duplicate callbacks or declarations', () => {

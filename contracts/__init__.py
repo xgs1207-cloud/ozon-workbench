@@ -82,6 +82,7 @@ def validate_contract(name: str, payload: Any, *, allow_extra: bool = False) -> 
             "studio_mode": {"type": "boolean", "const": True},
             "selected_slots": {"type": "array", "uniqueItems": True,
                                "items": {"type": "string", "minLength": 1}},
+            "image_sets": {"type": "array", "items": {"type": "object"}},
         })
         schema["required"] = [*schema.get("required", []), "selected_slots"]
         for key in ("main_images", "detail_images"):
@@ -95,6 +96,8 @@ def validate_contract(name: str, payload: Any, *, allow_extra: bool = False) -> 
             field["properties"] = dict(field["properties"])
             for count_name in count_names:
                 field["properties"][count_name] = {"type": "integer", "minimum": 0}
+            if field_name == "generator_contract":
+                field["properties"]["raw_1688_image_direct_upload_forbidden"] = {"type": "boolean"}
             schema["properties"][field_name] = field
         schema["$defs"] = dict(schema.get("$defs") or {})
         planned = dict(schema["$defs"]["plannedImage"])
@@ -103,6 +106,9 @@ def validate_contract(name: str, payload: Any, *, allow_extra: bool = False) -> 
         overlays = dict(planned["properties"]["overlay_plan"])
         overlays["minItems"] = 0  # text-free product photos are legitimate studio drafts
         planned["properties"]["overlay_plan"] = overlays
+        operation = dict(planned["properties"]["operation"])
+        operation["enum"] = [*operation.get("enum", []), "adopt_captured_original"]
+        planned["properties"]["operation"] = operation
         schema["$defs"]["plannedImage"] = planned
         from pipeline.media_selection import selected_image_specs
         try:

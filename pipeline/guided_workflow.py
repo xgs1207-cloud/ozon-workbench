@@ -426,6 +426,9 @@ def confirm_selected_copy(directory: Path | str, input_fingerprint: str | None =
 def plan_selected_images(directory: Path | str, provider: Any, *, force: bool = False) -> dict[str, Any]:
     directory = Path(directory)
     _require_editable(directory)
+    existing_plan = read_json(directory / PLAN_FILE)
+    if existing_plan.get("studio_mode") is True and (existing_plan.get("main_images") or existing_plan.get("detail_images")):
+        raise ValueError("已存在独立单图/套图或原图，不能用旧整套规划覆盖；请在套图工作区追加指定数量的新套图")
     current = workflow_status(directory)
     if not current["analysis"]["confirmed"] or not current["copy"]["confirmed"]:
         raise ValueError("请先确认商品分析，并选择、保存和确认俄文文案，再规划图片")

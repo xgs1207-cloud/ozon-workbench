@@ -1,0 +1,39 @@
+Desktop listing bench, 2026-10-08
+
+Intent: let an employee finish a real product without navigating duplicated fields.
+Surface: white, ink #111820, secondary #637389, action #1557e8,
+line #dfe5ef, quiet panel #f6f8fb, failure #9b2331. 8/12/20/28px spacing.
+Use the existing desktop type stack. No mobile redesign is in scope.
+
+Media wireframe:
+  Product features / confirmed summary | image observations (advisory)
+  [Single images] [Image sets]         | separate saved workspaces
+  Supplier references                 | prompt, SKU, image purpose
+  [Use original]                      | [Save] [Generate this image]
+  Set count + create set + enqueue     | queued / phase / completed / retry
+  Working results                     | individually edit without replacing others
+  Shared publishing contact sheet     | selection + drag order + confirm
+
+Card wireframe:
+  Offer prefix (saved once)            | confirmed product summary
+  SKU / offer ID / sale price          | features + selected variant facts
+  Package weight / L / W / H           | current missing required fields
+  Official category attributes        | no unrelated workflow status widgets
+  [Save] [Compile and check card]      | no invented or duplicated product facts
+
+Verification inventory:
+  - Single/set tabs preserve independent prompts, jobs and existing results.
+  - Set count validated; starting a batch requires an explicit fee confirmation.
+  - Original adoption is sealed against captured evidence, does not call AI.
+  - Concurrent jobs remain visible; terminal failures recover only by explicit retry.
+  - Each image is editable; existing good images survive failed regeneration.
+  - Publishing selection spans both workspaces; only selected ordered images preview.
+  - Zero images allowed as draft; actual API media requirements checked before submit.
+  - Card displays operational fields once, official dynamic controls and evidence summary.
+  - Offer prefix persists per browser employee profile/shop; allocations stable and unique.
+  - Missing messages name current required fields; title has no unknown-colour suffix.
+  - Package-only dimensions save without inventing product-body dimensions.
+  - Video capture, storage, payload and fixed-offer readback tested in isolated fixtures.
+  - Readback does not import again; API-readable is not proof of storefront playback.
+  - Keyboard focus, 1280/1600 desktop overflow and page errors checked in browser.
+  - No paid model calls or real Ozon submissions required by automated verification.

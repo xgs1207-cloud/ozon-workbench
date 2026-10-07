@@ -32,7 +32,8 @@ _EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="image-slot")
 _ACTIVE: set[str] = set()
 _GUARD = threading.Lock()
 _FIELDS = ("slot", "prompt", "reference_image_ids", "reference_product_images", "output_path", "russian_text",
-           "source_sku_id", "variant_scope", "shared_across_variants", "image_type", "purpose")
+           "source_sku_id", "variant_scope", "shared_across_variants", "image_type", "purpose",
+           "origin", "capture_receipt", "workspace", "set_id")
 
 
 class ImageJobConflict(ValueError):
@@ -76,6 +77,7 @@ def _empty_studio(directory: Path) -> dict[str, Any]:
     plan["image_set_structure"] = ["自主选择任意数量的图片"]
     plan["variant_image_strategy"].update(variant_main_count=0, shared_detail_count=0)
     plan["generator_contract"]["exact_shared_detail_count"] = 0
+    plan["generator_contract"]["raw_1688_image_direct_upload_forbidden"] = False
     return plan
 
 
@@ -137,6 +139,8 @@ def _validate(directory: Path, slot: Mapping[str, Any]) -> dict[str, str]:
             raise ValueError("参考图明确属于未选上架规格，请改选当前规格的原图")
         if sku and owners and sku not in owners:
             raise ValueError("参考图与当前图位规格不一致，请选择同规格原图")
+        if not sku and len(selected) > 1 and owners:
+            raise ValueError("参考图已明确绑定规格，请选择适用的上架规格，不能将规格专属图片当作全部规格的共享图")
         paths.append(relative)
     output = _safe_file(directory, slot.get("output_path"), "output/generated-images")
     if output.suffix.lower() != ".png":
@@ -220,6 +224,7 @@ def _recover(directory: Path, journal: dict[str, Any]) -> None:
             abandoned = True
         if abandoned:
             job.update(status="unknown" if job.get("started_at") else "failed", finished_at=_now(),
+                       stage="interrupted", stage_label="任务中断，未自动重新付费",
                        message="服务重启或任务中断；未自动重试，请核对模型调用记录后自行重新生成")
             changed = True
     if changed:
@@ -231,9 +236,13 @@ def list_image_jobs(directory: Path | str) -> list[dict[str, Any]]:
     with product_edit_lock(directory):
         journal = _journal(directory)
         _recover(directory, journal)
-        public = ("id", "slot", "status", "queued_at", "started_at", "finished_at", "message", "generator", "model",
+        public = ("id", "slot", "status", "stage", "stage_label", "workspace", "set_id", "retry_of", "queued_at", "started_at", "finished_at", "message", "generator", "model",
                   "slot_fingerprint", "generation_id", "sha256", "path", "bytes")
-        return [{key: row[key] for key in public if key in row} for row in journal["jobs"]][-100:]
+        # Preserve every slot's newest state, even after >100 jobs. Otherwise a
+        # failed old slot could look unstarted and be silently charged again.
+        newest = {row["slot"]: row["id"] for row in journal["jobs"]}
+        retained = {row["id"] for row in journal["jobs"][-100:]} | set(newest.values())
+        return [{key: row[key] for key in public if key in row} for row in journal["jobs"] if row["id"] in retained]
 
 
 def _mark(directory: Path, job_id: str, **changes: Any) -> None:
@@ -252,13 +261,15 @@ def enqueue_image(directory: Path | str, slot_name: str, *, generator: Any = Non
         slot = next((row for row in _slots(plan) if row.get("slot") == slot_name), None)
         if slot is None:
             raise ImageJobConflict("图位不存在，请先添加一张图片或保存当前图位")
+        if slot.get("origin") == "captured":
+            raise ValueError("这是直接采用的真实原图；如需 AI 改图，请以此原图另建一个生图图位，原图不会被覆盖")
         snapshot_hashes = _validate(directory, slot)
         journal = _journal(directory)
         _recover(directory, journal)
         if any(row.get("slot") == slot_name and row.get("status") in {"queued", "running"} for row in journal["jobs"]):
             raise ImageJobConflict("当前图位正在生成；可以切换到其他图位继续生成")
         with _GUARD:
-            if len(_ACTIVE) >= 24:
+            if len(_ACTIVE) >= 256:
                 raise ImageJobConflict("生图队列暂时已满，请等待部分图片完成后再添加")
         if generator is None:
             from models import load_web_image_generator
@@ -293,12 +304,17 @@ def enqueue_image(directory: Path | str, slot_name: str, *, generator: Any = Non
         isolated["selected_slots"] = [slot_name]
         write_json(snapshot / PLAN_FILE, isolated)
         job = {"id": job_id, "slot": slot_name, "status": "queued", "queued_at": _now(),
+               "stage": "queued", "stage_label": "等待可用生图任务位", "workspace": slot.get("workspace", "single"), "set_id": slot.get("set_id"),
                "slot_fingerprint": slot_fingerprint(slot), "snapshot_hashes": snapshot_hashes,
                "input_fingerprint": _input_fingerprint(slot),
                "generator": generator.name, "pid": os.getpid(), "instance": _INSTANCE,
                "process_birth": _process_birth(os.getpid())}
         journal["jobs"].append(job)
         with _GUARD:
+            # Other products may enqueue while this slot's snapshot is copied.
+            # Admission is atomic; no model request exists until this succeeds.
+            if len(_ACTIVE) >= 256:
+                raise ImageJobConflict("生图队列暂时已满，此图位尚未调用模型")
             _ACTIVE.add(job_id)
         try:
             write_json(directory / JOBS_FILE, journal)
@@ -311,7 +327,7 @@ def enqueue_image(directory: Path | str, slot_name: str, *, generator: Any = Non
             _EXECUTOR.submit(run_image_job, directory, job_id, generator)
         except BaseException:
             with product_edit_lock(directory):
-                _mark(directory, job_id, status="failed", message="生图队列未能启动，尚未调用模型", finished_at=_now())
+                _mark(directory, job_id, status="failed", stage="failed", stage_label="任务未启动", message="生图队列未能启动，尚未调用模型", finished_at=_now())
             with _GUARD:
                 _ACTIVE.discard(job_id)
             raise
@@ -342,15 +358,26 @@ def run_image_job(directory: Path | str, job_id: str, generator: Any) -> None:
             plan = read_json(directory / PLAN_FILE)
             slot = next((row for row in _slots(plan) if row.get("slot") == job["slot"]), None)
             if slot is None or _input_fingerprint(slot) != job["input_fingerprint"] or _validate(directory, slot) != job["snapshot_hashes"]:
-                _mark(directory, job_id, status="stale", message="提示词、参考图或规格已改变，旧任务未调用模型", finished_at=_now())
+                _mark(directory, job_id, status="stale", stage="stale", stage_label="资料已变更，未调用模型", message="提示词、参考图或规格已改变，旧任务未调用模型", finished_at=_now())
                 return
-            _mark(directory, job_id, status="running", started_at=_now(), message="正在生成此图；其他图位可继续操作")
+            _mark(directory, job_id, status="running", stage="provider_request", stage_label="请求模型生成（模型不提供实时百分比）",
+                  started_at=_now(), message="正在生成此图；其他图位可继续操作")
+        transport = getattr(generator, "transport", None)
+        if transport is not None and hasattr(transport, "_download"):
+            original_download = transport._download
+            def monitored_download(*args: Any, **kwargs: Any):
+                with product_edit_lock(directory):
+                    _mark(directory, job_id, stage="downloading", stage_label="模型已返回结果，正在下载图片")
+                return original_download(*args, **kwargs)
+            transport._download = monitored_download
         # No product lock, no live product output paths, and no provider retry.
         from models import ImageRequest
         result = generator.generate(ImageRequest(product_id=directory.name, product_dir=snapshot,
                                                   source=read_json(snapshot / "input/source.json"), slot=job["slot"]))
         backend = str(result.get("generator") or generator.name)
         generated = result.get("generated") or []
+        with product_edit_lock(directory):
+            _mark(directory, job_id, stage="verifying", stage_label="下载已完成，检查真实图片文件")
         captured_plan = read_json(snapshot / PLAN_FILE)
         captured = _slots(captured_plan)[0]
         if backend not in REAL_IMAGE_GENERATORS or result.get("final_images") is not True or len(generated) != 1:
@@ -369,10 +396,11 @@ def run_image_job(directory: Path | str, job_id: str, generator: Any) -> None:
         sha = _hash(staged)
         with product_edit_lock(directory):
             _require_editable(directory)
+            _mark(directory, job_id, stage="committing", stage_label="检查图位版本并保存结果")
             plan = read_json(directory / PLAN_FILE)
             current = next((row for row in _slots(plan) if row.get("slot") == job["slot"]), None)
             if current is None or _input_fingerprint(current) != job["input_fingerprint"] or _validate(directory, current) != job["snapshot_hashes"]:
-                _mark(directory, job_id, status="stale", finished_at=_now(), message="生成期间提示词、参考图或规格改变；旧结果已保留在任务快照，未覆盖工作图")
+                _mark(directory, job_id, status="stale", stage="stale", stage_label="资料已变更，未覆盖旧图", finished_at=_now(), message="生成期间提示词、参考图或规格改变；旧结果已保留在任务快照，未覆盖工作图")
                 return
             target = _safe_file(directory, current["output_path"], "output/generated-images")
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -384,6 +412,7 @@ def run_image_job(directory: Path | str, job_id: str, generator: Any) -> None:
             files = {str(row.get("slot")): row for row in report.get("files") or [] if isinstance(row, Mapping)}
             generated_row = {"slot": job["slot"], "path": current["output_path"], "bytes": staged.stat().st_size,
                              "source_sku_id": current.get("source_sku_id"),
+                             "origin": "ai", "workspace": current.get("workspace", "single"), "set_id": current.get("set_id"),
                              "sha256": sha, "generator": backend, "model": result.get("model"),
                              "generation_id": job_id, "slot_fingerprint": slot_fingerprint(current)}
             files[job["slot"]] = generated_row
@@ -402,7 +431,7 @@ def run_image_job(directory: Path | str, job_id: str, generator: Any) -> None:
                 os.replace(temporary, target)
                 write_json(directory / PLAN_FILE, plan)
                 write_json(directory / REPORT_FILE, report)
-                _mark(directory, job_id, status="completed", finished_at=_now(), message="图片已生成；可选择、排序或单独重做",
+                _mark(directory, job_id, status="completed", stage="complete", stage_label="生成完成", finished_at=_now(), message="图片已生成；可选择、排序或单独重做",
                       model=result.get("model"), generation_id=job_id, sha256=sha, path=current["output_path"], bytes=generated_row["bytes"])
             if plan.get("selected_slots") != []:
                 from .image_qc import run_image_qc
@@ -417,23 +446,27 @@ def run_image_job(directory: Path | str, job_id: str, generator: Any) -> None:
             existing = next((row for row in _journal(directory)["jobs"] if row["id"] == job_id), {})
             # A completed image remains completed if optional metadata refresh fails.
             if existing.get("status") != "completed":
-                _mark(directory, job_id, status="unknown" if unknown else "failed", finished_at=_now(), message=message)
+                _mark(directory, job_id, status="unknown" if unknown else "failed", stage="interrupted" if unknown else "failed",
+                      stage_label="结果未知，未自动重试" if unknown else "失败，未自动重试", finished_at=_now(), message=message)
     finally:
+        if "original_download" in locals():
+            transport._download = original_download
         with _GUARD:
             _ACTIVE.discard(job_id)
 
 
 def add_image_slot(directory: Path | str, *, prompt: str, reference_ids: Sequence[str],
-                   source_sku_id: str | None = None, role: str = "detail", purpose: str | None = None) -> dict[str, Any]:
+                   source_sku_id: str | None = None, role: str = "detail", purpose: str | None = None,
+                   workspace: str = "single", set_id: str | None = None) -> dict[str, Any]:
     directory = Path(directory).resolve()
     with product_edit_lock(directory):
         _require_editable(directory)
         ids = _selected(directory)
+        if workspace not in {"single", "set"} or (workspace == "set" and not set_id):
+            raise ValueError("图片工作区或套图标识无效")
         sku = source_sku_id or (ids[0] if len(ids) == 1 else None)
         if sku is not None and sku not in ids:
             raise ValueError("图位规格不在已确认的上架规格中")
-        if role == "variant_main" and not sku:
-            raise ValueError("多规格主图请指定对应的上架规格")
         from models.image_plan import _list_reference_images
         plan = read_json(directory / PLAN_FILE)
         if not plan:
@@ -444,15 +477,23 @@ def add_image_slot(directory: Path | str, *, prompt: str, reference_ids: Sequenc
         refs = _list_reference_images(directory)
         plan["reference_images"] = refs
         reference_index = {row["id"]: row["path"] for row in refs}
-        choices = list(dict.fromkeys(reference_ids))
-        if not 1 <= len(choices) <= 3 or any(choice not in reference_index for choice in choices):
+        choices = list(reference_ids)
+        if not 1 <= len(choices) <= 3 or len(set(choices)) != len(choices) or any(choice not in reference_index for choice in choices):
             raise ValueError("请选择 1–3 张不同的真实采集参考图")
+        if sku is None:
+            source = read_json(directory / "input/source.json")
+            owners = set().union(*(_reference_owners(source, reference_index[choice]) for choice in choices))
+            if len(owners) == 1:
+                sku = next(iter(owners))
+        if role == "variant_main" and not sku:
+            raise ValueError("多规格主图请指定对应的上架规格")
         if not prompt.strip() or len(prompt) > 4000:
             raise ValueError("提示词须为 1–4000 字")
         slot_name = ("main" if role == "variant_main" else "image") + "-" + uuid.uuid4().hex[:12]
         blueprint = _studio_blueprint(directory)
         row = deepcopy(blueprint["main_images"][0] if role == "variant_main" else blueprint["detail_images"][0])
         row.update({"slot": slot_name, "image_type": "main" if role == "variant_main" else "detail",
+               "origin": "ai", "workspace": workspace, "set_id": set_id,
                "layout_type": "sku_main" if role == "variant_main" else "core_benefit",
                "purpose": purpose or ("突出商品真实卖点的单张图片"), "buyer_question": "Как выглядит товар?",
                "visual_goal": "展示所选商品的真实外观", "scene": "studio", "scene_description": "根据参考原图展示商品",
@@ -465,8 +506,10 @@ def add_image_slot(directory: Path | str, *, prompt: str, reference_ids: Sequenc
                "variant_kind": "seller_specification", "variant_value": "用户所选规格"})
         if sku:
             row["source_sku_id"] = sku
+            row["sku_identity"] = sku
         else:
             row.pop("source_sku_id", None)
+            row.pop("sku_identity", None)
         _validate(directory, row)
         plan["main_images" if role == "variant_main" else "detail_images"].append(row)
         plan["variant_image_strategy"].update(variant_main_count=len(plan["main_images"]), shared_detail_count=len(plan["detail_images"]))
@@ -498,9 +541,14 @@ def select_images(directory: Path | str, selected_slots: Sequence[str]) -> dict[
         for spec in specs:
             saved = files.get(spec["slot"]) or {}
             target = _safe_file(directory, spec.get("output_path"), "output/generated-images")
+            from .captured_images import CAPTURED_GENERATOR, validate_captured_image
             if (not target.is_file() or saved.get("slot_fingerprint") != slot_fingerprint(spec)
-                    or saved.get("generator") not in REAL_IMAGE_GENERATORS):
+                    or saved.get("generator") not in REAL_IMAGE_GENERATORS | {CAPTURED_GENERATOR}):
                 raise ValueError("所选图片尚未生成成功或版本已变更，请先生成后再选择")
+            if saved.get("generator") == CAPTURED_GENERATOR:
+                issues = validate_captured_image(directory, spec, saved)
+                if issues:
+                    raise ValueError("；".join(issues))
             if saved.get("sha256") and saved["sha256"] != _hash(target):
                 raise ValueError("所选图片文件发生变化，请重新生成并确认")
         write_json(directory / PLAN_FILE, plan)

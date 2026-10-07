@@ -108,8 +108,9 @@ def save_listing_details(directory: Path, details: Mapping[str, Any]) -> dict[st
     for key in DIMENSION_KEYS:
         if key in merged:
             block.pop(key, None)
-    if all(merged.get(key) is not None for key in DIMENSION_KEYS):
-        block.update({key: merged[key] for key in DIMENSION_KEYS})
+    # Preserve each confirmed axis independently. A complete shipping package
+    # must not be discarded just because optional item measurements are unknown.
+    block.update({key: merged[key] for key in DIMENSION_KEYS if merged.get(key) is not None})
     if block:
         overrides["product"] = block
     else:

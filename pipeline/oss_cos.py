@@ -137,6 +137,8 @@ def planned_slots(product_dir: Path | str) -> list[dict[str, Any]]:
                     "slot": slot,
                     "output_path": relative,
                     "role": item["role"],
+                    **({"origin": "captured", "capture_receipt": item.get("capture_receipt"), "source_sku_id": item.get("source_sku_id")}
+                       if item.get("origin") == "captured" else {}),
                 }
             )
     return rows
@@ -191,6 +193,15 @@ def image_publication_binding(directory: Path | str, manifest: Mapping[str, Any]
         if not isinstance(record, Mapping):
             issues.append(f"图位 {slot} 缺少发布版本，请重新公开图片")
             continue
+        if spec.get("origin") == "captured":
+            from .captured_images import validate_captured_image
+            receipt = next((row for row in _read_json(root / "output/image-generation-report.json").get("files") or []
+                            if row.get("slot") == slot), {})
+            provenance_errors = validate_captured_image(root, spec, receipt)
+            if (provenance_errors or record.get("origin") != "captured"
+                    or record.get("capture_receipt") != spec.get("capture_receipt")):
+                issues.extend(provenance_errors or [f"图位 {slot} 公开版本缺少真实原图来源凭据"])
+                continue
         relative = spec.get("output_path")
         source = (root / relative).resolve() if isinstance(relative, str) else root
         if not source.is_relative_to(root) or not source.is_file():
@@ -351,6 +362,13 @@ class CosObjectStorage:
             raise CosError("图片计划的本地文件必须位于当前商品目录内")
         if not source.is_file():
             return {"slot": slot, "status": "missing", "reason": f"本地文件不存在：{row['output_path']}"}
+        if row.get("origin") == "captured":
+            from .captured_images import validate_captured_image
+            receipt = next((entry for entry in _read_json(product_dir / "output/image-generation-report.json").get("files") or []
+                            if entry.get("slot") == slot), {})
+            errors = validate_captured_image(product_dir, row, receipt)
+            if errors:
+                raise CosError("；".join(errors))
 
         # Hash and upload the same immutable byte snapshot, not stat() then a later read.
         body = source.read_bytes()
@@ -524,6 +542,8 @@ class CosObjectStorage:
                     "output_path": spec["output_path"], "slot_fingerprint": slot_fingerprint(spec),
                     "sha256": item["sha256"], "size_bytes": item["bytes"],
                     "url": item["url"], "object_key": item["key"],
+                    **({"origin": "captured", "capture_receipt": spec.get("capture_receipt")}
+                       if spec.get("origin") == "captured" else {}),
                 }
             payload = {
                 "schema_version": SCHEMA_VERSION,

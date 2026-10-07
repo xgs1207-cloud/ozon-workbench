@@ -1,7 +1,8 @@
 """图片技术质检（本地、真实现）+ ``image_qc`` handler。
 
-**本地能做的（真做）**：文件可读、格式、真实宽高、3:4 比例（容差 0.002）、最低 900×1200、
-图位齐全、参考图缺失告警。
+**本地能做的（真做）**：文件可读、真实格式和宽高、原图封存凭据。
+AI 产物保持项目 3:4 / 900×1200 标准；直接采用的原图遵守 Seller API
+明确支持的 PNG/JPEG 格式，比例和小尺寸仅作画质提醒，不冒充官方最低像素规则。
 
 **本地做不了的**：商品一致性、颜色、结构、配件、合规文案 —— 需要视觉模型。
 这些维度会明确标注"未配置视觉模型"：整体 ``decision`` 记 ``revise``，
@@ -99,6 +100,9 @@ def run_image_qc(
     critical: list[str] = []
     failing_slots: list[str] = []
     revise_slots: list[str] = []
+    original_warnings: list[str] = []
+    receipts = {row.get("slot"): row for row in _read_json(directory / "output/image-generation-report.json").get("files") or []
+                if isinstance(row, Mapping)}
 
     for item in slots:
         slot = str(item.get("slot") or "unknown")
@@ -123,7 +127,8 @@ def run_image_qc(
             }
         )
 
-        probe = probe_image(directory / relative) if relative else {"ok": False, "format": "missing", "width": 0, "height": 0, "error": "没有 output_path"}
+        target = (directory / relative).resolve() if relative else directory.resolve()
+        probe = probe_image(target) if relative and target.is_relative_to(directory.resolve()) else {"ok": False, "format": "missing", "width": 0, "height": 0, "error": "没有有效 output_path"}
         format_ok = str(probe.get("format")) == "png"
         width = int(probe.get("width") or 0)
         height = int(probe.get("height") or 0)
@@ -131,9 +136,25 @@ def run_image_qc(
         if width and height:
             aspect_ok = abs((width / height) - TARGET_ASPECT) <= ASPECT_TOLERANCE
         resolution_ok = width >= MIN_WIDTH and height >= MIN_HEIGHT
-        status, message, codes = _technical_status(
-            ok=bool(probe.get("ok")), format_ok=format_ok, aspect_ok=aspect_ok, resolution_ok=resolution_ok
-        )
+        captured = item.get("origin") == "captured"
+        if captured:
+            from .captured_images import validate_captured_image
+            provenance = validate_captured_image(directory, item, receipts.get(slot) or {})
+            if provenance:
+                status, message, codes = "reject", "；".join(provenance), ["capture_provenance_invalid"]
+            elif not probe.get("ok"):
+                status, message, codes = "reject", "原图无法读取", ["image_file_unreadable"]
+            elif probe.get("format") not in {"png", "jpeg"}:
+                status, message, codes = "reject", "Seller API 商品导入明确支持 JPG/PNG；此原图可入库，但须转换后单独审核再发布", ["unsupported_format"]
+            elif not aspect_ok or not resolution_ok:
+                status, message, codes = "revise", "原图可读且格式可用；非项目建议3:4或900×1200，仅提示画质，不强制付费重生成", []
+                original_warnings.append(slot)
+            else:
+                status, message, codes = "pass", "原图格式、可读性和真实采集封存校验通过；内容仍须人工审核", []
+        else:
+            status, message, codes = _technical_status(
+                ok=bool(probe.get("ok")), format_ok=format_ok, aspect_ok=aspect_ok, resolution_ok=resolution_ok
+            )
         technical.append(
             {
                 "slot": slot,
@@ -160,7 +181,7 @@ def run_image_qc(
         if status == "reject":
             if slot not in failing_slots:
                 failing_slots.append(slot)
-        elif status == "revise":
+        elif status == "revise" and not captured:
             if slot not in revise_slots:
                 revise_slots.append(slot)
 
@@ -179,7 +200,7 @@ def run_image_qc(
                 "deduction": 12 - min(12, score),
                 "score": min(12, score),
                 "status": status,
-                "message": "文件可读、格式 png、3:4、分辨率达标" if technical_ok else "技术检查未全部通过",
+                "message": "文件可读，真实格式、来源与各自画质标准检查通过" if technical_ok else "技术检查存在问题或画质提醒",
                 "evidence": [item["path"] for item in technical[:3]],
             }
         else:
@@ -213,7 +234,7 @@ def run_image_qc(
     elif not semantic_available:
         decision = "revise"
         recommendation = (
-            "技术检查通过；商品一致性/合规等维度需要视觉模型，本地未评分。"
+            "本地可读性/格式/来源检查已执行，详见逐图结果；商品一致性/合规等维度需要视觉模型，本地未评分。"
             "正式上架前建议接入视觉质检或人工过一遍。"
         )
         regenerate = bool(revise_slots)
@@ -233,6 +254,8 @@ def run_image_qc(
         )
     if revise_slots:
         suggestions.append(f"分辨率未达标、建议重生成的图位：{', '.join(revise_slots)}")
+    if original_warnings:
+        suggestions.append(f"原图画质提醒（非强制重生成）：{', '.join(original_warnings)}；仍需人工检查文字、水印、规格一致性与合规内容")
     if semantic_available:
         suggestions.append("语义维度评分已启用（视觉模型）")
     else:

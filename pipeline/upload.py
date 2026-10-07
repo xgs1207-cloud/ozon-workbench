@@ -155,10 +155,12 @@ def _receipt_outcome(receipt: Mapping[str, Any]) -> str:
 
 
 def offer_id_for(product_id: str, sku: Mapping[str, Any], index: int) -> str:
-    """offer_id 必须稳定：优先用采集到的，否则由 product_id + sku_id 确定性生成。"""
+    """Legacy-only deterministic fallback; modern listings use the offer registry."""
     raw = str(sku.get("offer_id") or "").strip()
     if raw:
-        return re.sub(r"[^A-Za-z0-9_.-]+", "-", raw)[:50]
+        if len(raw) > 50 or any(ord(char) < 32 for char in raw):
+            raise ValueError("已有 Ozon offer_id 格式无效，不能自动修改或截断")
+        return raw
     sku_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(sku.get("sku_id") or f"S{index}"))
     return f"{product_id}-{sku_id}"[:50]
 
@@ -256,7 +258,8 @@ def build_upload_payload(
         blockers.append(f"必需属性仍缺 {missing} 个：{summary.get('missing_attribute_ids')}")
 
     # 3) 文案
-    title = str(copy_bundle.get("title_ru") or "").strip()
+    from .listing_document import clean_missing_color_suffix
+    title = clean_missing_color_suffix(copy_bundle.get("title_ru"))
     description = str(copy_bundle.get("description_ru") or "").strip()
     if not title:
         blockers.append("缺少俄文标题（先跑 russian_copy）")
@@ -303,7 +306,9 @@ def build_upload_payload(
         measurements["package_dimensions"] = dict(package_dims)
     if surface.get("source") == "missing":
         blockers.append("还没有尺寸重量数据（先跑 measurements 并人工确认尺寸重量）")
-    for label, dims in (("商品", product_dims), ("包装", package_dims)):
+    modern = (directory / "input/guided-workflow.json").is_file()
+    required_dimensions = (("包装", package_dims),) if modern else (("商品", product_dims), ("包装", package_dims))
+    for label, dims in required_dimensions:
         if not dims:
             blockers.append(f"缺少{label}尺寸（先跑 measurements，不接受编造值）")
             blockers.append(f"缺少{label}重量（先跑 measurements，不接受编造值）")
@@ -312,7 +317,7 @@ def build_upload_payload(
             blockers.append(f"缺少{label}尺寸（先跑 measurements，不接受编造值）")
         if not isinstance(dims.get("weight_g"), int) or int(dims.get("weight_g") or 0) <= 0:
             blockers.append(f"缺少{label}重量（先跑 measurements，不接受编造值）")
-    if product_dims and package_dims and not surface.get("hierarchy_ok", True):
+    if surface.get("source") != "missing" and not surface.get("hierarchy_ok", True):
         blockers.append("包装尺寸/重量小于商品本体（measurement hierarchy 不通过）")
 
     # 6) 图片公网地址
@@ -381,10 +386,12 @@ def build_upload_payload(
             for item in (by_sku.get(sku_id) or [])
             if isinstance(item, Mapping)
         ]
-        color = next(
-            (str(item.get("value")) for item in sku_attributes if "цвет" in str(item.get("attribute_name") or "").casefold()),
-            str(sku.get("color_ru") or sku.get("color") or "не указан"),
-        )
+        from .listing_document import variant_color, variant_title
+        from .listing_offer_ids import offer_for_variant
+        color = variant_color(sku, sku_attributes)
+        offer_id = offer_for_variant(directory, shop_name, sku, index)
+        if not offer_id:
+            blockers.append(f"SKU {sku_id} 尚未预留工作台货号，请先保存员工前缀并预留货号")
         color_image = next(
             (
                 str(urls.get(str(item["slot"])))
@@ -409,12 +416,12 @@ def build_upload_payload(
         variants.append(
             {
                 "source_sku_id": sku_id,
-                "offer_id": offer_id_for(product_id, sku, index),
+                "offer_id": offer_id or f"UNRESERVED-{product_id}-{index}",
                 "sku_name": str(sku.get("name_zh") or sku.get("spec_zh") or sku_id),
-                "display_name_ru": str(sku.get("name_ru") or f"{title} — {color}")[:200],
+                "display_name_ru": variant_title(title, sku, sku_attributes),
                 "price": price_text,
                 "currency_code": currency,
-                "color": color,
+                "color": color or "не указан",
                 "color_image": color_image or "unknown",
                 "attributes": sku_attributes,
                 "variant_attribute_values": [

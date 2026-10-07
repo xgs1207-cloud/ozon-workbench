@@ -209,4 +209,7 @@ def publish_source_videos(directory: Path | str, choices: Sequence[Mapping[str, 
             "published": uploaded, "uploaded": uploaded, "reused": reused, "unchanged": reused,
             "api_writes_performed": False, "storage_writes_performed": bool(uploaded),
             "ozon_video_acceptance": "not_live_verified",
+            "video_stage": "storage_verified_not_submitted",
+            "readback_required_after_submission": True,
+            "buyer_playback_verified": False,
             "warnings": ["COS 直链已完成 SHA、元数据与匿名访问核验；Ozon 的实际视频导入及审核尚未实测"]}

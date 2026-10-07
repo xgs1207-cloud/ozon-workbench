@@ -64,11 +64,23 @@ def build_url_map(
         relative = str(item.get("output_path") or "")
         if not slot:
             continue
+        source = (directory / relative).resolve()
+        if relative and not source.is_relative_to(directory.resolve()):
+            raise ValueError("图片路径必须位于当前商品目录内")
         if require_files and (not relative or not (directory / relative).is_file()):
             skipped.append(slot)
             continue
-        urls[slot] = template.format(base=cleaned, product_id=directory.name, slot=slot, role=item.get("role") or "")
-    return {"urls": urls, "skipped": skipped, "base_url": cleaned, "template": template}
+        if template == DEFAULT_TEMPLATE and item.get("origin") == "captured":
+            # Mapping only: this does not claim a verified public upload.
+            from .oss_local import sha256_file
+            if not source.is_file():
+                skipped.append(slot)
+                continue
+            urls[slot] = f"{cleaned}/{directory.name}/{slot}/{sha256_file(source)}{source.suffix.lower()}"
+        else:
+            urls[slot] = template.format(base=cleaned, product_id=directory.name, slot=slot, role=item.get("role") or "")
+    return {"urls": urls, "skipped": skipped, "base_url": cleaned, "template": template,
+            "verified_upload": False, "origins": {row["slot"]: row.get("origin", "ai") for row in slots}}
 
 
 def write_url_map(
@@ -89,6 +101,7 @@ def write_url_map(
         "generated_by": "pipeline.publish_urls",
         "note": "对象存储上传完成后写出；上传载荷只接受 https 地址",
         "urls": built["urls"],
+        "verified_upload": False, "origins": built["origins"],
         "skipped_slots": built["skipped"],
     }
     path = directory / URLS_FILE

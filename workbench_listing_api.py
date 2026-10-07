@@ -190,6 +190,31 @@ def publish_videos(product_id: str, request: VideoPublicationRequest):
             "api_writes_performed": False}
 
 
+class ReadbackRequest(BaseModel):
+    store: str | None = Field(default=None, max_length=100)
+
+
+@router.post("/guided/readback")
+def readback(product_id: str, request: ReadbackRequest):
+    """Explicit read for already submitted cards; never unlock or resubmit them."""
+    import api
+    from pipeline.ozon_verify import readback_submitted
+    directory = directory_for(product_id, edit=False)
+    report = run_service(readback_submitted, directory,
+                         store_id=api._store_for(directory, request.store))
+    return {"ok": bool(report.get("ok")), "report": report, "api_writes_performed": False}
+
+
+@router.get("/guided/readback")
+def readback_cached(product_id: str, store: str | None = None):
+    """A page reload reads saved evidence only, without contacting Ozon."""
+    import api
+    from pipeline.ozon_verify import cached_readback
+    directory = directory_for(product_id, edit=False)
+    report = run_service(cached_readback, directory, store_id=api._store_for(directory, store))
+    return {"ok": bool(report.get("ok")), "report": report, "api_writes_performed": False}
+
+
 @router.post("/guided/submit")
 def submit(product_id: str, request: StoreRequest):
     import api

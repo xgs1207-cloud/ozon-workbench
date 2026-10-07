@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import urllib.error
@@ -643,6 +644,7 @@ def _optional_numbers(source: Mapping[str, str]) -> dict[str, Any]:
 class HttpModelProvider:
     """把 OpenAI 兼容端点接到 ``ModelProvider`` 接口上（含契约校验与修复重试）。"""
 
+    supports_copy_cache_revalidation = True
     name = "http"
 
     def __init__(
@@ -674,6 +676,10 @@ class HttpModelProvider:
         attempts: int | None = None,
         contract: str | None = None,
         document_contracts: Mapping[str, str] | None = None,
+        failure_diagnostic: Path | None = None,
+        force_new_call: bool = False,
+        revalidate_only: bool = False,
+        diagnostic_context: Mapping[str, Any] | None = None,
     ) -> tuple[dict[str, Any], list[str]]:
         """调模型 → 抠 JSON →（按契约机械归一化）→ 校验 → 失败带问题清单重试。
 
@@ -681,9 +687,37 @@ class HttpModelProvider:
         ``document_contracts``：payload 里**多个子文档**各自的契约（例如 russian_copy 的
         ``title_ru`` / ``description_ru`` / ``keywords_ru``），逐个归一化。
         """
+        from pipeline.copy_evidence import safe_evidence_problems
         warnings: list[str] = []
         problems: list[str] = []
         prompt = user
+        if revalidate_only and force_new_call:
+            raise ModelError("免费重校验与付费重新生成不能同时请求；未调用模型")
+        diagnostic_key = hashlib.sha256(json.dumps({
+            "task": task, "system": system, "user": user,
+            "model": str(getattr(self.transport, "model", "")),
+            "provider": str(getattr(self.transport, "name", self.name)),
+        }, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+        if failure_diagnostic is not None and not force_new_call:
+            from pipeline.listing_form import read_json
+            previous = read_json(failure_diagnostic)
+            if previous.get("input_key") == diagnostic_key and previous.get("status") == "invalid":
+                old_payload = previous.get("payload")
+                old_problems = list(validate(old_payload)) if isinstance(old_payload, dict) else ["此前响应不是合法 JSON"]
+                if not old_problems:
+                    from pipeline.listing_form import write_json
+                    write_json(failure_diagnostic, {"task": task, "input_key": diagnostic_key,
+                                                  "status": "valid", "attempts": 0,
+                                                  "context": dict(diagnostic_context or {})})
+                    self.calls.append({"task": task, "attempt": 0, "ok": True, "cache_hit": True,
+                                       "problems": [], "normalized": [], "chars": 0})
+                    return old_payload, ["已重新校验此前响应，未重复调用收费模型"]
+                raise ModelError("此前生成结果仍未通过校验，已保留诊断且未重复收费；"
+                                 "请检查提示后显式重新生成（force=true）："
+                                 + "；".join(safe_evidence_problems(old_problems)))
+        if revalidate_only:
+            raise ModelError("未找到当前输入和模型对应的失败缓存，免费重校验已停止；"
+                             "本次未调用模型。请刷新后确认是否需要付费重新生成")
         schema: Mapping[str, Any] | None = None
         try:
             from contracts import load_contract
@@ -735,15 +769,27 @@ class HttpModelProvider:
             if fixes:
                 warnings.extend(f"{task}: {item}" for item in fixes[:6])
             if not problems:
+                if failure_diagnostic is not None:
+                    from pipeline.listing_form import write_json
+                    write_json(failure_diagnostic, {"task": task, "input_key": diagnostic_key,
+                                                  "status": "valid", "attempts": attempt,
+                                                  "context": dict(diagnostic_context or {})})
                 if attempt > 1:
                     warnings.append(f"{task}: 第 {attempt} 次尝试通过校验（前一次输出不合法）")
                 return payload, warnings
+            if failure_diagnostic is not None:
+                from pipeline.listing_form import write_json
+                write_json(failure_diagnostic, {"task": task, "input_key": diagnostic_key,
+                                              "status": "invalid", "attempts": attempt,
+                                              "problems": problems[:12], "payload": payload,
+                                              "context": dict(diagnostic_context or {})})
             if attempt < (attempts or self.max_attempts):
                 prompt = (
                     f"{user}\n\n### 上一次输出不合法，请修正后重新只输出 JSON\n"
                     + "\n".join(f"- {item}" for item in problems[:12])
                 )
-        raise ModelError(f"{task} 连续 {attempts or self.max_attempts} 次未通过校验：" + "；".join(problems[:6]))
+        raise ModelError(f"{task} 连续 {attempts or self.max_attempts} 次未通过校验："
+                         + "；".join(safe_evidence_problems(problems)))
 
     def _deterministic(self) -> Any:
         """降级用的确定性实现（仅在 fallback_to_deterministic 打开时使用）。"""
@@ -863,18 +909,37 @@ class HttpModelProvider:
         successful batches are cached by the workflow and never auto-selected.
         """
         from rules.validate import copy_bundle_hint, validate_copy_bundle
+        from pipeline.copy_evidence import candidate_evidence
         modes = {"search_first", "conversion_first", "differentiation_first"}
+        facts = request.extra.get("verified_facts") or []
 
         def validate(data: dict[str, Any]) -> list[str]:
             rows = data.get("candidates") or []
             if not isinstance(rows, list) or len(rows) != 3:
                 return ["candidates 必须恰好包含三组候选"]
-            if {row.get("mode") for row in rows if isinstance(row, Mapping)} != modes:
+            if (any(not isinstance(row, Mapping) or not isinstance(row.get("mode"), str)
+                    or row["mode"] not in modes for row in rows)
+                    or {row["mode"] for row in rows} != modes):
                 return ["候选 mode 必须为 search_first/conversion_first/differentiation_first 各一组"]
             errors = []
             for row in rows:
                 copy = row.get("copy_bundle") if isinstance(row.get("copy_bundle"), Mapping) else {}
-                errors.extend(f"{row['mode']}: {error}" for error in validate_copy_bundle(copy))
+                if any(not isinstance(copy.get(key), str) for key in ("title_ru", "description_ru")):
+                    errors.append(f"{row['mode']}: title_ru 和 description_ru 必须是字符串")
+                    continue
+                if not isinstance(copy.get("description_sections"), Mapping):
+                    errors.append(f"{row['mode']}: description_sections 必须是对象")
+                    continue
+                if not isinstance(copy.get("hashtags"), list) or any(not isinstance(tag, str) for tag in copy["hashtags"]):
+                    errors.append(f"{row['mode']}: hashtags 必须是字符串数组")
+                    continue
+                shape_errors = validate_copy_bundle(copy)
+                errors.extend(f"{row['mode']}: {error}" for error in shape_errors)
+                if not shape_errors:
+                    try:
+                        candidate_evidence(copy, facts, request.selected_keywords)
+                    except ValueError as error:
+                        errors.append(f"{row['mode']}: {error}")
             return errors
 
         user = (
@@ -893,12 +958,23 @@ class HttpModelProvider:
             "若没有已选关键词，依据已确认的真实 Ozon 商品类型与商品事实，自然表达俄文产品名称；"
             "primary_keywords 和 secondary_keywords 保持空数组，不编造采集词、搜索量或竞争数据。"
             "copy_bundle 另含 claim_evidence 数组，每项 {claim:文案中的原文,fact_ids:[verified_facts 中的 ID]}；"
-            "所有材质和数值声明都要引用事实 ID，不能为凑关键词创造事实。无事实支撑的词不要使用。\n\n"
+            "fact_ids 只能逐字使用下方 verified_facts[*].id，不得自行造 ID 或引用 source/analysis 中未列出的字段；"
+            "claim 必须逐字出现在该组 title_ru 或 description_ru，不能使用概括文本。"
+            "category.type 只支持商品类型；sku_descriptor 只支持该所选规格的颜色/形状/名称，"
+            "这些 allow_numeric=false 的标签不能证明尺寸、重量、数量、材质、功能、安全或认证。"
+            "所有材质和数值声明都要引用真实规格事实 ID；若这些信息未知则完全不写，"
+            "不要写‘未提供材质/尺寸’等缺失提示给买家。无事实支撑的词不要使用。"
+            "不要把标题中‘麦芽糖、硅胶、发光、安全、儿童适用’等营销标签当成事实。\n\n"
             + _context_block(source=request.source, analysis=request.analysis,
                              selected_keywords=request.selected_keywords,
                              verified_facts=request.extra.get("verified_facts") or [])
         )
-        payload, warnings = self._call_json(task="russian_copy_candidates", user=user, validate=validate)
+        payload, warnings = self._call_json(task="russian_copy_candidates", user=user, validate=validate,
+                                           failure_diagnostic=request.product_dir / "output/copy-generation-diagnostic.json",
+                                           force_new_call=request.extra.get("force_new_model_call") is True,
+                                           revalidate_only=request.extra.get("revalidate_only") is True,
+                                           diagnostic_context={"input_fingerprint": request.extra.get("input_fingerprint"),
+                                                               "evidence_version": request.extra.get("evidence_version")})
         # Metadata documents are deterministic projections, not extra model calls.
         from models.fake import FakeProvider
         template = FakeProvider().write_copy_ru(request)

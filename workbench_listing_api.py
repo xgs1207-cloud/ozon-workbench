@@ -46,6 +46,10 @@ class GenerateRequest(BaseModel):
     force: bool = False
 
 
+class CandidateGenerateRequest(GenerateRequest):
+    revalidate_only: bool = False
+
+
 class FingerprintRequest(BaseModel):
     input_fingerprint: str = Field(min_length=1, max_length=100)
 
@@ -71,10 +75,10 @@ def confirm_analysis(product_id: str, request: FingerprintRequest):
 
 
 @router.post("/guided/candidates")
-def generate_candidates(product_id: str, request: GenerateRequest):
+def generate_candidates(product_id: str, request: CandidateGenerateRequest):
     from pipeline.guided_workflow import generate_copy_candidates
     return {"ok": True, **run_service(generate_copy_candidates, directory_for(product_id),
-                                     web_provider(), force=request.force)}
+                                     web_provider(), force=request.force, revalidate_only=request.revalidate_only)}
 
 
 @router.put("/guided/candidates/choose")

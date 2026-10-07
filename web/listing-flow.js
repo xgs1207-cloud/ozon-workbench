@@ -47,6 +47,34 @@ function flowButton(label, action, disabled=false, extra='') {
     return `<button class="btn ${action.startsWith('next')?'':'secondary'}" data-flow-action="${action}" ${disabled?'disabled':''} ${extra}>${label}</button>`;
 }
 function flowTags(tags) {return `<div class="flow-tags">${(tags||[]).map(x=>`<span>${esc(x)}</span>`).join('')}</div>`}
+function flowCategoryReady(g) {
+    const category=g.category_selection||{};
+    return category.confirmed_by_user===true&&category.source==='ozon_seller_api'&&['category_id','type_id'].every(key=>/^[1-9]\d*$/.test(String(category[key]??'')));
+}
+function flowCopyPrerequisite(g) {
+    if(listingFlow.skuDrafts.has(state.product))return {step:'specs',label:'确认规格',message:'规格勾选尚未确认。先保存最新规格，再按最新商品资料生成文案。'};
+    if(!state.skus?.has_selection||!(state.skus?.active_count>0))return {step:'specs',label:'选择并确认规格',message:'先选择要上架的商品规格，系统才知道需要总结和展示哪个商品。'};
+    if(listingFlow.factDrafts.has(state.product))return {step:'analysis',label:'保存商品事实',message:'商品事实有未保存的修改。先保存并重新核对摘要，避免按旧资料生成文案。'};
+    if(!g.workflow?.analysis?.confirmed){
+        const status=g.workflow?.analysis?.status;
+        return {step:'analysis',label:status==='ready'?'核对并确认商品摘要':'分析商品摘要',message:status==='ready'?'商品摘要已生成，但尚未确认。核对商品信息和卖点后，点击「确认摘要和卖点」。':status==='stale'?'商品摘要已过期。先按最新规格和商品事实重新分析，再确认摘要与卖点。':'还没有已确认的商品摘要。先分析所选规格，再确认可用于文案和图片的真实卖点。'};
+    }
+    if(!flowCategoryReady(g))return {step:'keywords',label:'确认 Ozon 官方类目',message:'先确认 Ozon 官方真实类目和商品类型。关键词可以留空，不必从类目词库选择。'};
+    return null;
+}
+function flowMediaPrerequisite(g) {
+    const prerequisite=flowCopyPrerequisite(g);if(prerequisite)return prerequisite;
+    const copy=g.workflow?.copy||{};
+    if(!copy.confirmed)return {step:'copy',label:copy.selected?'核对并确认文案':copy.candidates?.length&&copy.status!=='stale'?'选择并确认文案':'生成标题和简介',message:copy.status==='stale'?'文案已过期，请返回「确认文案」按最新资料重新生成、选择并确认。':copy.selected?'已经选择文案，但尚未确认。核对标题、简介和标签后，点击「确认当前标题、简介和标签」。':copy.candidates?.length?'先采用一组标题、简介和标签，并确认当前文案，再建立图片图位。':'先生成并确认标题、简介和标签，再建立图片图位。若上次生成失败，可返回文案步骤重试；不会自动调用模型。'};
+    return null;
+}
+function flowPrerequisiteHtml(prerequisite,heading) {
+    return prerequisite?`<div class="hint warn flow-prerequisite" role="status"><strong>${esc(heading)}</strong><p>${esc(prerequisite.message)}</p><div class="flow-actionrow">${flowButton(prerequisite.label,'step',listingFlow.busy,`data-step="${prerequisite.step}"`)}</div></div>`:'';
+}
+function flowOperationErrorHtml(step) {
+    const error=listingFlow.errors.get(state.product);
+    return error&&error.step===step?`<div class="flow-error" role="alert"><b>上次操作未完成：</b>${esc(error.message)}<div class="flow-actionrow">${flowButton('关闭提示','dismiss-error')}</div></div>`:'';
+}
 const flowFactLabels={title_cn:'商品名称',product_type:'商品类型',category_cn:'原始类目',material:'材质',materials:'材质',material_zh:'材质',material_ru:'材质（俄文）',brand:'品牌',pack_count:'包装数量',package_quantity:'包装内数量',skus:'所选规格',dimensions:'尺寸',weight:'重量',features:'已知特点',usage:'用途',load_capacity:'承重',certifications:'认证',functions:'功能',accessories:'配件',sku_id:'规格编号',name_cn:'规格名称',name_zh:'规格名称',properties:'规格参数',price_cny:'采购价（元）',image_refs:'图片来源'};
 function flowScalar(value) {
     if (value == null || value === '' || value === 'unknown') return '未确认';
@@ -73,10 +101,12 @@ function flowAnalysisHtml(g) {
     <p class="field-help">相同输入优先使用已保存结果，不重复调用；此处不会生成图片或提交商品。</p></section>`;
 }
 function flowCandidatesHtml(g) {
-    const c = g.workflow?.copy || {}, modes={search_first:'搜索匹配优先',conversion_first:'买家理解优先',differentiation_first:'真实差异优先'};
+    const c = g.workflow?.copy || {}, modes={search_first:'搜索匹配优先',conversion_first:'买家理解优先',differentiation_first:'真实差异优先'},prerequisite=flowCopyPrerequisite(g),generation=g.copy_generation_status||{},failed=generation.current===true&&generation.status==='invalid_response';
     return `<section class="panel"><h2>选择一组俄文文案</h2><p class="flow-lead">三组候选使用相同的已确认事实，只改变表达重点。选定之前不会填入正式卡片。</p>
+    ${flowPrerequisiteHtml(prerequisite,'生成文案前还需完成一步')}
     ${c.status==='stale'?'<div class="hint warn">规格、事实、类目或关键词已经改变。这些候选已过期，请重新生成。</div>':''}
-    <div class="flow-actionrow">${flowButton('生成三组标题、简介和标签','candidates',!g.workflow?.analysis?.confirmed||listingFlow.busy)}</div>
+    ${failed?`<div class="hint warn"><strong>上次模型结果未通过校验</strong><p>已保存失败结果，普通重试只重新校验，不会再次调用模型。需要新候选时，请主动点击付费重新生成。</p>${generation.errors?.length?`<ul class="flow-summary-list">${generation.errors.slice(0,5).map(error=>`<li>${esc(error)}</li>`).join('')}</ul>`:''}</div>`:''}
+    <div class="flow-actionrow">${flowButton(failed?'重新校验已保存结果（不调用模型）':'生成三组标题、简介和标签','candidates',Boolean(prerequisite)||listingFlow.busy)}${failed?flowButton('重新生成候选（会调用模型）','candidates-force',Boolean(prerequisite)||listingFlow.busy):''}</div>
     ${(c.candidates||[]).map(x=>`<article class="flow-candidate ${c.selected_id===x.id?'selected':''}"><h3>${esc(modes[x.mode]||x.label||x.mode)}</h3><p class="flow-candidate-title">${esc(x.title_ru||x.title)}</p><p>${esc(x.description_ru||x.description)}</p>${flowTags(x.hashtags)}${(x.audit?.risk_flags||[]).length?`<p class="bad">${esc(x.audit.risk_flags.join('；'))}</p>`:''}${flowButton(c.selected_id===x.id?'已选择本组':'采用本组','choose-copy',c.status==='stale'||listingFlow.busy,`data-candidate="${esc(x.id)}"`)}</article>`).join('')||'<div class="empty">确认商品摘要和真实 Ozon 类目后即可生成；可自填关键词，不必读取类目词库。</div>'}</section>`;
 }
 function flowStudioSlots(g=state.guided){return [...(g?.image_plan?.main_images||[]),...(g?.image_plan?.detail_images||[])]}
@@ -84,11 +114,12 @@ function flowStudioActive(g=state.guided){const slots=flowStudioSlots(g),saved=l
 function flowStudioReferenceIds(slot){const spec=flowStudioSlots().find(x=>x.slot===slot),draft=productDraft();return String(draft?.edits?.[`refs:${slot}`]??(spec?.reference_image_ids||[]).join(',')).split(',').map(x=>x.trim()).filter(Boolean)}
 function flowMediaUrl(path){return `/api/workbench/products/${encodeURIComponent(state.product)}/media/${String(path).split('/').map(encodeURIComponent).join('/')}`}
 function flowImageStudioHtml(g){
-    const slots=flowStudioSlots(g),active=flowStudioActive(g),references=g.image_plan?.reference_images?.length?g.image_plan.reference_images:(g.captured_reference_images||[]),selected=new Set(flowStudioReferenceIds(active)),generated=new Set(g.generated_image_paths||[]),backend=imageBackendInfo(g),planReady=g.review?.sections.image_plan.approved===true;
-    return `<section class="panel image-studio"><div class="studio-toolbar"><div><h2>图片生成</h2><p>勾选参考图，编辑提示词，再生成当前图位。采集原图不会被修改。</p></div><div class="studio-tools">${flowButton('AI 规划整套图片','plan',!g.workflow?.copy?.confirmed||listingFlow.busy)}${reviewButton('image_plan')}</div></div>
+    const slots=flowStudioSlots(g),active=flowStudioActive(g),references=g.image_plan?.reference_images?.length?g.image_plan.reference_images:(g.captured_reference_images||[]),selected=new Set(flowStudioReferenceIds(active)),generated=new Set(g.generated_image_paths||[]),backend=imageBackendInfo(g),planReady=g.review?.sections.image_plan.approved===true,prerequisite=flowMediaPrerequisite(g);
+    return `<section class="panel image-studio"><div class="studio-toolbar"><div><h2>图片生成</h2><p>勾选参考图，编辑提示词，再生成当前图位。采集原图不会被修改。</p></div><div class="studio-tools">${flowButton('AI 规划整套图片','plan',Boolean(prerequisite)||listingFlow.busy)}${reviewButton('image_plan')}</div></div>
+    ${flowPrerequisiteHtml(prerequisite,'生图前还需完成一步')}
     ${g.workflow?.plan?.status==='stale'?'<div class="hint warn">商品信息或文案已变更，请重新规划；旧提示词仍可查看，暂不能付费生图。</div>':''}
-    <div class="studio-workspace"><div class="studio-references"><div class="studio-reference-top"><h3>参考图片</h3><span class="studio-reference-count" id="flowStudioReferenceCount">已选 ${selected.size} / 3</span></div><p class="field-help">本次只传入所勾选原图，最多 3 张。只选与当前规格一致的商品。</p>${references.length?`<div class="studio-reference-grid">${references.map((ref,i)=>`<div><label class="studio-reference"><input type="checkbox" class="studioReferenceChoice" data-reference="${esc(ref.id)}" aria-label="参考图 ${i+1} ${esc(ref.id)}" ${selected.has(String(ref.id))?'checked':''} ${active?'':'disabled'}><img src="${flowMediaUrl(ref.path)}" alt="采集参考图 ${i+1}" loading="lazy"><span>${esc(ref.role==='detail'?'详情图':ref.role==='sku'?'规格图':'商品图')} ${i+1}</span></label><a class="studio-reference-preview" href="${flowMediaUrl(ref.path)}" target="_blank" rel="noopener noreferrer">查看原图</a></div>`).join('')}</div>`:'<div class="empty">先点「AI 规划整套图片」读取采集图片，或重新采集缺失的原图。</div>'}<p id="flowStudioReferenceError" class="inline-error" role="alert" ${selected.size>3?'':'hidden'}>参考图最多 3 张，请减少勾选后保存。</p></div>
-    <div class="studio-editor">${slots.length?`<nav class="studio-slot-nav" aria-label="选择生成图位">${slots.map((spec,i)=>`<button data-flow-action="studio-slot" data-slot="${esc(spec.slot)}" class="${spec.slot===active?'on':''}" aria-pressed="${spec.slot===active}">${esc(spec.slot)}${generated.has(spec.output_path)?' ✓':''}</button>`).join('')}</nav>${slots.map(spec=>`<div class="studio-slot-editor" data-studio-slot="${esc(spec.slot)}" ${spec.slot===active?'':'hidden'}><h3>${esc(spec.purpose||spec.slot)}</h3><label class="field">图片提示词<textarea class="slotPrompt" data-slot="${esc(spec.slot)}" maxlength="4000" placeholder="描述商品、构图、背景、光线与要突出展示的真实卖点">${esc(spec.prompt||'')}</textarea></label><input type="hidden" class="slotRefs" data-slot="${esc(spec.slot)}" value="${esc((spec.reference_image_ids||[]).join(', '))}"><div class="studio-prompt-actions"><span class="muted" data-studio-draft="${esc(spec.slot)}">保存提示词和参考图后，确认整套规划。</span><button class="btn ghost small" data-action="save-slot" data-slot="${esc(spec.slot)}">保存当前图位</button></div><div class="studio-generation-footer"><p>${esc(backend.label)} ${esc(backend.model)}<br>${esc(backend.aspect_ratio)}${backend.image_size?` / ${esc(backend.image_size.toUpperCase())}`:''} · 输出 ${esc(backend.normalized_size)}${planReady?' · 规划已确认':' · 先确认整套规划'}</p><button class="btn studio-generate" data-action="generate-slot" data-slot="${esc(spec.slot)}" ${planReady&&imageBackendReady(g)&&!state.imageGenerationInProgress?'':'disabled'}>生成当前图片</button></div></div>`).join('')}`:'<div class="empty">点击「AI 规划整套图片」建立主图、细节图和场景图位。之后可自由改写每张图的提示词。</div>'}
+    <div class="studio-workspace"><div class="studio-references"><div class="studio-reference-top"><h3>参考图片</h3><span class="studio-reference-count" id="flowStudioReferenceCount">已选 ${selected.size} / 3</span></div><p class="field-help">本次只传入所勾选原图，最多 3 张。只选与当前规格一致的商品。${active?'':'图位建立后即可勾选；现在可以先浏览原图。'}</p>${references.length?`<div class="studio-reference-grid">${references.map((ref,i)=>`<div><label class="studio-reference"><input type="checkbox" class="studioReferenceChoice" data-reference="${esc(ref.id)}" aria-label="参考图 ${i+1} ${esc(ref.id)}" ${selected.has(String(ref.id))?'checked':''} ${active?'':'disabled'}><img src="${flowMediaUrl(ref.path)}" alt="采集参考图 ${i+1}" loading="lazy"><span>${esc(ref.role==='detail'?'详情图':ref.role==='sku'?'规格图':'商品图')} ${i+1}</span></label><a class="studio-reference-preview" href="${flowMediaUrl(ref.path)}" target="_blank" rel="noopener noreferrer">查看原图</a></div>`).join('')}</div>`:'<div class="empty">当前没有可显示的采集原图，请检查插件采集结果。</div>'}<p id="flowStudioReferenceError" class="inline-error" role="alert" ${selected.size>3?'':'hidden'}>参考图最多 3 张，请减少勾选后保存。</p></div>
+    <div class="studio-editor">${slots.length?`<nav class="studio-slot-nav" aria-label="选择生成图位">${slots.map((spec,i)=>`<button data-flow-action="studio-slot" data-slot="${esc(spec.slot)}" class="${spec.slot===active?'on':''}" aria-pressed="${spec.slot===active}">${esc(spec.slot)}${generated.has(spec.output_path)?' ✓':''}</button>`).join('')}</nav>${slots.map(spec=>`<div class="studio-slot-editor" data-studio-slot="${esc(spec.slot)}" ${spec.slot===active?'':'hidden'}><h3>${esc(spec.purpose||spec.slot)}</h3><label class="field">图片提示词<textarea class="slotPrompt" data-slot="${esc(spec.slot)}" maxlength="4000" placeholder="描述商品、构图、背景、光线与要突出展示的真实卖点">${esc(spec.prompt||'')}</textarea></label><input type="hidden" class="slotRefs" data-slot="${esc(spec.slot)}" value="${esc((spec.reference_image_ids||[]).join(', '))}"><div class="studio-prompt-actions"><span class="muted" data-studio-draft="${esc(spec.slot)}">保存提示词和参考图后，确认整套规划。</span><button class="btn ghost small" data-action="save-slot" data-slot="${esc(spec.slot)}">保存当前图位</button></div><div class="studio-generation-footer"><p>${esc(backend.label)} ${esc(backend.model)}<br>${esc(backend.aspect_ratio)}${backend.image_size?` / ${esc(backend.image_size.toUpperCase())}`:''} · 输出 ${esc(backend.normalized_size)}${planReady?' · 规划已确认':' · 先确认整套规划'}</p><button class="btn studio-generate" data-action="generate-slot" data-slot="${esc(spec.slot)}" ${!prerequisite&&planReady&&imageBackendReady(g)&&!state.imageGenerationInProgress?'':'disabled'}>生成当前图片</button></div></div>`).join('')}`:`<div class="empty">${prerequisite?'先完成上方提示的步骤，再建立图片图位。原图会一直保留，不会自动生图。':'点击「AI 规划整套图片」建立主图、细节图和场景图位。之后可自由改写每张图的提示词。'}</div>`}
     <details class="studio-library" ${slots.length?'open':''}><summary>提示词库 · 保存与复用</summary><div class="studio-library-tools"><label class="field">保存名称<input id="flowPromptName" maxlength="80" value="${esc(listingFlow.promptNames.get(`${state.product}:${active}`)||'')}" placeholder="例如 白底主图 / 场景展示"></label>${flowButton('保存当前提示词','save-image-prompt',!active||listingFlow.busy)}</div><div id="flowImagePromptLibrary">${flowPromptLibraryHtml()}</div><p class="field-help">同名保存会更新库中原提示词，不改变已保存的商品图位。选择提示词只修改编辑器，不会自动保存图位或调用生图。</p></details>
     <details class="studio-settings"><summary>模型配置与费用说明</summary>${imageBackendSummaryHtml(g)}</details></div></div>
     <section class="studio-results"><div class="studio-results-head"><h3>生成结果 <span class="tag">${generated.size} 张</span></h3><span class="muted">每次生成一张；重做会取消原图片审核。</span></div>${slots.length?`<div class="studio-result-grid">${slots.map(spec=>`<article class="studio-result">${generated.has(spec.output_path)?`<a href="${flowMediaUrl(spec.output_path)}" target="_blank" rel="noopener noreferrer"><img src="${flowMediaUrl(spec.output_path)}?v=${encodeURIComponent(g.review?.sections.images?.fingerprint||g.workflow?.plan?.fingerprint||'saved')}" alt="${esc(spec.slot)} 生成结果" loading="lazy"></a>`:'<div class="flow-image-placeholder">尚未生成</div>'}<h4>${esc(spec.slot)}</h4><p>${esc(spec.purpose||'商品图片')}</p>${flowButton(generated.has(spec.output_path)?'修改 / 重做':'编辑此图','studio-slot',listingFlow.busy,`data-slot="${esc(spec.slot)}"`)}</article>`).join('')}</div>`:'<p class="muted">生成后的图片会显示在这里。</p>'}</section></section>`;
@@ -182,7 +213,7 @@ renderProduct = function renderStepwiseProduct() {
     pane('preview').insertAdjacentHTML('beforeend',`<section class="panel"><h2>提交官方 API / 导出 Excel</h2><p class="flow-lead">两种输出使用同一份已确认资料。接口受理不等于审核通过或可售，不自动填写库存。</p><div class="flow-actionrow">${flowButton('公开已确认图片的 HTTPS 地址','publish-media',!g.review?.sections.images.approved||listingFlow.busy)}${flowButton('刷新 Ozon 提交结果','verify')}</div><p class="field-help">图片发布到你配置的存储，只有公开可访问的地址才能用于上架。</p><div class="flow-actionrow">${flowButton('确认并提交到 Ozon','submit',!g.review?.ready_to_preflight||listingFlow.busy)}</div><h3>最新类目模板</h3><p class="field-help">从 Ozon 下载当前类目的最新模板。类目编号不一致时会阻止导出，不修改模板的隐藏配置。</p><input id="flowTemplateFile" type="file" accept=".xlsx"><div class="flow-actionrow">${flowButton('上传模板','upload-template',listingFlow.busy)}${flowButton('导出已确认商品 Excel','export',listingFlow.busy)}</div><div id="flowPublishResult" class="flow-publish-result"></div></section>`);
     const i=listingFlowSteps.findIndex(x=>x[0]===active);
     pane(active).insertAdjacentHTML('beforeend',`<div class="flow-footer">${i?flowButton('上一步','step',false,`data-step="${listingFlowSteps[i-1][0]}"`):'<span></span>'}${i<listingFlowSteps.length-1?flowButton('下一步','step',false,`data-step="${listingFlowSteps[i+1][0]}"`):'<span></span>'}</div>`);
-    const error=listingFlow.errors.get(state.product);if(error)pane(active).insertAdjacentHTML('afterbegin',`<div class="flow-error" role="alert">${esc(error)}</div>`);
+    pane(active).insertAdjacentHTML('afterbegin',flowOperationErrorHtml(active));
     if(listingFlow.busy)pane(active).insertAdjacentHTML('afterbegin','<p class="flow-status" role="status">正在处理，请勿重复点击。不会自动提交商品或批量付费生图。</p>');
     hydrateProductFields();filterListingFields();renderProductSupport();flowStudioRefreshReferences();
     if(active==='media')flowLoadPromptLibrary();
@@ -199,13 +230,14 @@ document.addEventListener('click',async event=>{
     const button=event.target.closest('[data-flow-action]');if(!button)return;
     const action=button.dataset.flowAction;
     if(action==='step'){if(!listingFlow.busy)flowSetStep(button.dataset.step);return}
+    if(action==='dismiss-error'){listingFlow.errors.delete(state.product);renderProduct();return}
     if(action==='studio-slot'){if(!listingFlow.busy&&!state.imageGenerationInProgress){listingFlow.studioSlots.set(state.product,button.dataset.slot);renderProduct()}return}
     if(listingFlow.busy)return;
-    const id=state.product;
+    const id=state.product,operationStep=flowStep();
     listingFlow.errors.delete(id);
     try {
-        if(['analyze','confirm-analysis','candidates','choose-copy','save-copy','confirm-copy','plan','prepare-card','publish-media','submit','export'].includes(action)&&listingFlow.skuDrafts.has(id))throw Error('规格勾选尚未确认，请返回第一步确认规格');
-        if(['confirm-analysis','candidates','choose-copy','confirm-copy','plan','prepare-card','submit','export'].includes(action)&&listingFlow.factDrafts.has(id))throw Error('补充事实尚未保存，请返回商品摘要保存并重新分析');
+        if(['analyze','confirm-analysis','candidates','candidates-force','choose-copy','save-copy','confirm-copy','plan','prepare-card','publish-media','submit','export'].includes(action)&&listingFlow.skuDrafts.has(id))throw Error('规格勾选尚未确认，请返回第一步确认规格');
+        if(['confirm-analysis','candidates','candidates-force','choose-copy','confirm-copy','plan','prepare-card','submit','export'].includes(action)&&listingFlow.factDrafts.has(id))throw Error('补充事实尚未保存，请返回商品摘要保存并重新分析');
         if(['prepare-card','submit','export'].includes(action)&&listingFlow.videoDrafts.has(id))throw Error('视频选择尚未保存，请先保存上架视频选择');
         button.disabled=true;listingFlow.busy=true;
         if(action==='reload-image-prompts'){await flowLoadPromptLibrary(true)}
@@ -247,10 +279,14 @@ document.addEventListener('click',async event=>{
             const input=action==='use-primary'?$('#productPrimary'):$('#productSecondary');
             input.value=action==='use-primary'?button.dataset.word:[...new Set([...input.value.split(',').map(x=>x.trim()).filter(Boolean),button.dataset.word])].join(', ');input.dispatchEvent(new Event('input',{bubbles:true}));notice('已加入输入框，请保存商品关键词');
         }
-        if(action==='candidates'){
+        if(action==='candidates'||action==='candidates-force'){
             if([...productDraft()?.pending||[]].some(x=>['productPrimary','productSecondary'].includes(x)))throw Error('请先保存最新关键词');
             if(!state.guided.category_selection?.confirmed_by_user)throw Error('先在类目与关键词步骤确认真实 Ozon 类目和类型');
-            notice('正在生成三组俄文候选，不会自动应用或上架');await flowRequest('guided/candidates');await refreshProduct();
+            const force=action==='candidates-force';
+            if(force&&!(state.guided.copy_generation_status?.current===true&&state.guided.copy_generation_status?.status==='invalid_response'))throw Error('候选结果状态已变化，请刷新后再决定是否重新生成');
+            if(force&&!confirm('确认重新调用豆包生成三组标题、简介和标签？这会产生模型费用；请求及有界修复次数以服务器配置为准。已有结果不会自动采用，也不会自动生图或上架。'))return;
+            const revalidateOnly=!force&&state.guided.copy_generation_status?.current===true&&state.guided.copy_generation_status?.status==='invalid_response';
+            notice(revalidateOnly?'正在重新校验已保存的结果，不调用模型':'正在生成三组俄文候选，不会自动应用或上架');await flowRequest('guided/candidates','POST',force?{force:true}:revalidateOnly?{revalidate_only:true}:{});await refreshProduct();
         }
         if(action==='choose-copy'){
             await flowRequest('guided/candidates/choose','PUT',{candidate_id:button.dataset.candidate});
@@ -304,7 +340,7 @@ document.addEventListener('click',async event=>{
         }
         if(action==='verify'){const result=await flowRequest('verify','POST',{store:selectedReadStore()?.id});flowShowResult(result)}
     } catch(error) {
-        listingFlow.errors.set(id,error.message);notice(error.message,true);
+        listingFlow.errors.set(id,{step:listingFlow.steps.get(id)||operationStep,action,message:error.message});notice(error.message,true);
         if(id===state.product){await refreshProduct().catch(()=>{});if(state.view==='product')renderProduct()}
     } finally {
         listingFlow.busy=false;

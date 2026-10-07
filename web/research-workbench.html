@@ -260,6 +260,6 @@ document.addEventListener('click',async e=>{const b=e.target.closest('[data-op-a
 async function startWorkbench(){await load();const productId=new URLSearchParams(location.search).get('product_id');if(productId&&/^P\d{6}$/.test(productId)){try{await fetchProduct(productId)}catch(e){notice('采集商品读取失败：'+e.message,true)}}}
 startWorkbench();
 </script>
-<script src="/assets/listing-flow.js?v=20261007-studio2"></script>
+<script src="/assets/listing-flow.js?v=20261007-copy3"></script>
 </body>
 </html>

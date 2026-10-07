@@ -2219,6 +2219,7 @@ def guided_product(product_id: str) -> dict[str, Any]:
     return {"ok": True, "product_id": product_id, "review": review_status(directory),
             "image_backend": image_backend_settings(),
             "captured_reference_images": _list_reference_images(directory),
+            "copy_generation_status": __import__("pipeline.guided_workflow", fromlist=["copy_generation_status"]).copy_generation_status(directory),
             "workflow": __import__("pipeline.guided_workflow", fromlist=["workflow_status"]).workflow_status(directory),
             "video_library": __import__("pipeline.source_videos", fromlist=["list_source_videos"]).list_source_videos(directory),
             "media_selection": _read_json_file(directory / "input/listing-media.json"),

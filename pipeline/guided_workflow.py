@@ -5,19 +5,20 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
 import json
-import re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from contracts import validate_contract
 from models import AnalysisRequest, CopyRequest, ImagePlanRequest
-from rules.validate import official_copy_checks, validate_copy_bundle
+from rules.validate import validate_copy_bundle
 
 from .listing_form import read_json, write_json, _require_editable
 from .product_edit_lock import product_file_transaction, serialized_product_edit
 from .selected_source import selected_source
 from .selection import load_selected_keywords
 from .analysis_gates import risk_gates
+from .copy_evidence import (COPY_EVIDENCE_VERSION, candidate_evidence as _candidate_evidence,
+                            safe_evidence_problems, verified_copy_facts as _verified_facts)
 
 STATE_FILE = "input/guided-workflow.json"
 CANDIDATES_FILE = "output/copy-candidates.json"
@@ -85,10 +86,29 @@ def copy_fingerprint(directory: Path | str) -> str:
     keywords = load_selected_keywords(directory) or {}
     category = read_json(directory / "input/category-selection.json")
     schema = read_json(directory / "input/category-form.json")
-    return _hash({"version": 1, "analysis_inputs": analysis_fingerprint(directory),
+    return _hash({"version": 2, "evidence_version": COPY_EVIDENCE_VERSION, "analysis_inputs": analysis_fingerprint(directory),
                   "analysis": read_json(directory / ANALYSIS_FILE), "keywords": keywords.get("keywords") or [],
                   "category": {key: category.get(key) for key in ("shop_id", "category_id", "type_id", "source", "confirmed_by_user")},
-                  "schema_fields": schema.get("fields") or []})
+                  "schema_fields": schema.get("fields") or [],
+                  "category_evidence": {key: schema.get(key) for key in
+                                        ("source", "shop_id", "category_id", "type_id", "category_name", "category_path", "language")}})
+
+
+def copy_generation_status(directory: Path | str) -> dict[str, Any]:
+    """Read-only retry advice; never return the cached response or model keys."""
+    directory = Path(directory)
+    diagnostic = read_json(directory / "output/copy-generation-diagnostic.json")
+    context = diagnostic.get("context") if isinstance(diagnostic.get("context"), Mapping) else {}
+    try:
+        current = bool(context.get("input_fingerprint") == copy_fingerprint(directory)
+                       and context.get("evidence_version") == COPY_EVIDENCE_VERSION)
+    except ValueError:
+        current = False
+    blocked = current and diagnostic.get("status") == "invalid"
+    return {"status": "invalid_response" if blocked else "none" if not diagnostic else "stale" if not current else "none", "current": current,
+            "retry_requires_confirmation": bool(blocked),
+            "errors": safe_evidence_problems(diagnostic.get("problems") or []) if blocked else [],
+            "model_calls": 0}
 
 
 def _copy_source(directory: Path) -> dict[str, Any]:
@@ -98,6 +118,16 @@ def _copy_source(directory: Path) -> dict[str, Any]:
     if category.get("confirmed_by_user") is not True or category.get("source") != "ozon_seller_api" or not valid_ids:
         raise ValueError("请先人工确认 Ozon 官方真实类目和商品类型，再生成正式俄文候选")
     source = selected_source(directory, read_json(directory / "input/source.json"), require_selection=True)
+    form = read_json(directory / "input/category-form.json")
+    if (form.get("source") == "ozon_seller_api"
+            and str(form.get("category_id")) == str(category["category_id"])
+            and str(form.get("type_id")) == str(category["type_id"])
+            and str(form.get("shop_id")) == str(category.get("shop_id"))):
+        # The selection can contain only IDs and a translated breadcrumb. Use
+        # the already fetched official leaf name; never guess a Russian type.
+        category = {**category, "type_name": form.get("category_name"),
+                    "type_name_language": form.get("language"), "category_path": form.get("category_path")}
+        source["selected_category"] = category
     source["fact_collection_only"] = True
     return source
 
@@ -264,118 +294,13 @@ def _validate_bundle(bundle: Mapping[str, Any]) -> None:
         raise ValueError("俄文文案未通过校验：" + "；".join(errors[:6]))
 
 
-_MEASURE = re.compile(r"(?<![\w])(?P<number>\d+(?:[.,]\d+)?)\s*(?P<unit>[A-Za-zА-Яа-яЁё]+)?")
-_UNITS = {
-    "ml": "ml", "мл": "ml", "миллилитров": "ml", "l": "l", "л": "l", "литров": "l",
-    "g": "g", "г": "g", "гр": "g", "граммов": "g", "kg": "kg", "кг": "kg",
-    "mm": "mm", "мм": "mm", "cm": "cm", "см": "cm", "м": "m", "m": "m",
-    "шт": "piece", "штук": "piece", "штуки": "piece", "pcs": "piece", "pc": "piece",
-    "вт": "w", "w": "w", "v": "v", "в": "v", "вольт": "v",
-}
-_MATERIAL_CLAIMS = (
-    (r"\bсиликон\w*", ("硅胶", "silicone", "силикон")),
-    (r"\bхлоп\w*", ("棉", "cotton", "хлоп")),
-    (r"\bполиэстер\w*", ("涤纶", "聚酯", "polyester", "полиэстер")),
-    (r"\bпластик\w*", ("塑料", "plastic", "пластик", "abs", "pvc", "полипропилен")),
-    (r"\b(?:нержавеющ\w*|сталь\w*|стальн\w*)", ("钢", "steel", "сталь", "стальн", "нержавеющ")),
-    (r"\bшерст\w*", ("羊毛", "шерст", "wool")),
-    (r"\b(?:деревян\w*|древесин\w*)", ("木", "wood", "дерев", "древес")),
-)
-
-
-def _measurements(value: Any, unit: str = "") -> set[tuple[str, str | None]]:
-    text = f"{value} {unit}".strip()
-    return {(str(float(match["number"].replace(",", "."))).rstrip("0").rstrip(".")
-             if "." in str(float(match["number"].replace(",", "."))) else match["number"],
-             _UNITS.get((match["unit"] or "").lower())) for match in _MEASURE.finditer(text)}
-
-
-def _verified_facts(analysis: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Reproducible IDs for code-derived facts; marketing inferences are excluded."""
-    result = []
-    skip = {"title_cn", "category_cn", "source", "source_refs", "image_refs", "sku_id", "name_cn", "price_cny"}
-
-    def visit(value: Any, path: str, key: str = "") -> None:
-        if key in skip or value is None or value == "unknown":
-            return
-        if isinstance(value, Mapping):
-            for name, child in value.items():
-                visit(child, f"{path}.{name}", str(name))
-        elif isinstance(value, list):
-            for index, child in enumerate(value):
-                identity = str(child.get("sku_id")) if isinstance(child, Mapping) and child.get("sku_id") else str(index)
-                visit(child, f"{path}.{identity}", key)
-        elif isinstance(value, (str, int, float)) and not isinstance(value, bool) and str(value).strip():
-            unit = "мм" if key.endswith("_mm") else "г" if key.endswith("_g") else "шт" if key == "package_quantity" else ""
-            if path.startswith("facts.package_quantity") and key == "value":
-                unit = "шт"
-            result.append({"id": path, "value": value, "unit": unit, "verified": True,
-                           "source": "confirmed_product_facts", "evidence": [f"{ANALYSIS_FILE}#{path}"]})
-
-    visit(analysis.get("facts") or {}, "facts")
-    return result
-
-
-def _candidate_evidence(copy: Mapping[str, Any], facts: list[dict[str, Any]], keywords: list[dict[str, Any]]) -> dict[str, Any]:
-    """Validate exact cited claims and numeric units; expose honest diagnostics.
-
-    The small material matcher covers only known aliases; remaining grammar and
-    benefit claims still need review rather than fictional quality scores.
-    """
-    combined = f"{copy['title_ru']}\n{copy['description_ru']}"
-    by_id = {row["id"]: row for row in facts}
-    evidence = []
-    for row in copy.get("claim_evidence") or []:
-        claim, ids = str(row.get("claim") or "").strip(), list(row.get("fact_ids") or [])
-        if not claim or claim not in combined or not ids or any(identity not in by_id for identity in ids):
-            raise ValueError("候选声明的事实引用无效，请重新生成或去掉无法证实的声明")
-        measures = {measure for identity in ids for measure in _measurements(by_id[identity]["value"], by_id[identity]["unit"])}
-        if any(not any(n == fn and (u is None or u == fu) for fn, fu in measures) for n, u in _measurements(claim)):
-            raise ValueError("候选数值/单位与引用的事实不一致")
-        evidence.append({"claim": claim, "fact_ids": ids})
-    # Old/fake providers may not return explicit numeric evidence. Match exact
-    # values AND units against verified facts, never against the source title.
-    for match in _MEASURE.finditer(combined):
-        raw = match.group(0).strip()
-        numeric_only = match["number"] + ((match["unit"] or "") if (match["unit"] or "").lower() in _UNITS else "")
-        measurement = next(iter(_measurements(numeric_only)))
-        matching = [identity for identity, fact in by_id.items()
-                    if any(measurement[0] == n and (measurement[1] is None or measurement[1] == unit)
-                           for n, unit in _measurements(fact["value"], fact["unit"]))]
-        if not matching:
-            raise ValueError(f"候选含未证实的数值或单位：{numeric_only}，请移除相关词或补充真实事实")
-        if not any(raw in row["claim"] for row in evidence):
-            evidence.append({"claim": raw, "fact_ids": matching})
-    for pattern, aliases in _MATERIAL_CLAIMS:
-        for match in re.finditer(pattern, combined, re.IGNORECASE):
-            matching = [identity for identity, fact in by_id.items() if "material" in identity
-                        and any(alias in str(fact["value"]).casefold() for alias in aliases)]
-            if not matching:
-                raise ValueError(f"候选含未证实的材质声明：{match.group(0)}，请删除或补充真实材质事实")
-            if not any(match.group(0) in row["claim"] for row in evidence):
-                evidence.append({"claim": match.group(0), "fact_ids": matching})
-    allowed = {row["keyword"] for row in keywords}
-    if set(copy.get("primary_keywords") or []) - allowed:
-        raise ValueError("候选使用了未选或排除的关键词")
-    usage = []
-    for row in keywords:
-        placement = [field for field, text in (("title", copy["title_ru"]), ("description", copy["description_ru"]))
-                     if row["keyword"].casefold() in text.casefold()]
-        if placement or row["role"] == "core":
-            usage.append({"query": row["keyword"], "role": row["role"], "placement": placement,
-                          "surface_form": row["keyword"], "matched_lemmas": []})
-    checks = official_copy_checks(copy)
-    return {"claim_evidence": evidence, "keyword_usage": usage, "excluded_keywords": [],
-            "audit": {"title_chars": len(copy["title_ru"]), "description_chars": len(copy["description_ru"]),
-                      "core_coverage": next((bool(row["placement"]) for row in usage if row["role"] == "core"), None),
-                      "secondary_coverage": None, "fact_consistency": None, "readability": None,
-                      "risk_flags": checks["advisory"] + ["材质、用途和俄语词形需要人工核对"], **checks}}
-
-
 @serialized_product_edit
-def generate_copy_candidates(directory: Path | str, provider: Any, *, force: bool = False) -> dict[str, Any]:
+def generate_copy_candidates(directory: Path | str, provider: Any, *, force: bool = False,
+                             revalidate_only: bool = False) -> dict[str, Any]:
     directory = Path(directory)
     _require_editable(directory)
+    if force and revalidate_only:
+        raise ValueError("免费重校验与付费重新生成不能同时请求")
     current = workflow_status(directory)
     if not current["analysis"]["confirmed"]:
         raise ValueError("请先确认当前所选规格的商品分析")
@@ -386,15 +311,20 @@ def generate_copy_candidates(directory: Path | str, provider: Any, *, force: boo
     previous = state.get("copy") or {}
     if not force and current["copy"]["status"] in {"candidates", "selected", "confirmed"} and previous.get("model") == signature:
         return {**current, "cache_hit": True, "input_fingerprint": fingerprint}
+    if revalidate_only and getattr(provider, "supports_copy_cache_revalidation", False) is not True:
+        raise ValueError("当前模型不支持免费重校验；本次没有调用模型")
     batch_method = getattr(provider, "write_copy_candidates_ru", None)
     if not callable(batch_method):
         raise ValueError("当前模型提供方不支持一次生成三组候选，请配置火山方舟或升级适配器")
-    verified_facts = _verified_facts(current["analysis"]["payload"])
+    verified_facts = _verified_facts(current["analysis"]["payload"], source)
     _assert_unchanged(directory, fingerprint, copy_fingerprint)
     batches = batch_method(CopyRequest(product_id=directory.name, product_dir=directory,
                                       source=source, analysis=current["analysis"]["payload"],
                                       source_refs=_refs(directory), selected_keywords=keywords,
-                                      extra={"verified_facts": verified_facts, "allow_category_only_copy": not keywords}))
+                                      extra={"verified_facts": verified_facts, "allow_category_only_copy": not keywords,
+                                             "force_new_model_call": force, "input_fingerprint": fingerprint,
+                                             "revalidate_only": revalidate_only,
+                                             "evidence_version": COPY_EVIDENCE_VERSION}))
     rows = batches.get("candidates") or []
     if len(rows) != 3 or {row.get("mode") for row in rows if isinstance(row, Mapping)} != set(MODES):
         raise ValueError("模型必须在同一批次返回三个不同侧重点的候选")

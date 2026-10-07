@@ -315,9 +315,11 @@ def queue_product(
     status = normalize(load_status(product_dir_path))
 
     if sku_count is None:
+        from .sku_selection import active_skus
+
         source = _read_json(Path(product_dir_path) / "input" / "source.json")
         skus = source.get("skus")
-        sku_count = len(skus) if isinstance(skus, list) else None
+        sku_count = len(active_skus(product_dir_path, skus)) if isinstance(skus, list) else None
     if sku_count is not None and not 1 <= int(sku_count) <= MAX_SELECTED_SKUS:
         raise ValueError(
             f"{Path(product_dir_path).name}: 已选 SKU 必须在 1–{MAX_SELECTED_SKUS} 之间，实际 {sku_count}"
@@ -598,17 +600,23 @@ def freeze_sku_run_snapshot(
     overrides_path = directory / "input" / "workbench-sku-overrides.json"
     category_path = directory / "input" / "category-selection.json"
     source = _read_json(source_path)
-    skus = source.get("skus") if isinstance(source.get("skus"), list) else []
+    from .sku_selection import active_skus
+
+    skus = active_skus(directory, source.get("skus") if isinstance(source.get("skus"), list) else [])
     if not 1 <= len(skus) <= MAX_SELECTED_SKUS:
         raise ValueError(
             f"{directory.name}: 已选 SKU 必须在 1–{MAX_SELECTED_SKUS} 之间，实际 {len(skus)}"
         )
+    dependencies = [source_path, overrides_path, category_path]
+    selection_path = directory / "input" / "selected-skus.json"
+    if selection_path.is_file():
+        dependencies.append(selection_path)
     snapshot = {
         "schema_version": SCHEMA_VERSION,
         "product_id": directory.name,
         "batch_id": batch_id,
         "frozen_at": now_iso(),
-        "dependency_hash": _sha256_of_files([source_path, overrides_path, category_path]),
+        "dependency_hash": _sha256_of_files(dependencies),
         "selected_sku_count": len(skus),
         "review_mode": review_mode,
         "auto_upload": bool(auto_upload),

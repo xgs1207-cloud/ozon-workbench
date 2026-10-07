@@ -9,7 +9,7 @@
 - 图片规划：只为选中的 SKU 生成主图（**省豆包生图成本**）；
 - 批次快照与运行前校验：按选中的 SKU 数量做 1–10 的校验。
 
-**默认行为**：没有选择文件时 = 全部 SKU 都上架（向后兼容，不改变已有商品的行为）。
+**默认行为**：旧采集无选择文件时 = 全部；新的全规格采集必须在后台确认，不默认上架。
 """
 
 from __future__ import annotations
@@ -62,8 +62,13 @@ def active_skus(product_dir: Path | str, skus: Sequence[Mapping[str, Any]]) -> l
     rows = [dict(item) for item in skus if isinstance(item, Mapping)]
     selection = load_selection(product_dir)
     selected = selection.get("selected")
-    if not isinstance(selected, list) or not selected:
-        return rows
+    if not selection:
+        source = _read_json(Path(product_dir) / SOURCE_FILE)
+        return [] if source.get("sku_selection_required") else rows
+    if not isinstance(selected, list):
+        return []
+    if not selected:
+        return []
     wanted = {str(item) for item in selected}
     return [row for index, row in enumerate(rows, start=1) if sku_key(row, index) in wanted]
 
@@ -76,17 +81,20 @@ def selection_state(product_dir: Path | str) -> dict[str, Any]:
     selected = [str(item) for item in (selection.get("selected") or [])]
     excluded = selection.get("excluded") or []
     if not selection:
+        pending = bool(_read_json(Path(product_dir) / SOURCE_FILE).get("sku_selection_required"))
         return {
             "has_selection": False,
+            "pending_selection": pending,
             "total": len(keys),
-            "selected": keys,
+            "selected": [] if pending else keys,
             "excluded": [],
             "unknown_in_selection": [],
-            "active_count": len(keys),
-            "note": "没有选择文件：默认全部 SKU 都上架",
+            "active_count": 0 if pending else len(keys),
+            "note": "全部规格已采集，请在工作台确认上架规格" if pending else "没有选择文件：默认全部 SKU 都上架",
         }
     return {
         "has_selection": True,
+        "pending_selection": not selected,
         "total": len(keys),
         "selected": [key for key in keys if key in set(selected)],
         "excluded": [dict(item) for item in excluded if isinstance(item, Mapping)],
@@ -131,6 +139,11 @@ def set_selection(
         raise SkuSelectionError("至少要保留 1 个上架 SKU")
     if len(selected) > MAX_SELECTED:
         raise SkuSelectionError(f"上架 SKU 最多 {MAX_SELECTED} 个，当前 {len(selected)} 个")
+    chosen_rows = [row for index, row in enumerate(rows, start=1) if sku_key(row, index) in set(selected)]
+    issues = [f"{row.get('sku_id')}：{'、'.join(row['collection_issues'])}"
+              for row in chosen_rows if row.get("collection_issues")]
+    if issues:
+        raise SkuSelectionError("所选规格仍需核对：" + "；".join(issues[:5]))
 
     excluded = [
         {"sku_id": key, "reason": reason or "人工排除（不在本次上架范围）"}
@@ -160,7 +173,9 @@ def clear_selection(product_dir: Path | str) -> dict[str, Any]:
     existed = path.is_file()
     if existed:
         path.unlink()
-    return {"ok": True, "product_id": Path(product_dir).name, "removed": existed, "note": "已恢复为全部 SKU 上架"}
+    pending = bool(_read_json(Path(product_dir) / SOURCE_FILE).get("sku_selection_required"))
+    return {"ok": True, "product_id": Path(product_dir).name, "removed": existed,
+            "note": "已清除选择，请重新确认上架规格" if pending else "已恢复为全部 SKU 上架"}
 
 
 def main(argv: Sequence[str] | None = None) -> int:

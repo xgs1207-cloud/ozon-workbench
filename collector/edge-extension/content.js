@@ -1,4 +1,14 @@
-const PLUGIN_VERSION = "0.4.25";
+(() => {
+const PLUGIN_VERSION = "0.4.32";
+const previousProductBridge = globalThis.__workbenchProductBridge;
+try {
+    if (previousProductBridge?.version === PLUGIN_VERSION && previousProductBridge.isCurrent?.()) return;
+} catch { /* invalidated extension context */ }
+if (previousProductBridge) {
+    try { chrome.runtime.onMessage.removeListener(previousProductBridge.listener); } catch { /* stale listener */ }
+    if (previousProductBridge.pageListener)
+        window.removeEventListener('CAF_PAGE_PRODUCT_DATA_READY', previousProductBridge.pageListener);
+}
 const MAX_SELECTED_SKUS = 10;
 const DEFAULT_FACTORY_URL = "http://43.132.190.110:8088";
 let latestDrawerCapture = null;
@@ -37,12 +47,13 @@ function openFactoryCommandCenter(taskCenter = "all", extra = {}) {
         void chrome.runtime.lastError;
     });
 }
-window.addEventListener("CAF_PAGE_PRODUCT_DATA_READY", () => {
+function pageProductDataListener() {
     const text = document.documentElement.getAttribute(PAGE_PROBE_ATTR);
     const parsed = parseJsonCandidate(text);
     if (Array.isArray(parsed))
         pageWindowProductData = parsed;
-});
+}
+window.addEventListener("CAF_PAGE_PRODUCT_DATA_READY", pageProductDataListener);
 function injectPageProbe() {
     if (pageProbeInjected || typeof chrome === "undefined" || !chrome.runtime?.getURL)
         return;
@@ -100,12 +111,17 @@ function normalizeImageUrl(url) {
         return null;
     let text = decodeHtmlEntities(url).trim();
     text = text.replace(/\\\//g, "/");
-    if (!text || text === "unknown" || text.startsWith("data:"))
+    if (!text || ['unknown', 'undefined', 'null'].includes(text) || text.startsWith("data:"))
         return null;
     if (text.startsWith("//"))
         text = `https:${text}`;
     try {
         const parsed = new URL(text, location.href);
+        if (!['http:', 'https:'].includes(parsed.protocol)) return null;
+        // Alibaba's _b.jpg/_sum.jpg/_.webp are generated thumbnails. Retain
+        // the actual original ibank image, never rewrite other image hosts.
+        if (/(^|\.)alicdn\.com$/i.test(parsed.hostname) && parsed.pathname.startsWith('/img/ibank/'))
+            parsed.pathname = parsed.pathname.replace(/(\.(?:jpe?g|png|webp|gif))_[^/]*$/i, '$1');
         return parsed.href.replace(/\/(?:w[hc]|c)\d+\//i, "/wc1000/");
     }
     catch {
@@ -626,7 +642,7 @@ function deepFindArrayByKey(value, keyName, out = []) {
         Object.entries(value).forEach(([key, child]) => {
             if (key === keyName && Array.isArray(child)) {
                 child.forEach((u) => {
-                    if (typeof u === "string" && /^https?:/i.test(u))
+                    if (typeof u === "string" && /^(https?:|\/\/)/i.test(u))
                         out.push(u);
                 });
             }
@@ -640,7 +656,9 @@ function offerImgListDetailUrls(structured, mainUrls, skuUrls) {
     // 从 script_init_data 的 offerImgList 补回未被 main/sku 占用的图片。
     const urls = [];
     (structured || []).forEach((result) => {
-        (result.data || []).forEach((snippet) => deepFindArrayByKey(snippet.data, "offerImgList", urls));
+        // window_variable/JSON-LD contain objects, while script_init_data
+        // contains snippet arrays. Traverse either shape, including wrappers.
+        deepFindArrayByKey(result?.data, "offerImgList", urls);
     });
     const idOf = (u) => {
         const m = /ibank\/([A-Za-z0-9_]+)/.exec(String(u || ""));
@@ -1121,6 +1139,7 @@ function imageFromNodes(nodes, source) {
 }
 function extractMainImages() {
     const selectors = [
+        '.od-picture-gallery-list > .v-image-cover:not(.video-image-cover):not(.tag-image-cover)',
         ".detail-gallery img",
         ".mod-detail-gallery img",
         "[class*='gallery'] img",
@@ -1130,7 +1149,8 @@ function extractMainImages() {
     const urls = [];
     selectors.forEach((selector) => {
         document.querySelectorAll(selector).forEach((node, index) => {
-            const url = normalizeImageUrl(node.content || imageCandidateUrl(node));
+            const url = normalizeImageUrl(node.content || (node.tagName === 'IMG'
+                ? imageCandidateUrl(node) : imageUrlFromNode(node)));
             if (!url || isBlockedImageUrl(url))
                 return;
             if (node.tagName === "IMG" && !isLikelyProductImage(node, url))
@@ -1144,7 +1164,18 @@ function extractMainImages() {
                 return false;
             seen.add(item.url);
             return true;
-        }).slice(0, 30), selectors };
+        }).slice(0, 80), selectors };
+}
+function collectDetailShadowImages(root, out = [], depth = 0) {
+    if (!root || depth > 5 || out.length >= 200) return out;
+    // Only traverse known product-description components, not the rest of
+    // the page, account widgets, payment iframes or other extensions.
+    const hosts = [root, ...root.querySelectorAll('*')].filter(node => node.shadowRoot).slice(0, 80);
+    for (const host of hosts) {
+        out.push(...host.shadowRoot.querySelectorAll('img'));
+        collectDetailShadowImages(host.shadowRoot, out, depth + 1);
+    }
+    return out;
 }
 function extractDetailImages() {
     const selectors = [
@@ -1161,6 +1192,8 @@ function extractDetailImages() {
         if (found.length)
             images = images.concat(found);
     });
+    for (const root of document.querySelectorAll('.module-od-product-description, v-detail-h.html-description'))
+        images.push(...imageFromNodes(collectDetailShadowImages(root), 'detail_shadow_dom'));
     const seen = new Set();
     return { values: images.filter((item) => {
             if (seen.has(item.url))
@@ -1597,6 +1630,9 @@ function findSkuContainers() {
         "[data-sku-prop]"
     ];
     const roots = [];
+    document.querySelectorAll('#skuSelection, .module-od-sku-selection').forEach(node => {
+        if (!node.closest('#caf-sku-drawer-root')) roots.push(node);
+    });
     selectors.forEach((selector) => {
         document.querySelectorAll(selector).forEach((node) => {
             if (isExcludedSkuRoot(node))
@@ -1665,6 +1701,13 @@ async function warmAllSkuImages() {
     const targets = [];
     roots.forEach((root) => {
         targets.push(root);
+        const saleRows = [...root.querySelectorAll('.expand-view-item')];
+        if (saleRows.length) {
+            // One pass per real SKU row is enough; visiting every quantity,
+            // stock and price child made large offers wait up to 20 seconds.
+            targets.push(...saleRows);
+            return;
+        }
         root.querySelectorAll("img, li, [role='button'], [class*='item'], [class*='value'], [data-value]").forEach((node) => targets.push(node));
     });
     const uniqueTargets = [...new Set(targets)].slice(0, 600);
@@ -1742,7 +1785,30 @@ async function warmDetailImages() {
 function extractDomSkuGroups() {
     const dimensionWords = /(颜色|尺寸|规格|型号|款式|套餐|容量|数量|口味|尺码|类别|样式|花色|高度|长度|宽度)/;
     const groups = [];
+    // Current 1688 expands each sale value into a row with an image, price,
+    // stock and quantity control. Read the label, not the combined row text.
+    const modernGroups = new Set(document.querySelectorAll(
+        '#skuSelection .feature-item, .module-od-sku-selection .feature-item'));
+    for (const root of modernGroups) {
+        if (root.closest('#caf-sku-drawer-root')) continue;
+        const dimension = textOf(root.querySelector('.feature-item-label h3, .feature-item-label')).trim() || '规格';
+        const values = [], seen = new Set();
+        for (const row of root.querySelectorAll('.expand-view-item')) {
+            const label = row.querySelector('.item-label');
+            const name = cleanText(label?.getAttribute('title') || textOf(label));
+            if (!name || seen.has(name)) continue;
+            seen.add(name);
+            const image = imageUrlFromNode(row.querySelector('.item-image-icon') || row);
+            values.push({ id: row.getAttribute('data-sku-id') || name, name,
+                image_url: image && !isBlockedImageUrl(image) ? image : 'unknown',
+                disabled: row.matches('[aria-disabled="true"], [disabled]'),
+                raw: { text: name, class: row.className, source: '1688_expand_view_row' },
+                option: { name_cn: dimension, value_cn: name, source: 'dom_sale_spec_row', source_text: name } });
+        }
+        if (values.length) groups.push({ name: dimension, values, raw: { class: root.className, source: '1688_expand_view' } });
+    }
     findSkuContainers().forEach((root) => {
+        if (root.querySelector('.expand-view-item .item-label')) return;
         const rootText = textOf(root);
         if (!dimensionWords.test(rootText) && !/sku/i.test(root.className || ""))
             return;
@@ -2774,6 +2840,10 @@ function showSkuDrawer(capture, options = {}) {
         const realIdCount = skus.filter((sku) => isRealSkuId(sku.sku_id)).length;
         const imageCount = skus.filter((sku) => sku.image_url && sku.image_url !== "unknown" && sku.sku_image_missing !== true).length;
         stats.textContent = `原始SKU总数：${skus.length} | SKU图片：${imageCount}/${skus.length} | 真实SKU ID：${realIdCount}/${skus.length} | 当前显示：${visibleCount} | 已选：${selected.size} | 最大可选数量：${MAX_SELECTED_SKUS}`;
+        const listTitle = list.querySelector(".caf-sku-list-title");
+        if (listTitle && skus.length) {
+            listTitle.textContent = `选择SKU（勾选下方商品）· 当前显示 ${visibleCount} · 已选 ${selected.size}`;
+        }
     }
     function renderFilters() {
         filters.innerHTML = "";
@@ -3047,9 +3117,11 @@ function buildCapture() {
     if (skuDebug.missing_price_skus.length) {
         warnings.push(`skus: ${skuDebug.missing_price_skus.length} SKU missing sku-specific price`);
     }
+    const collectable = is1688OfferPage() && title.value !== 'unknown'
+        && (mainImages.values.length > 0 || skus.values.length > 0);
     return {
         source_platform: "1688",
-        source_url: location.href,
+        source_url: `${location.origin}${location.pathname}`,
         captured_at: new Date().toISOString(),
         page_title: document.title || "unknown",
         title_cn: title.value,
@@ -3096,9 +3168,16 @@ function buildCapture() {
             collection_allowed: true,
             rule: "缺图SKU保留真实缺图标记并允许采集；生图前必须由人工确认参考图，系统不得自动猜测"
         },
-        is_collectable: /1688\.com/.test(location.hostname),
-        reason: /1688\.com/.test(location.hostname) ? null : "Not a 1688 page"
+        is_collectable: collectable,
+        reason: collectable ? null : '未读到有效商品信息，请等待商品页加载完成；若页面要求登录或验证，请自行完成后重试'
     };
+}
+function is1688OfferPage() {
+    return location.hostname === 'detail.1688.com' && /^\/offer\/\d{6,}\.html$/.test(location.pathname);
+}
+function productReadFailure(label, error) {
+    return { is_collectable: false, reason: `${label}读取失败：${error?.message || '页面未完成加载'}`,
+        capture_warnings: [`${label}读取失败`], main_images: [], detail_images: [], skus: [] };
 }
 async function buildReadyCapture() {
     await warmAllSkuImages();
@@ -3106,8 +3185,13 @@ async function buildReadyCapture() {
     await warmDetailImages();
     return buildCapture();
 }
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+const productMessageListener = (message, sender, sendResponse) => {
     if (message.type === "OPEN_SKU_SELECTOR") {
+        const capturePath = (() => { try { return new URL(message.capture?.source_url).pathname; } catch { return ''; } })();
+        if (!is1688OfferPage() || capturePath !== location.pathname || !message.capture?.is_collectable) {
+            sendResponse({ opened: false, error: '商品页已切换或商品信息无效，请重新采集' });
+            return false;
+        }
         showSkuDrawer(message.capture, {
             previous_selected_sku_ids: message.previous_selected_sku_ids || []
         });
@@ -3115,19 +3199,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return true;
     }
     if (message.type === "COLLECTOR_PREVIEW" || message.type === "COLLECTOR_CAPTURE") {
-        buildReadyCapture().then(sendResponse).catch((error) => sendResponse({
-            is_collectable: /1688\.com/.test(location.hostname),
-            reason: `SKU图片加载失败：${error?.message || "页面未完成加载"}`,
-            capture_warnings: ["SKU图片加载失败"]
-        }));
+        buildReadyCapture().then(sendResponse).catch((error) => sendResponse(productReadFailure('1688 商品', error)));
         return true;
     }
     if (message.type === "COLLECTOR_OZON_PREVIEW" || message.type === "COLLECTOR_OZON_CAPTURE") {
-        Promise.resolve(buildOzonReferenceCapture({ includeImageData: message.type === "COLLECTOR_OZON_CAPTURE" })).then(sendResponse).catch((error) => sendResponse({
-            is_collectable: isOzonProductPage(),
-            reason: `Ozon页面读取失败：${error?.message || "页面未完成加载"}`,
-            capture_warnings: ["Ozon页面读取失败"]
-        }));
+        Promise.resolve().then(() => buildOzonReferenceCapture({ includeImageData: message.type === "COLLECTOR_OZON_CAPTURE" }))
+            .then(sendResponse).catch((error) => sendResponse(productReadFailure('Ozon 商品', error)));
         return true;
     }
     if (message.type === "EXPORT_SKU_DEBUG") {
@@ -3138,5 +3215,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }).catch((error) => sendResponse({ error: error?.message || "SKU图片加载失败" }));
         return true;
     }
-    return true;
-});
+    return undefined;
+};
+chrome.runtime.onMessage.addListener(productMessageListener);
+const productRuntimeId = chrome.runtime.id;
+globalThis.__workbenchProductBridge = { version: PLUGIN_VERSION, listener: productMessageListener,
+    pageListener: pageProductDataListener, isCurrent: () => chrome.runtime.id === productRuntimeId };
+})();

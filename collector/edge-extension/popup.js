@@ -292,6 +292,8 @@ async function getActiveTab() {
 function sendToTab(tabId, message) {
     if (message?.type?.startsWith('SEERFAR_MARKET_'))
         return sendSeerfarTabMessage(tabId, message);
+    if (PRODUCT_PAGE_COMMANDS.has(message?.type))
+        return sendProductTabMessage(tabId, message);
     return new Promise((resolve, reject) => {
         chrome.tabs.sendMessage(tabId, message, (response) => {
             const err = chrome.runtime.lastError;
@@ -303,19 +305,20 @@ function sendToTab(tabId, message) {
     });
 }
 async function waitForSkuSelection(tabId, capture, previousSelectedSkuIds = []) {
-    await sendToTab(tabId, {
+    const result = await sendToTab(tabId, {
         type: "OPEN_SKU_SELECTOR",
         capture,
         previous_selected_sku_ids: previousSelectedSkuIds
     });
+    if (result?.opened !== true) throw new Error(result?.error || '规格选择器未打开，请刷新商品页后重试');
     window.close();
     return null;
 }
 async function loadPreview() {
     try {
         const tab = await getActiveTab();
-        const is1688Page = Boolean(tab?.url && /https:\/\/[^/]*1688\.com\//.test(tab.url));
-        const isOzonPage = Boolean(tab?.url && /https:\/\/[^/]*ozon\.ru\/product\//.test(tab.url));
+        const is1688Page = productPageKind(tab?.url) === '1688';
+        const isOzonPage = productPageKind(tab?.url) === 'ozon';
         const isSeerfarPage = Boolean(tab?.url && /^https:\/\/(?:www\.)?seerfar\.cn\//.test(tab.url));
         els.marketCapture.hidden = !isSeerfarPage;
         els.productCaptureUi.hidden = !(is1688Page || isOzonPage);
@@ -379,7 +382,7 @@ async function loadPreview() {
         });
     }
     catch (error) {
-        els.status.textContent = "无法读取页面";
+        els.status.textContent = `无法读取页面：${error.message}`;
         setResult(error.message);
     }
 }
@@ -387,21 +390,23 @@ function renderPreview(capture) {
     els.skuList.innerHTML = "";
     els.mainThumbs.innerHTML = "";
     els.detailThumbs.innerHTML = "";
-    (capture.skus || []).slice(0, 50).forEach((sku) => {
+    (capture.skus || []).slice(0, 300).forEach((sku) => {
         const li = document.createElement("li");
         const dimensions = (sku.option_values || []).map((item) => `${item.name_cn || "规格"}:${item.value_cn || "unknown"}`).join("；");
         const imageState = sku.sku_image_missing ? "无SKU图" : "有SKU图";
         li.textContent = [sku.sku_name, dimensions, sku.purchase_price ? `¥${sku.purchase_price}` : "¥unknown", sku.price_source || "unknown", imageState, sku.sku_id || "unknown"].filter(Boolean).join(" / ") || "unknown";
         els.skuList.appendChild(li);
     });
-    (capture.main_images || []).slice(0, 20).forEach((item) => {
+    (capture.main_images || []).slice(0, 80).forEach((item) => {
         const img = document.createElement("img");
+        img.loading = 'lazy';
         img.src = item.url;
         img.title = item.url;
         els.mainThumbs.appendChild(img);
     });
-    (capture.detail_images || []).slice(0, 30).forEach((item) => {
+    (capture.detail_images || []).slice(0, 80).forEach((item) => {
         const img = document.createElement("img");
+        img.loading = 'lazy';
         img.src = item.url;
         img.title = item.url;
         els.detailThumbs.appendChild(img);
@@ -440,7 +445,7 @@ async function postCapture(capture, allowNewVersion = false) {
     const body = { ...capture };
     if (allowNewVersion)
         body.allow_new_version = true;
-    const response = await factoryFetch("/api/collector/products", {
+    const response = await factoryFetch(`/api/collector/products${allowNewVersion ? '?allow_new_version=true' : ''}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body)
@@ -480,6 +485,7 @@ async function captureCurrentProduct(allowNewVersion = false) {
     try {
         const tab = await getActiveTab();
         const capture = await sendToTab(tab.id, { type: "COLLECTOR_CAPTURE" });
+        if (!capture?.is_collectable) throw new Error(capture?.reason || '商品信息未加载，无法采集');
         showSkuImageWarning(capture);
         if (!allowNewVersion) {
             const duplicate = await checkDuplicate(capture.source_url);
@@ -492,8 +498,12 @@ async function captureCurrentProduct(allowNewVersion = false) {
                 return;
             }
         }
-        els.progress.textContent = "请在页面右侧选择需要采集的SKU...";
-        await waitForSkuSelection(tab.id, { ...capture, allow_new_version: allowNewVersion });
+        els.progress.textContent = `正在保存全部 ${capture.skus?.length || 0} 个规格和图片，请保持弹窗打开…`;
+        const result = await postCapture({ ...capture, collection_mode: 'all_skus' }, allowNewVersion);
+        els.progress.textContent = `采集完成：${result.counts?.skus || 0} 个规格，请到工作台选择上架规格`;
+        setResult(result);
+        await loadFactoryConfig();
+        chrome.tabs.create({ url: workbenchEntryUrl('1688', { product_id: result.product_id }), active: true });
     }
     catch (error) {
         els.progress.textContent = "采集失败";

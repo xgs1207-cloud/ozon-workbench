@@ -235,7 +235,10 @@ def status(directory: Path | str) -> dict[str, Any]:
     source = _read(directory / "output" / "product-analysis.json")
     decision = (source.get("recommendation") or {}).get("decision")
     facts_ok = decision == "continue"
-    sku_ok = (directory / "input" / "selected-skus.json").is_file()
+    from .sku_selection import selection_state
+
+    sku_state = selection_state(directory)
+    sku_ok = sku_state["has_selection"] and 1 <= sku_state["active_count"] <= 10 and not sku_state["unknown_in_selection"]
     prices_ok = manual_prices_complete(directory)
     blockers = []
     if not sku_ok:

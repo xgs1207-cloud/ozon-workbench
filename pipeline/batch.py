@@ -196,7 +196,9 @@ def create_batch(
         warnings: list[str] = []
         if binding is None:
             warnings.append("采集绑定缺失（collection_id / source-manifest 未就绪）")
-        sku_count = len(source.get("skus") or [])
+        from .sku_selection import active_skus
+
+        sku_count = len(active_skus(directory, source.get("skus") or []))
         entries.append(
             {
                 "product_id": product_id,

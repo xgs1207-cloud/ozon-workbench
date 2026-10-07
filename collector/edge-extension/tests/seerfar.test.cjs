@@ -422,6 +422,7 @@ test('user-started popup recovers a missing receiver, uploads two pages and obey
         window: { close: () => {} },
     });
     vm.runInContext(read('seerfar-bridge.js'), context);
+    vm.runInContext(read('product-bridge.js'), context);
     vm.runInContext(read('popup.js'), context);
     await new Promise((resolve) => setImmediate(resolve)); // initialize() fills the saved token
     await element('capture-market').handlers.click();
@@ -479,6 +480,7 @@ function popupTokenHarness({ baseUrl = 'http://127.0.0.1:8766', savedToken, veri
         window: { close: () => {} },
     });
     vm.runInContext(read('seerfar-bridge.js'), context);
+    vm.runInContext(read('product-bridge.js'), context);
     vm.runInContext(read('popup.js'), context);
     return { element, stored, requests };
 }

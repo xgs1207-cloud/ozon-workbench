@@ -842,6 +842,11 @@ def workbench_product_skus(product_id: str) -> dict[str, Any]:
         "skus": [
             {
                 "sku_id": str(item.get("sku_id") or f"S{index}"),
+                "sku_name": item.get("sku_name") or item.get("name_zh") or item.get("spec_zh"),
+                "option_values": item.get("option_values") or [],
+                "image_url": item.get("image_url") or item.get("variant_image_url"),
+                "image_path": item.get("image_path"),
+                "collection_issues": item.get("collection_issues") or [],
                 "color_ru": item.get("color_ru"),
                 "capacity": item.get("capacity"),
                 "purchase_price_cny": item.get("purchase_price_cny"),
@@ -855,13 +860,16 @@ def workbench_product_skus(product_id: str) -> dict[str, Any]:
 @app.post("/api/workbench/products/{product_id}/skus")
 def workbench_set_product_skus(product_id: str, request: SkuSelectionRequest) -> dict[str, Any]:
     """设置上架 SKU。"""
-    from pipeline.sku_selection import SkuSelectionError, clear_selection, set_selection, selection_state
+    from pipeline.sku_selection import SkuSelectionError, clear_selection, set_selection, selection_state, source_skus
 
     directory = _require_product(product_id)
     _require_pre_submission_edit(directory)
     try:
         if request.all:
-            result = clear_selection(directory)
+            if _read_json_file(directory / "input" / "source.json").get("sku_selection_required"):
+                result = set_selection(directory, include=[str(row["sku_id"]) for row in source_skus(directory)])
+            else:
+                result = clear_selection(directory)
         else:
             result = set_selection(
                 directory,

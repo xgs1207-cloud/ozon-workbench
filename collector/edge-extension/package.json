@@ -1,10 +1,10 @@
 {
   "name": "crossborder-1688-manual-collector",
-  "version": "0.4.31",
+  "version": "0.4.32",
   "private": true,
   "scripts": {
-    "build": "node --check content.js && node --check popup.js && node --check background.js && node --check market-jobs.js && node --check seerfar-bridge.js && node --check seerfar-content.js",
-    "test": "node --test tests/seerfar.test.cjs tests/market-jobs.test.cjs tests/seerfar-bridge.test.cjs"
+    "build": "node --check content.js && node --check popup.js && node --check background.js && node --check market-jobs.js && node --check seerfar-bridge.js && node --check product-bridge.js && node --check seerfar-content.js",
+    "test": "node --test tests/seerfar.test.cjs tests/market-jobs.test.cjs tests/seerfar-bridge.test.cjs tests/product-capture.test.cjs"
   },
   "devDependencies": {
     "typescript": "^5.5.0"

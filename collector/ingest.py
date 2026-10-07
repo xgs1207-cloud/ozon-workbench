@@ -3,7 +3,7 @@
 规则（与原项目对齐）：
 
 - ``source_url`` 必须是 1688 商品详情页（``1688.com/offer/<数字>``）；
-- 已选 SKU 必须 1–10 个，每个都要有 ``sku_id`` 与正的采购价；
+- 默认已选 SKU 必须 1–10 个；``collection_mode=all_skus`` 保存全部原始规格，后台确认后才进入上架；
 - **同一次采集重复入库**：同一 offer 命中已有商品时返回冲突（``DuplicateCaptureError``），
   列出 ``open_existing`` / ``create_new_version`` 两个选项；只有显式 ``allow_new_version=True`` 才建新版本；
 - 落盘结构：``products/<P######>/input/{source.json, raw-snapshot.json, source-manifest.json,
@@ -44,6 +44,7 @@ except ModuleNotFoundError:  # 允许以脚本方式直接运行
 
 SCHEMA_VERSION = "1.0.0"
 SOURCE_KIND_WORKBENCH = "workbench_collection"
+MAX_CAPTURE_SKUS = 2000  # 防止异常页面无限入库；超限报错，不截断规格。
 
 IMAGE_DIRS: dict[str, str] = {
     "main": "input/main-images",
@@ -236,18 +237,28 @@ def normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     raw_skus = payload.get("skus")
     if not isinstance(raw_skus, list) or not raw_skus:
         raise CaptureValidationError("缺少 skus")
-    if len(raw_skus) > MAX_SELECTED_SKUS:
+    collect_all = payload.get("collection_mode") == "all_skus"
+    limit = MAX_CAPTURE_SKUS if collect_all else MAX_SELECTED_SKUS
+    if len(raw_skus) > limit:
         raise CaptureValidationError(
-            f"已选 SKU 不能超过 {MAX_SELECTED_SKUS} 个，实际 {len(raw_skus)}"
+            f"{'采集规格' if collect_all else '已选 SKU'}不能超过 {limit} 个，实际 {len(raw_skus)}（未截断）"
         )
 
     skus: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
     for index, item in enumerate(raw_skus):
         if not isinstance(item, Mapping):
             raise CaptureValidationError(f"skus[{index}] 必须是对象")
         sku_id = str(item.get("sku_id") or "").strip()
-        if not sku_id:
+        if not sku_id and not collect_all:
             raise CaptureValidationError(f"skus[{index}] 缺少 sku_id")
+        issues = []
+        if collect_all and (not sku_id or sku_id == "unknown" or sku_id in seen_ids):
+            issues.append("原始规格标识缺失或重复，须人工核对")
+            sku_id = f"CAPTURE-ROW-{index + 1}"
+            while sku_id in seen_ids:
+                sku_id += "-ROW"
+        seen_ids.add(sku_id)
         price = None
         price_key = None
         for key in _PRICE_KEYS:
@@ -255,13 +266,19 @@ def normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
             if price is not None:
                 price_key = key
                 break
-        if price is None or price <= 0:
+        if (price is None or price <= 0) and not collect_all:
             raise CaptureValidationError(f"skus[{index}]（{sku_id}）缺少有效采购价")
+        if price is None or price <= 0:
+            price = None
+            issues.append("缺少有效采购价")
         normalized = dict(item)
         normalized["sku_id"] = sku_id
         normalized["position"] = index + 1
         normalized["purchase_price_cny"] = price
         normalized.setdefault("price_source_key", price_key)
+        if issues:
+            normalized["collection_issues"] = issues
+            normalized["source_sku_id"] = item.get("sku_id")
         skus.append(normalized)
 
     category = payload.get("category") or payload.get("selected_category")
@@ -307,12 +324,12 @@ def normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
                     url = entry
                 if url:
                     images[role].append({"url": str(url), "name": ""})
-        for sku in raw_skus:
+        for sku in skus:
             if not isinstance(sku, Mapping):
                 continue
             url = sku.get("image_url") or sku.get("variant_image_url")
-            if url:
-                images["sku"].append({"url": str(url), "name": str(sku.get("sku_id") or "")})
+            if url and str(url) != "unknown":
+                images["sku"].append({"url": str(url), "name": sku["sku_id"], "sku_id": sku["sku_id"]})
 
     return {
         "source_url": source_url,
@@ -320,6 +337,7 @@ def normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         "title_zh": payload.get("title_zh") or payload.get("title") or payload.get("title_cn"),
         "captured_at": payload.get("captured_at") or now_iso(),
         "skus": skus,
+        "collection_mode": "all_skus" if collect_all else "selected_skus",
         "category": normalized_category,
         "images": images,
         "raw": payload.get("raw") if isinstance(payload.get("raw"), Mapping) else dict(payload),
@@ -419,7 +437,7 @@ def _normalize_keywords(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def _copy_images(
-    product_dir: Path, images: Mapping[str, Sequence[Mapping[str, Any]]]
+    product_dir: Path, images: Mapping[str, Sequence[Mapping[str, Any]]], *, preserve_roles: bool = False
 ) -> tuple[dict[str, int], list[str], list[str]]:
     """把采集到的图片复制进商品目录；返回 (计数, 警告, 实际落盘相对路径)。
 
@@ -429,7 +447,8 @@ def _copy_images(
     counts = {role: 0 for role in IMAGE_DIRS}
     warnings: list[str] = []
     stored: list[str] = []
-    seen_hashes: set[str] = set()
+    seen_hashes: dict[tuple[str, str], str] = {}
+    downloaded_sources: dict[str, Path | None] = {}
     temp_files: list[Path] = []
 
     for role, entries in images.items():
@@ -445,15 +464,22 @@ def _copy_images(
                     warnings.append(f"{role} 图片不存在：{raw_path}")
                     continue
             elif url:
-                downloaded = _download_remote_image(str(url))
-                if downloaded is None:
+                url = str(url)
+                if url not in downloaded_sources:
+                    downloaded = _download_remote_image(url)
+                    downloaded_sources[url] = None
+                    if downloaded is not None:
+                        data, ext = downloaded
+                        fd, tmp_name = tempfile.mkstemp(prefix=f"ozon-img-{role}-", suffix=ext)
+                        os.close(fd)
+                        tmp = Path(tmp_name)
+                        tmp.write_bytes(data)
+                        temp_files.append(tmp)
+                        downloaded_sources[url] = tmp
+                source = downloaded_sources[url]
+                if source is None:
                     warnings.append(f"{role} 第 {index} 张下载失败：{url}")
                     continue
-                data, ext = downloaded
-                tmp = Path(tempfile.mkstemp(prefix=f"ozon-img-{role}-", suffix=ext)[1])
-                tmp.write_bytes(data)
-                temp_files.append(tmp)
-                source = tmp
             else:
                 warnings.append(f"{role} 第 {index} 张没有本地路径也没有远程 URL，已跳过")
                 continue
@@ -461,15 +487,23 @@ def _copy_images(
                 warnings.append(f"{role} 图片格式不支持：{source.name}")
                 continue
             digest = hashlib.sha256(source.read_bytes()).hexdigest()
-            if digest in seen_hashes:
+            identity = (role if preserve_roles else "all", digest)
+            if identity in seen_hashes:
+                if isinstance(entry, dict):
+                    entry["stored_path"] = seen_hashes[identity]
                 warnings.append(f"{role} 重复图片已跳过：{source.name}")
                 continue
-            seen_hashes.add(digest)
             name = _sanitize_name(entry.get("name") or source.name, f"{role}-{index:03d}")
+            if Path(name).suffix.lower() not in _IMAGE_SUFFIXES:
+                name += source.suffix.lower()
             target = target_dir / f"{index:03d}-{name}"
             shutil.copy2(source, target)
             counts[role] += 1
-            stored.append(str(target.relative_to(product_dir)).replace("\\", "/"))
+            relative = str(target.relative_to(product_dir)).replace("\\", "/")
+            stored.append(relative)
+            seen_hashes[identity] = relative
+            if isinstance(entry, dict):
+                entry["stored_path"] = relative
 
     for tmp in temp_files:
         try:
@@ -542,8 +576,15 @@ def ingest_capture(
     collection_id = new_collection_id()
     warnings: list[str] = []
 
-    image_counts, image_warnings, stored_images = _copy_images(product_dir, normalized["images"])
+    collect_all = normalized["collection_mode"] == "all_skus"
+    image_counts, image_warnings, stored_images = _copy_images(
+        product_dir, normalized["images"], preserve_roles=collect_all
+    )
     warnings.extend(image_warnings)
+    sku_images = {entry.get("sku_id"): entry.get("stored_path") for entry in normalized["images"]["sku"]}
+    for sku in normalized["skus"]:
+        if sku_images.get(sku["sku_id"]):
+            sku["image_path"] = sku_images[sku["sku_id"]]
 
     source_payload = {
         "schema_version": SCHEMA_VERSION,
@@ -558,6 +599,8 @@ def ingest_capture(
         "version": version,
         "duplicate_of": duplicate_of,
         "skus": normalized["skus"],
+        "collection_mode": normalized["collection_mode"],
+        "sku_selection_required": collect_all,
         "selected_category": normalized["category"],
         "images": {role: count for role, count in image_counts.items()},
         "stored_images": stored_images,
@@ -606,7 +649,9 @@ def ingest_capture(
             },
         )
     else:
-        warnings.append("采集时没有选择 Ozon 类目，category-selection.json 未生成")
+        warnings.append("尚未选择 Ozon 类目，请在工作台选择真实上架类目")
+    if collect_all:
+        warnings.append("全部规格已保存，尚未确认上架规格；请在工作台选择后再启动流程")
 
     manifest = _write_manifest(
         product_dir,
@@ -634,6 +679,7 @@ def ingest_capture(
         "status_path": f"products/{product_id}/status.json",
         "warnings": warnings,
         "ozon_category": normalized["category"],
+        "sku_selection_required": collect_all,
         "counts": {
             "skus": len(normalized["skus"]),
             "attributes": len(normalized["extra"].get("attributes") or []) if normalized["extra"] else 0,

@@ -29,7 +29,8 @@ DEPENDENCIES = {
     "images": ("output/image-plan.json", "output/image-generation-report.json", "output/image-qc-report.json"),
     "fields": ("input/category-selection.json", "input/human-confirmations.json",
                "input/manual-prices.json", "output/pricing-result.json",
-               "output/ozon-attributes-final.json", "output/platform-grouping-result.json"),
+               "output/ozon-attributes-final.json", "output/platform-grouping-result.json",
+               "input/workbench-sku-overrides.json", "input/listing-media.json"),
 }
 
 
@@ -68,6 +69,13 @@ def digest(directory: Path | str, section: str) -> str | None:
     directory = Path(directory).resolve()
     if section not in DEPENDENCIES:
         raise ValueError("未知审核环节")
+    if section == "copy" and (directory / "input/guided-workflow.json").is_file():
+        from .guided_workflow import workflow_status
+        copy = workflow_status(directory)["copy"]
+        if not copy.get("confirmed"):
+            return None
+        return hashlib.sha256(json.dumps({"fingerprint": copy["fingerprint"],
+            "payload": copy["payload"]}, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     paths = [*DEPENDENCIES[section], *(_image_paths(directory) if section == "images" else [])]
     digest_value = hashlib.sha256()
     for relative in paths:
@@ -76,7 +84,7 @@ def digest(directory: Path | str, section: str) -> str | None:
             return None
         if not path.is_file():
             # Human confirmation is optional when nothing was missing.
-            if relative != "input/human-confirmations.json":
+            if relative not in {"input/human-confirmations.json", "input/workbench-sku-overrides.json", "input/listing-media.json"}:
                 return None
             continue
         digest_value.update(relative.encode("utf-8"))
@@ -91,6 +99,11 @@ def problems(directory: Path | str, section: str) -> list[str]:
     if digest(directory, section) is None:
         return ["前置资料或产物尚未齐全"]
     if section == "copy":
+        if (directory / "input/guided-workflow.json").is_file():
+            from .guided_workflow import workflow_status
+            if not workflow_status(directory)["copy"].get("confirmed"):
+                return ["请先选择并确认与最新规格、关键词一致的文案"]
+            return validate_copy_bundle(_read(directory / "output/copy-ru.json"))
         copy_path = directory / "output" / "copy-ru.json"
         for relative in ("input/selected-skus.json", "input/selected-keywords.json",
                          "input/category-selection.json", "input/human-confirmations.json",
@@ -100,6 +113,10 @@ def problems(directory: Path | str, section: str) -> list[str]:
                 return [f"{relative} 比文案更新，请重新生成或人工完整复核文案"]
         return validate_copy_bundle(_read(copy_path))
     if section == "image_plan":
+        if (directory / "input/guided-workflow.json").is_file():
+            from .guided_workflow import workflow_status
+            if workflow_status(directory)["plan"]["status"] != "ready":
+                return ["图片规划已过期，请按最新规格和文案重新规划"]
         plan = _read(directory / "output" / "image-plan.json")
         from .sku_selection import active_skus
 
@@ -230,11 +247,16 @@ def status(directory: Path | str) -> dict[str, Any]:
     sections = {}
     for name in DEPENDENCIES:
         current = digest(directory, name)
-        sections[name] = {"approved": bool(current and (review.get(name) or {}).get("sha256") == current),
-                          "problems": problems(directory, name)}
+        issues = problems(directory, name)
+        sections[name] = {"approved": bool(current and not issues and (review.get(name) or {}).get("sha256") == current),
+                          "problems": issues}
     source = _read(directory / "output" / "product-analysis.json")
     decision = (source.get("recommendation") or {}).get("decision")
+    modern = (directory / "input/guided-workflow.json").is_file()
     facts_ok = decision == "continue"
+    if modern:
+        from .guided_workflow import workflow_status
+        facts_ok = bool(workflow_status(directory)["analysis"].get("confirmed"))
     from .sku_selection import selection_state
 
     sku_state = selection_state(directory)
@@ -249,6 +271,9 @@ def status(directory: Path | str) -> dict[str, Any]:
         blockers.append("所选 SKU 的人工售价尚未填完")
     completed = set(normalize(load_status(directory)).get("completed_steps") or [])
     pending_preparation = [step for step in PIPELINE_STEPS[:12] if step not in completed]
+    if modern:
+        from .listing_draft import card_ready
+        pending_preparation = [] if card_ready(directory) else ["卡片资料编译"]
     if pending_preparation:
         blockers.append("准备流程尚未完成：" + "、".join(pending_preparation[:4]))
     for name, item in sections.items():

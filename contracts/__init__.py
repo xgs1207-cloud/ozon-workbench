@@ -48,7 +48,16 @@ def load_contract(name: str) -> dict[str, Any]:
     for directory in _search_dirs():
         path = directory / filename
         if path.is_file():
-            return json.loads(path.read_text(encoding="utf-8"))
+            schema = json.loads(path.read_text(encoding="utf-8"))
+            if filename == "ozon-upload-payload.schema.json":
+                # Add our media fields without editing ignored upstream files.
+                schema.setdefault("properties", {}).update({
+                    "hashtags": {"type": "array", "maxItems": 30,
+                                 "items": {"type": "string", "maxLength": 30}},
+                    "videos": {"type": "array", "maxItems": 50, "items": {"type": "object"}},
+                    "video_cover": {"type": "object"},
+                })
+            return schema
     raise FileNotFoundError(
         f"找不到契约 {filename}；先运行 contracts/fetch_contracts.ps1（可用契约：{len(available_contracts())} 个）"
     )

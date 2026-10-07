@@ -19,7 +19,7 @@ function contentHarness(extra = '') {
     const load = () => vm.runInContext(read('content.js').replace(/\}\)\(\);\s*$/,
         `Object.assign(globalThis, {offerImgListDetailUrls, productReadFailure, is1688OfferPage,
             normalizeImageUrl, extractMainImages, extractDetailImages, extractDomSkuGroups,
-            buildDomPropertyImageData, applyDomPropertyImage}); ${extra} })();`), context);
+            buildDomPropertyImageData, applyDomPropertyImage, extractVideos}); ${extra} })();`), context);
     load();
     return { context, listeners, pageListeners, load };
 }
@@ -71,6 +71,94 @@ class FakeElement {
     closest() { return null; }
     matches() { return false; }
 }
+test('product video DOM keeps real signed source, dimensions and static poster without fetching', () => {
+    const h = contentHarness();
+    const video = new FakeElement({currentSrc:'https://cloud.video.taobao.com/play/u/1/p/1/e/6/t/1/VID.mp4?auth_key=private-test',
+        poster:'https://cbu01.alicdn.com/img/ibank/POSTER.jpg',duration:26,videoWidth:720,videoHeight:1280});
+    const root = new FakeElement({all:{video:[video]}});
+    h.context.document = {querySelectorAll:selector=>selector.startsWith('.od-picture-gallery,')?[root]:[]};
+    const result = vm.runInContext('extractVideos([])',h.context);
+    assert.equal(result.values.length,1);
+    assert.match(result.values[0].source_url,/auth_key=private-test$/);
+    assert.equal(result.values[0].duration_seconds,26);
+    assert.equal(result.values[0].role,'main');
+    assert.equal(result.values[0].poster_is_ozon_video_cover,false);
+    assert.equal(result.values[0].offer_id,'1072823232979');
+});
+test('video source elements replace blob player URL, and detail shadow DOM is supported',()=>{
+    const h=contentHarness();
+    const source=new FakeElement({src:'https://tbm-auth.alicdn.com/real.mp4?sign=test',type:'video/mp4'});
+    const video=new FakeElement({currentSrc:'blob:https://detail.1688.com/temp',all:{source:[source]},one:{source}});
+    const host=new FakeElement({shadowRoot:new FakeElement({all:{video:[video]}})});
+    h.context.document={querySelectorAll:selector=>selector.startsWith('#desc-lazyload-container,')?[host]:[]};
+    const result=vm.runInContext('extractVideos([])',h.context);
+    assert.equal(result.values.length,1);
+    assert.equal(result.values[0].status,'metadata_only');
+    assert.equal(result.values[0].role,'detail');
+});
+test('loaded video configs and VideoObject deduplicate and exclude advertisements, foreign offers and poster objects',()=>{
+    const h=contentHarness();
+    h.context.document={querySelectorAll:()=>[]};
+    const result=vm.runInContext(`extractVideos([{data:{offerId:'1072823232979',
+        videoInfo:{videoId:'vid-1',playUrl:'https://cloud.video.taobao.com/MAIN.mp4?sign=current',
+          duration:30,cover:{url:'https://cbu01.alicdn.com/img/ibank/POSTER.jpg'},sku_ids:['SKU1','FOREIGN']},
+        recommendation:{videoUrl:'https://cloud.video.taobao.com/AD.mp4'},
+        ad:{videoUrl:'https://cloud.video.taobao.com/AD2.mp4'},
+        liveVideo:{videoUrl:'https://cloud.video.taobao.com/LIVE.m3u8'},
+        other:{offerId:'99999999',videoUrl:'https://cloud.video.taobao.com/OTHER.mp4'}
+      }},{source:'ld_json',data:{'@type':'VideoObject',contentUrl:'https://tbm-auth.alicdn.com/DETAIL.mp4',
+        thumbnailUrl:'https://cbu01.alicdn.com/img/ibank/STATIC.jpg',duration:'PT1M3S'}}],['SKU1'])`,h.context);
+    assert.equal(result.values.length,2);
+    assert.deepEqual(Array.from(result.values[0].sku_ids),['SKU1']);
+    assert.equal(result.values[0].duration_seconds,null); // Generic config duration may be milliseconds.
+    assert.equal(result.values[1].duration_seconds,63);
+    assert.ok(result.values.every(item=>!/(AD|LIVE|OTHER|POSTER)/.test(item.source_url)));
+});
+test('video duration from loaded configs requires explicit seconds or an ISO duration',()=>{
+    const h=contentHarness();
+    h.context.document={querySelectorAll:()=>[]};
+    const result=vm.runInContext(`extractVideos([{data:{videoInfo:[
+      {videoId:'a',playUrl:'https://tbm-auth.alicdn.com/a.mp4',duration:30000},
+      {videoId:'b',playUrl:'https://tbm-auth.alicdn.com/b.mp4',duration_seconds:30},
+      {videoId:'c',playUrl:'https://tbm-auth.alicdn.com/c.mp4',duration:31,durationUnit:'seconds'}]}}])`,h.context);
+    assert.deepEqual(Array.from(result.values,item=>item.duration_seconds),[null,30,31]);
+});
+test('blob, HLS and unloaded players retain explicit non-downloadable diagnostics',()=>{
+    const h=contentHarness();
+    h.context.document={querySelectorAll:()=>[]};
+    const result=vm.runInContext(`extractVideos([{data:{videoInfo:[
+      {videoId:'a',playUrl:'blob:https://detail.1688.com/a'},
+      {videoId:'b',playUrl:'https://tbm-auth.alicdn.com/b.m3u8'}, {videoId:'c'},
+      {videoId:'d',playUrl:'https://tbm-auth.alicdn.com/d.mp4',drm:true},
+      {videoId:'e',playUrl:'javascript:alert(1)'}]}}])`,h.context);
+    assert.deepEqual(Array.from(result.values,item=>item.status),['unsupported_blob','unsupported_stream','not_loaded','protected_media']);
+    assert.equal(result.warnings.length,1);
+});
+test('page-world variable context excludes live and ad players, including explicit flags',()=>{
+    const h=contentHarness();
+    h.context.document={querySelectorAll:()=>[]};
+    const result=vm.runInContext(`extractVideos([
+      {data:{name:'videoPlayerConfig',data:{url:'https://tbm-auth.alicdn.com/good.mp4'}}},
+      {data:{name:'livePlayerConfig',data:{url:'https://tbm-auth.alicdn.com/live.mp4'}}},
+      {data:{videoInfo:{isLive:true,playUrl:'https://tbm-auth.alicdn.com/live2.mp4'}}},
+      {data:{videoInfo:{role:'advertisement',playUrl:'https://tbm-auth.alicdn.com/ad.mp4'}}}
+    ])`,h.context);
+    assert.equal(result.values.length,1);
+    assert.match(result.values[0].source_url,/good\.mp4$/);
+});
+test('page probe preserves loaded signed URLs and excludes credential fields',()=>{
+    const state={offerId:'1072823232979',product:{videoInfo:{playUrl:'https://tbm-auth.alicdn.com/real.mp4?sign='+ 'x'.repeat(4000),
+        videoId:'V1',poster:'https://cbu01.alicdn.com/img/ibank/POSTER.jpg',duration:24,
+        token:'PRIVATE',authorization:'SECRET',cookie:'COOKIE'}}};
+    const attributes={};
+    const context=vm.createContext({window:{offerDetailData:state,dispatchEvent:()=>{}},CustomEvent:function(){},
+        document:{documentElement:{setAttribute:(key,value)=>attributes[key]=value}}});
+    vm.runInContext(read('page-probe.js'),context);
+    const serialized=attributes['data-caf-window-product-data'];
+    const parsed=JSON.parse(serialized);
+    assert.equal(parsed[0].data.product.videoInfo.playUrl,state.product.videoInfo.playUrl);
+    assert.ok(!serialized.includes('PRIVATE')&&!serialized.includes('SECRET')&&!serialized.includes('COOKIE'));
+});
 function fakeImage(url) { return new FakeElement({ tagName: 'IMG', currentSrc: url,
     naturalWidth: 600, naturalHeight: 1200 }); }
 
@@ -134,7 +222,7 @@ test('product script reinjection keeps exactly one runtime and page-data listene
     assert.equal(h.listeners.size, 1);
     assert.equal(h.pageListeners.size, 1);
     assert.equal([...h.listeners][0], listener);
-    assert.equal(h.context.__workbenchProductBridge.version, '0.4.32');
+    assert.equal(h.context.__workbenchProductBridge.version, '0.4.33');
 });
 
 test('invalidated product context is replaced without duplicate callbacks or declarations', () => {
@@ -269,12 +357,13 @@ test('1688 capture saves all variants without opening the SKU drawer or selectin
     const body = popup.slice(popup.indexOf('async function captureCurrentProduct('),
         popup.indexOf('async function captureCurrentOzonReference('));
     const skus = Array.from({length:56},(_,i)=>({sku_id:String(i+100),purchase_price:4.5}));
+    const videos = [{source_url:'https://tbm-auth.alicdn.com/product.mp4?sign=private',status:'metadata_only'}];
     const posted = [], opened = [];
     const context = vm.createContext({ activePageKind:'1688',
         els:{capture:{},duplicate:{},progress:{}},
-        getActiveTab:async()=>({id:1}), sendToTab:async()=>({is_collectable:true,skus,source_url:'https://detail.1688.com/offer/1072823232979.html'}),
+        getActiveTab:async()=>({id:1}), sendToTab:async()=>({is_collectable:true,skus,videos,source_url:'https://detail.1688.com/offer/1072823232979.html'}),
         showSkuImageWarning:()=>{},checkDuplicate:async()=>({exists:false}),
-        postCapture:async(capture,newVersion)=>{posted.push({capture,newVersion});return {product_id:'P000002',counts:{skus:56}};},
+        postCapture:async(capture,newVersion)=>{posted.push({capture,newVersion});return {product_id:'P000002',counts:{skus:56,videos:1}};},
         waitForSkuSelection:()=>{throw new Error('must not open drawer');},
         setResult:()=>{},loadFactoryConfig:async()=>{},workbenchEntryUrl:(_kind,extra)=>`http://127.0.0.1:8766/?product_id=${extra.product_id}`,
         chrome:{tabs:{create:o=>opened.push(o)}},
@@ -284,9 +373,12 @@ test('1688 capture saves all variants without opening the SKU drawer or selectin
     assert.equal(posted.length,1);
     assert.equal(posted[0].capture.collection_mode,'all_skus');
     assert.equal(posted[0].capture.skus.length,56);
+    assert.equal(posted[0].capture.videos,videos);
     assert.equal(posted[0].capture.ozon_category_selection,undefined);
     assert.equal(opened.length,1);
     assert.match(context.els.progress.textContent,/56.*工作台/);
+    assert.match(context.els.progress.textContent,/1 段视频资料/);
+    assert.ok(!context.els.progress.textContent.includes('sign=private'));
     await vm.runInContext('captureCurrentProduct(true)',context);
     assert.equal(posted[1].newVersion,true);
     assert.match(popup,/\/api\/collector\/products\$\{allowNewVersion \? '\?allow_new_version=true'/);

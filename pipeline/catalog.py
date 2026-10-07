@@ -32,7 +32,8 @@ def handle_variant_rules(ctx: StepContext) -> dict[str, Any]:
     """SKU 变体规则：只在类目能承载该差异时才允许合并（拿不准就拆卡 / 转人工）。"""
     source = ctx.require_json("input/source.json")
     snapshot = ctx.require_json(CATEGORY_SNAPSHOT)
-    skus = [item for item in (source.get("skus") or []) if isinstance(item, dict)]
+    from .sku_selection import active_skus
+    skus = active_skus(ctx.product_dir, source.get("skus") or [])
     if not skus:
         raise PipelineGateError(ctx.step, "没有已选 SKU，无法判定变体规则")
 

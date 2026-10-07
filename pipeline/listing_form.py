@@ -25,7 +25,7 @@ FORM_TRANSACTION_FILES = (
 def _require_editable(directory: Path) -> None:
     from .status import load_status
 
-    if int(load_status(directory).get("api_write_count") or 0) > 0:
+    if int(load_status(directory).get("api_write_count") or 0) > 0 or (directory / "runtime/listing-submit-attempt.json").is_file():
         raise ValueError("此商品已有 Ozon 写入，不能在原商品流程中修改属性")
 
 

@@ -143,6 +143,6 @@ test('popup and background both load the common recovery transport', () => {
     const html = read('popup.html');
     assert.ok(html.indexOf('src="seerfar-bridge.js"') < html.indexOf('src="popup.js"'));
     const version = JSON.parse(read('manifest.json')).version;
-    assert.equal(version, '0.4.32');
+    assert.equal(version, '0.4.33');
     assert.equal(JSON.parse(read('package.json')).version, version);
 });

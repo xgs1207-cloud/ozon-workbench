@@ -191,7 +191,8 @@ def build_upload_payload(
     if not description:
         blockers.append("缺少俄文简介（先跑 russian_copy）")
 
-    # 4) 定价
+    # 4) 定价：只核对目标合同币种，不能拿另一币种报价偷偷换汇。
+    currency = str(currency_code or category.get("default_currency_code") or "RUB").upper()
     price_rows = {
         str(item.get("sku_id")): item
         for item in (pricing.get("skus") or [])
@@ -201,7 +202,7 @@ def build_upload_payload(
     for index, sku in enumerate(skus, start=1):
         sku_id = str(sku.get("sku_id") or f"S{index}")
         row = price_rows.get(sku_id) or {}
-        value = row.get("selling_price_rub")
+        value = _price_for_currency(row, currency)
         try:
             numeric = float(value)
         except (TypeError, ValueError):
@@ -209,7 +210,13 @@ def build_upload_payload(
         if numeric <= 0:
             pricing_missing.append(sku_id)
     if pricing_missing:
-        blockers.append(f"缺少卢布售价的 SKU：{pricing_missing}（先跑 measurements/pricing）")
+        blockers.append(f"缺少{currency}售价的 SKU：{pricing_missing}（先跑 measurements/pricing）")
+    if upload_mode == "production" and (directory / "input/guided-workflow.json").is_file():
+        manual = _read_json(directory / "input/manual-prices.json").get("prices") or {}
+        wrong_currency = [str(sku.get("sku_id")) for sku in skus
+                          if str((manual.get(str(sku.get("sku_id"))) or {}).get("currency") or "").upper() != currency]
+        if wrong_currency:
+            blockers.append(f"人工售价币种与目标店铺合同{currency}不一致：{wrong_currency}，请重新确认，不自动换汇")
 
     # 5) 尺寸重量（真实 Ozon 导入必需；我们只认可采集/确认过的数据，缺就是缺）
     from .measurements import load_measurements
@@ -265,7 +272,16 @@ def build_upload_payload(
     if not grouping:
         blockers.append("没有变体规则结果（先跑 variant_rules）")
 
-    currency = str(currency_code or category.get("default_currency_code") or "RUB").upper()
+    media_selection = _read_json(directory / "input/listing-media.json")
+    videos = list(media_selection.get("videos") or [])
+    if upload_mode == "production" and videos:
+        from .source_videos import validate_listing_videos
+        try:
+            videos = validate_listing_videos(directory, media_selection)
+        except ValueError as error:
+            blockers.append(str(error))
+    if media_selection.get("video_cover"):
+        blockers.append("首版视频封面尚未单独验证，不能作为上架短视频提交")
 
     variants: list[dict[str, Any]] = []
     by_sku = attributes.get("attributes_by_sku") if isinstance(attributes.get("attributes_by_sku"), Mapping) else {}
@@ -356,6 +372,8 @@ def build_upload_payload(
         },
         "title": title or "unknown",
         "description": description or "unknown",
+        "hashtags": list(copy_bundle.get("hashtags") or []),
+        "videos": videos,
         "images": images or [{"slot": "unknown", "role": "detail", "url": "", "order": 1}],
         "attributes": [
             {
@@ -573,7 +591,7 @@ def upload_product(
 
     shop_currencies = {
         str(item.get("id")): str(item.get("default_currency_code") or "").upper()
-        for item in list_shops(ensure_registry(None))
+        for item in list_shops(ensure_registry(getattr(uploader, "registry_path", None)))
         if isinstance(item, Mapping)
     }
 

@@ -12,6 +12,7 @@ import time
 
 _locks: dict[str, threading.RLock] = {}
 _guard = threading.Lock()
+_depth = threading.local()
 
 
 @contextmanager
@@ -21,6 +22,16 @@ def product_edit_lock(directory: Path):
         lock = _locks.setdefault(key, threading.RLock())
     if not lock.acquire(timeout=8):
         raise ValueError("另一项商品保存尚未完成，请稍后重试")
+    held = getattr(_depth, "held", {})
+    _depth.held = held
+    if held.get(key, 0):
+        held[key] += 1
+        try:
+            yield
+        finally:
+            held[key] -= 1
+            lock.release()
+        return
     handle = None
     locked = False
     try:
@@ -45,6 +56,7 @@ def product_edit_lock(directory: Path):
                 if time.monotonic() >= deadline:
                     raise ValueError("另一项商品保存尚未完成，请稍后重试")
                 time.sleep(.04)
+        held[key] = 1
         yield
     finally:
         if handle:
@@ -57,6 +69,7 @@ def product_edit_lock(directory: Path):
                     import fcntl
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             handle.close()
+        held.pop(key, None)
         lock.release()
 
 
@@ -64,6 +77,8 @@ def serialized_product_edit(function):
     @wraps(function)
     def wrapped(directory, *args, **kwargs):
         with product_edit_lock(directory):
+            from .listing_form import _require_editable
+            _require_editable(Path(directory))
             return function(directory, *args, **kwargs)
     return wrapped
 

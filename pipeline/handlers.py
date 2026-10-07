@@ -20,6 +20,8 @@ from rules.validate import official_copy_checks, validate_copy_bundle
 
 from .context import PipelineGateError, StepContext
 from .selection import load_selected_keywords
+from .selected_source import selected_source
+from .guided_workflow import STATE_FILE, pipeline_artifact_current, workflow_status
 
 SOURCE_REF_CANDIDATES: tuple[str, ...] = (
     "input/source.json",
@@ -66,7 +68,13 @@ def _source_with_category(ctx: StepContext, source: Mapping[str, Any]) -> dict[s
 def handle_product_analysis(ctx: StepContext) -> dict[str, Any]:
     """商品信息总结：调模型 → 契约校验 → 落盘。阻断性风险与"需人工确认"都会转人工。"""
     provider = ctx.require_provider()
-    source = _source_with_category(ctx, ctx.require_json("input/source.json"))
+    if ctx.path(STATE_FILE).is_file():
+        current = workflow_status(ctx.product_dir)
+        if not current["analysis"]["confirmed"]:
+            raise PipelineGateError(ctx.step, "请先独立分析并人工确认当前所选规格，流水线不会重跑付费分析")
+        return {"warnings": [], "artifacts": ["output/product-analysis.json"],
+                "decision": "continue", "sku_count": len(current["selected_sku_ids"]), "cache_hit": True}
+    source = selected_source(ctx.product_dir, _source_with_category(ctx, ctx.require_json("input/source.json")))
     try:
         payload = provider.analyze_product(
             AnalysisRequest(
@@ -118,7 +126,19 @@ def handle_russian_copy(ctx: StepContext) -> dict[str, Any]:
     ``output/ozon-ecommerce-design.json`` 投影；设计还不存在时才退回调模型生成。
     """
     provider = ctx.require_provider()
-    source = ctx.require_json("input/source.json")
+    if ctx.path(STATE_FILE).is_file():
+        current = workflow_status(ctx.product_dir)
+        if not current["copy"]["confirmed"]:
+            raise PipelineGateError(ctx.step, "请先选择、保存并人工确认有效文案候选，流水线不会替换已选文案")
+        copy = current["copy"]["payload"]
+        problems = validate_copy_bundle(copy)
+        if problems:
+            raise PipelineGateError(ctx.step, "已选文案未通过规则校验", {"problems": problems[:10]})
+        return {"warnings": official_copy_checks(copy)["advisory"],
+                "artifacts": [COPY_PATH for _, _, COPY_PATH in CONTRACT_FILES] + ["output/copy-ru.json"],
+                "title_ru": copy.get("title_ru"), "hashtags": len(copy.get("hashtags") or []),
+                "primary_keywords": len(copy.get("primary_keywords") or []), "projected": False, "cache_hit": True}
+    source = selected_source(ctx.product_dir, ctx.require_json("input/source.json"))
     analysis = ctx.read_json("output/product-analysis.json")
 
     design = ctx.read_json("output/ozon-ecommerce-design.json")
@@ -215,7 +235,7 @@ def handle_image_plan(ctx: StepContext) -> dict[str, Any]:
     from models.image_plan import render_plan_brief
 
     provider = ctx.require_provider()
-    source = ctx.require_json("input/source.json")
+    source = selected_source(ctx.product_dir, ctx.require_json("input/source.json"))
     analysis = ctx.read_json("output/product-analysis.json")
     copy_bundle = ctx.read_json("output/copy-ru.json")
     warnings: list[str] = []
@@ -226,6 +246,8 @@ def handle_image_plan(ctx: StepContext) -> dict[str, Any]:
         )
 
     existing = ctx.read_json("output/image-plan.json")
+    if ctx.path(STATE_FILE).is_file() and not pipeline_artifact_current(ctx.product_dir, "plan"):
+        raise PipelineGateError(ctx.step, "图片方案缺失或已过期，请在独立图片规划步骤重新生成；不会复用旧方案")
     if existing:
         # 上游语义：图片计划是设计文档的物化投影（设计步骤已经算过），这里只做校验
         plan = existing
@@ -265,6 +287,10 @@ def handle_image_plan(ctx: StepContext) -> dict[str, Any]:
             f"主图数量 {len(main_images)} 与要上架的 SKU 数 {sku_count} 不一致（每个上架 SKU 必须恰好 1 张主图）",
             {"sku_count": sku_count, "main_images": len(main_images)},
         )
+    selected_ids = {str(row.get("sku_id")) for row in source.get("skus") or []}
+    plan_ids = {str(row.get("source_sku_id") or row.get("sku_identity") or row.get("sku_id")) for row in main_images}
+    if plan_ids != selected_ids:
+        raise PipelineGateError(ctx.step, "主图所属 SKU 与当前所选规格不一致，请重新规划图片")
     if len(detail_images) != 8:
         raise PipelineGateError(
             ctx.step,
@@ -295,7 +321,7 @@ def handle_product_positioning(ctx: StepContext) -> dict[str, Any]:
     from models import PositionRequest
 
     provider = ctx.require_provider()
-    source = ctx.require_json("input/source.json")
+    source = selected_source(ctx.product_dir, ctx.require_json("input/source.json"))
     analysis = ctx.read_json("output/product-analysis.json")
     copy_bundle = ctx.read_json("output/copy-ru.json")
     pricing = ctx.read_json("output/pricing-result.json")
@@ -341,7 +367,7 @@ def handle_ecommerce_design(ctx: StepContext) -> dict[str, Any]:
     from models.image_plan import render_plan_brief
 
     provider = ctx.require_provider()
-    source = ctx.require_json("input/source.json")
+    source = selected_source(ctx.product_dir, ctx.require_json("input/source.json"))
     analysis = ctx.read_json("output/product-analysis.json")
     image_plan = ctx.read_json("output/image-plan.json")
     attributes_final = ctx.read_json("output/ozon-attributes-final.json")
@@ -350,6 +376,10 @@ def handle_ecommerce_design(ctx: StepContext) -> dict[str, Any]:
     selection = load_selected_keywords(ctx.product_dir)
     copy_bundle = ctx.read_json("output/copy-ru.json")
     warnings: list[str] = []
+    if ctx.path(STATE_FILE).is_file():
+        current = workflow_status(ctx.product_dir)
+        if not current["copy"]["confirmed"] or current["plan"]["status"] != "ready":
+            raise PipelineGateError(ctx.step, "请先完成并确认分步文案和图片方案；旧设计入口不会隐式选择文案或生成图片方案")
     if not copy_bundle:
         if not selection or not selection.get("keywords"):
             raise PipelineGateError(

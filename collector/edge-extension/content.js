@@ -1,5 +1,5 @@
 (() => {
-const PLUGIN_VERSION = "0.4.32";
+const PLUGIN_VERSION = "0.4.33";
 const previousProductBridge = globalThis.__workbenchProductBridge;
 try {
     if (previousProductBridge?.version === PLUGIN_VERSION && previousProductBridge.isCurrent?.()) return;
@@ -54,20 +54,22 @@ function pageProductDataListener() {
         pageWindowProductData = parsed;
 }
 window.addEventListener("CAF_PAGE_PRODUCT_DATA_READY", pageProductDataListener);
-function injectPageProbe() {
-    if (pageProbeInjected || typeof chrome === "undefined" || !chrome.runtime?.getURL)
+function injectPageProbe(force = false) {
+    if ((!force && pageProbeInjected) || typeof chrome === "undefined" || !chrome.runtime?.getURL)
         return;
     pageProbeInjected = true;
-    try {
-        const script = document.createElement("script");
-        script.src = chrome.runtime.getURL("page-probe.js");
-        script.onload = () => script.remove();
-        script.onerror = () => script.remove();
-        (document.head || document.documentElement).appendChild(script);
-    }
-    catch {
-        pageProbeInjected = false;
-    }
+    return new Promise(resolve => {
+        let script, timer;
+        const finish = () => { if (timer) clearTimeout(timer); script?.remove(); resolve(); };
+        try {
+            script = document.createElement("script");
+            script.src = chrome.runtime.getURL("page-probe.js");
+            script.onload = finish;
+            script.onerror = () => { pageProbeInjected = false; finish(); };
+            timer = setTimeout(finish, 800);
+            (document.head || document.documentElement).appendChild(script);
+        } catch { pageProbeInjected = false; finish(); }
+    });
 }
 injectPageProbe();
 function textOf(node) {
@@ -3063,6 +3065,147 @@ function showSkuDrawer(capture, options = {}) {
     render();
     loadCategorySearch(capture.title_cn || "");
 }
+// Source videos are evidence only: no playback, cross-origin fetch, cookie export,
+// HLS reconstruction or Ozon write. A poster remains a static poster, not a video cover.
+function extractVideos(structured = [], collectedSkuIds = []) {
+    const offerId = String(location.pathname).match(/\/offer\/(\d+)\.html/)?.[1] || "";
+    const values = [], selectors = [], warnings = [], seen = new Map();
+    const skuIds = new Set(collectedSkuIds.map(String));
+    const blockedContext = /recommend|advert(?:isement)?|(?:^|[^a-z])ads?(?:[^a-z]|$)|live(?:stream)?|shopVideo|guessYouLike|推荐|广告|直播/i;
+    const videoContext = /video|vod|player|media|视频/i;
+    const finite = value => typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+    const safeUrl = value => {
+        let text = typeof value === 'string' ? value.trim() : '';
+        if (!text || text.length > 12000 || /[\x00-\x1f\\]/.test(text)) return null;
+        if (text.startsWith('//')) text = 'https:' + text;
+        if (text.startsWith('blob:')) return text;
+        try {
+            const parsed = new URL(text, location.href);
+            if (!['https:', 'http:'].includes(parsed.protocol) || parsed.username || parsed.password) return null;
+            const host = parsed.hostname.toLowerCase();
+            if (!(host === 'alicdn.com' || host.endsWith('.alicdn.com') || host === 'cloud.video.taobao.com')) return null;
+            return parsed.href;
+        } catch { return null; }
+    };
+    const add = (raw, role, source) => {
+        const url = safeUrl(raw.source_url);
+        if (raw.offer_id && String(raw.offer_id) !== offerId) return;
+        if (raw.source_url && !url) {
+            warnings.push('商品视频地址不是受支持的公开 Alibaba CDN 地址，未采集该地址');
+            return;
+        }
+        const providerId = /^[a-zA-Z0-9_-]{1,100}$/.test(String(raw.provider_video_id || ''))
+            ? String(raw.provider_video_id) : null;
+        if (!url && !providerId && !raw.empty_player) return;
+        let key = providerId ? `provider:${providerId}` : url || `empty:${source}`;
+        if (!providerId && url && !url.startsWith('blob:')) {
+            const parsed = new URL(url);
+            key = parsed.hostname + parsed.pathname;
+        }
+        const status = raw.drm === true ? 'protected_media' : !url ? 'not_loaded'
+            : url.startsWith('blob:') ? 'unsupported_blob'
+            : /\.(m3u8|mpd)(?:[?#]|$)/i.test(url) || /mpegurl|dash\+xml/i.test(raw.mime_type || '') ? 'unsupported_stream'
+            : url.startsWith('https:') ? 'metadata_only' : 'unsupported_url';
+        const row = {
+            offer_id: offerId, provider_video_id: providerId, source_url: url,
+            poster_url: safeUrl(raw.poster_url), role, source,
+            title: String(raw.title || '商品视频').slice(0, 200),
+            mime_type: typeof raw.mime_type === 'string' ? raw.mime_type.slice(0, 100) : null,
+            duration_seconds: finite(raw.duration_seconds), width: finite(raw.width), height: finite(raw.height),
+            sku_ids: Array.isArray(raw.sku_ids) ? raw.sku_ids.map(String).filter(id => skuIds.has(id)) : [],
+            status, drm: raw.drm === true, poster_is_ozon_video_cover: false,
+            captured_at: new Date().toISOString(),
+        };
+        if (seen.has(key)) {
+            const previous = values[seen.get(key)];
+            // Same provider/config: prefer a direct URL over a temporary player blob.
+            if (status === 'metadata_only' && previous.status !== 'metadata_only') values[seen.get(key)] = row;
+            else if (!previous.poster_url && row.poster_url) previous.poster_url = row.poster_url;
+            return;
+        }
+        seen.set(key, values.length);
+        values.push(row);
+    };
+    const scopes = [
+        ['.od-picture-gallery, .module-od-picture-gallery, .detail-gallery, .mod-detail-gallery', 'main'],
+        ['#desc-lazyload-container, #detailContent, .detail-description, .desc-lazyload-container, .module-od-product-description, v-detail-h.html-description', 'detail'],
+    ];
+    const readScope = (scope, role, selector) => {
+        (scope.querySelectorAll?.('video') || []).forEach(video => {
+            const ancestor = video.closest?.('[class*="recommend"], [class*="advert"], [class*="live"], [id*="recommend"], [id*="advert"], [id*="live"]');
+            if (ancestor) return;
+            const sources = [video.currentSrc, video.getAttribute?.('src'), video.src,
+                ...Array.from(video.querySelectorAll?.('source') || []).map(item => item.src || item.getAttribute?.('src'))]
+                .filter(value => typeof value === 'string' && value);
+            // Do not preserve a blob placeholder if this same player exposes a direct source.
+            const direct = sources.filter(value => !value.startsWith('blob:'));
+            const selected = direct.length ? direct : sources.slice(0, 1);
+            if (!selected.length) selected.push(null);
+            selected.forEach(url => add({ source_url: url, poster_url: video.poster || video.getAttribute?.('poster'),
+                duration_seconds: video.duration, width: video.videoWidth, height: video.videoHeight,
+                mime_type: video.querySelector?.('source')?.type || null,
+                provider_video_id: video.getAttribute?.('data-video-id'), empty_player: true }, role, 'product_video_dom'));
+        });
+        if (scope.shadowRoot) readScope(scope.shadowRoot, role, selector);
+    };
+    if (typeof document !== 'undefined') scopes.forEach(([selector, role]) => {
+        const roots = Array.from(document.querySelectorAll(selector));
+        if (roots.length) selectors.push(selector);
+        roots.forEach(root => readScope(root, role, selector));
+    });
+    let nodes = 0;
+    const visited = new WeakSet();
+    const walk = (node, path = '', depth = 0, inheritedVideo = false) => {
+        if (++nodes > 10000 || depth > 12 || node == null || blockedContext.test(path)) return;
+        if (typeof node === 'string') {
+            if (inheritedVideo && /^(?:https?:|\/\/|blob:)/.test(node)) add({source_url: node}, 'product', 'loaded_product_video_config');
+            return;
+        }
+        if (typeof node !== 'object' || visited.has(node)) return;
+        visited.add(node);
+        if (Array.isArray(node)) { node.forEach((child, index) => walk(child, `${path}[${index}]`, depth + 1, inheritedVideo)); return; }
+        if (node.isLive === true || node.is_live === true || node.isAd === true || node.is_ad === true
+            || /^(?:live|livestream|ad|advertisement)$/i.test(String(node.videoType || node.role || node.type || ''))) return;
+        // Page-world candidates retain their variable name, which may identify a
+        // video player (or an excluded live/ad widget). Do not lose that context.
+        if (typeof node.name === 'string' && node.data && typeof node.data === 'object') {
+            walk(node.data, `${path}.${node.name}`, depth + 1, inheritedVideo || videoContext.test(node.name));
+            return;
+        }
+        const boundOffer = node.offerId ?? node.offer_id;
+        if (boundOffer != null && String(boundOffer) !== offerId) return;
+        const isVideo = inheritedVideo || videoContext.test(path) || /VideoObject/i.test(String(node['@type'] || ''));
+        const directKey = ['videoUrl', 'video_url', 'playUrl', 'play_url', 'videoSrc', 'contentUrl']
+            .find(key => typeof node[key] === 'string' && (key !== 'contentUrl' || isVideo));
+        const genericKey = isVideo ? ['url', 'src', 'source_url'].find(key => typeof node[key] === 'string') : null;
+        const selectedKey = directKey || genericKey;
+        if (selectedKey || (isVideo && (node.videoId || node.video_id))) {
+            const explicitSeconds = node.duration_seconds ?? node.durationSeconds;
+            const duration = explicitSeconds ?? node.duration;
+            // Only explicit numeric seconds or ISO-8601 VideoObject duration; no guessed units.
+            const iso = typeof duration === 'string' ? duration.match(/^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?$/) : null;
+            const seconds = iso ? Number(iso[1] || 0) * 3600 + Number(iso[2] || 0) * 60 + Number(iso[3] || 0)
+                : explicitSeconds ?? (/^(?:s|seconds)$/i.test(String(node.durationUnit || node.duration_unit || '')) ? node.duration : null);
+            add({source_url: selectedKey ? node[selectedKey] : null,
+                provider_video_id: node.videoId || node.video_id || node.videoID,
+                poster_url: node.poster || node.posterUrl || node.coverUrl || node.thumbnailUrl,
+                title: node.name || node.title, duration_seconds: seconds, width: node.width, height: node.height,
+                mime_type: node.encodingFormat || node.mime_type || node.type,
+                sku_ids: node.sku_ids, drm: node.drm === true || node.protected === true,
+                offer_id: boundOffer}, /detail|description/i.test(path) ? 'detail' : 'product', 'loaded_product_video_config');
+        }
+        Object.entries(node).slice(0, 250).forEach(([key, child]) => {
+            if (/cookie|password|authorization|credential|session|token/i.test(key) || blockedContext.test(key)) return;
+            if (key === selectedKey || /poster|cover|thumbnail|image|picture/i.test(key)) return;
+            // Do not turn a thumbnail/poster/title scalar into an additional video.
+            if (typeof child !== 'object' && !videoContext.test(key)) return;
+            walk(child, `${path}.${key}`, depth + 1, isVideo || videoContext.test(key));
+        });
+    };
+    structured.forEach(item => walk(item?.data ?? item));
+    if (values.length > 30) warnings.push('商品视频超过30条，采集前30条；请在后台核对');
+    return {values: values.slice(0, 30), selectors, warnings: Array.from(new Set(warnings))};
+}
 function buildCapture() {
     const structured = parseJsonScripts();
     const title = extractTitle(structured);
@@ -3074,6 +3217,7 @@ function buildCapture() {
     const detailImages = extractDetailImages();
     const productRangePrice = productPriceForQuantity(price.value, moq.value.value);
     const skus = extractSkus(structured, price.value.price_ranges.length > 0, productRangePrice);
+    const videos = extractVideos(structured, skus.values.map(sku => sku.sku_id));
     // 1688 详情区懒加载，DOM 常抓不到详情图；从 offerImgList 补回未被 main/sku 占用的图。
     const skuImageUrls = skus.values.map((sku) => sku.image_url || sku.variant_image_url || "").filter(Boolean);
     offerImgListDetailUrls(structured, mainImages.values.map((v) => v.url), skuImageUrls).forEach((item) => detailImages.values.push(item));
@@ -3086,7 +3230,7 @@ function buildCapture() {
             return true;
         });
     }
-    const warnings = [];
+    const warnings = [...videos.warnings];
     const realSkuIdCount = skus.values.filter((sku) => isRealSkuId(sku.sku_id)).length;
     const skuDebug = buildSkuDebug(skus.values, {
         sku_source: skus.source || "unknown",
@@ -3131,6 +3275,10 @@ function buildCapture() {
         minimum_order_quantity: moq.value,
         main_images: mainImages.values,
         detail_images: detailImages.values,
+        videos: videos.values,
+        video_capture: {count: videos.values.length, download_performed: false,
+            states: videos.values.map(item => item.status),
+            note: '只读取当前商品已加载的视频信息，不下载视频，不采集广告或直播，不绕过登录和视频保护'},
         skus: skus.values,
         sku_property_groups: skus.propertyGroups || [],
         field_diagnostics: diagnostics,
@@ -3147,7 +3295,8 @@ function buildCapture() {
                 attributes: attrs.selectors,
                 price: price.selectors,
                 main_images: mainImages.selectors,
-                detail_images: detailImages.selectors
+                detail_images: detailImages.selectors,
+                videos: videos.selectors
             },
             title_candidates: title.candidates.slice(0, 10),
             supplier_candidates: supplier.candidates.slice(0, 10),
@@ -3177,12 +3326,15 @@ function is1688OfferPage() {
 }
 function productReadFailure(label, error) {
     return { is_collectable: false, reason: `${label}读取失败：${error?.message || '页面未完成加载'}`,
-        capture_warnings: [`${label}读取失败`], main_images: [], detail_images: [], skus: [] };
+        capture_warnings: [`${label}读取失败`], main_images: [], detail_images: [], videos: [], skus: [] };
 }
 async function buildReadyCapture() {
     await warmAllSkuImages();
     await warmProductAttributeTables();
     await warmDetailImages();
+    // Video players may be initialized after the original document_idle probe.
+    // Re-read loaded page config; never play a video or contact its CDN here.
+    await injectPageProbe(true);
     return buildCapture();
 }
 const productMessageListener = (message, sender, sendResponse) => {

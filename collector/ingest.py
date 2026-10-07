@@ -36,11 +36,13 @@ try:  # 正常包内导入
     from parsing import parse_number
     from pipeline import status as product_status
     from pipeline.status import MAX_SELECTED_SKUS, OFFER_ID_PATTERN, PRODUCT_ID_PATTERN
+    from pipeline.source_videos import initialize_video_manifest, normalize_videos
 except ModuleNotFoundError:  # 允许以脚本方式直接运行
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from parsing import parse_number
     from pipeline import status as product_status
     from pipeline.status import MAX_SELECTED_SKUS, OFFER_ID_PATTERN, PRODUCT_ID_PATTERN
+    from pipeline.source_videos import initialize_video_manifest, normalize_videos
 
 SCHEMA_VERSION = "1.0.0"
 SOURCE_KIND_WORKBENCH = "workbench_collection"
@@ -331,6 +333,7 @@ def normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
             if url and str(url) != "unknown":
                 images["sku"].append({"url": str(url), "name": sku["sku_id"], "sku_id": sku["sku_id"]})
 
+    video_metadata = normalize_videos(payload.get("videos"), source_url, sku_ids={sku["sku_id"] for sku in skus})
     return {
         "source_url": source_url,
         "offer_id": offer_id_of(source_url),
@@ -340,6 +343,8 @@ def normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         "collection_mode": "all_skus" if collect_all else "selected_skus",
         "category": normalized_category,
         "images": images,
+        "videos": video_metadata["videos"],
+        "video_warnings": video_metadata["warnings"],
         "raw": payload.get("raw") if isinstance(payload.get("raw"), Mapping) else dict(payload),
         "extra": payload.get("extra") if isinstance(payload.get("extra"), Mapping) else {},
         "keywords": _normalize_keywords(payload),
@@ -577,6 +582,7 @@ def ingest_capture(
 
     collection_id = new_collection_id()
     warnings: list[str] = []
+    warnings.extend(normalized.get("video_warnings") or [])
 
     collect_all = normalized["collection_mode"] == "all_skus"
     image_counts, image_warnings, stored_images = _copy_images(
@@ -606,6 +612,7 @@ def ingest_capture(
         "selected_category": normalized["category"],
         "images": {role: count for role, count in image_counts.items()},
         "stored_images": stored_images,
+        "videos": normalized["videos"],
         "extra": normalized["extra"],
     }
     attributes = normalized.get("attributes_zh") or {}
@@ -670,6 +677,12 @@ def ingest_capture(
         status="COLLECTED",
     )
     product_status.save_status(product_dir, status)
+    # Video transfers use an independent, private runtime manifest. Capturing video
+    # metadata performs no video download and subsequent transfers cannot break the source seal.
+    try:
+        initialize_video_manifest(product_dir, normalized["videos"])
+    except (OSError, ValueError):
+        warnings.append("视频私有索引暂未建立，源视频资料仍保留在商品采集记录中")
 
     return {
         "product_id": product_id,
@@ -688,6 +701,7 @@ def ingest_capture(
             "main_images": image_counts["main"],
             "sku_images": image_counts["sku"],
             "detail_images": image_counts["detail"],
+            "videos": len(normalized["videos"]),
             "manifest_files": manifest["file_count"],
         },
     }

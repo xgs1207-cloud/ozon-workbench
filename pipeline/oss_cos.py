@@ -7,7 +7,8 @@
 
 - **不猜域名**：公网前缀默认 `<bucket>.cos.<region>.myqcloud.com`，也可用 `COS_PUBLIC_BASE_URL`
   指向 CDN/自定义域名；写出的 `output/image-public-urls.json` 必须全是 https（Ozon 要能抓取）；
-- **增量同步**：先 `head_object` 比对大小，相同就跳过（Content-MD5/ETag 由 SDK 处理）；
+- **增量同步**：对象键带 SHA-256 内容版本；只有长度、SHA-256 元数据与简单上传 ETag
+  都一致才复用，不以文件大小判断图片是否相同；PUT 启用 SDK 的 Content-MD5 校验；
 - **`--check` 是真正的验证**：用一个探针对象走 PUT → 匿名 GET（模拟 Ozon 抓取）→ DELETE，
   一次把"密钥对不对 / bucket 对不对 / 是否公有读"全验掉；不通过就说明 Ozon 也抓不到；
 - 凭据只从环境变量读：`COS_SECRET_ID`、`COS_SECRET_KEY`（可选 `COS_TOKEN` 临时密钥）、
@@ -20,14 +21,17 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Mapping, Sequence
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 SCHEMA_VERSION = "1.0.0"
 URLS_FILE = "output/image-public-urls.json"
@@ -157,18 +161,40 @@ class CosObjectStorage:
         self.key_prefix = str(key_prefix or "").strip("/")
         self.layout = layout or DEFAULT_LAYOUT
         self.public_base_url = (public_base_url or "").rstrip("/") or None
+        if self.public_base_url:
+            base = urlsplit(self.public_base_url)
+            if (
+                base.scheme != "https" or not base.hostname
+                or base.username is not None or base.password is not None
+                or base.query or base.fragment
+            ):
+                raise CosError("COS 公网地址前缀必须是无凭据、查询参数和片段的 HTTPS 地址")
         self.dry_run = dry_run
         self.sleep = sleep
         self.max_attempts = max(1, int(max_attempts))
 
     # ---------------------------------------------------------------- 键与 URL
 
-    def key_for(self, product_id: str, slot: str) -> str:
+    def key_for(
+        self, product_id: str, slot: str, *, content_sha256: str | None = None,
+        suffix: str | None = None,
+    ) -> str:
         relative = self.layout.format(product_id=product_id, slot=slot).lstrip("/")
+        if content_sha256 is not None:
+            if not re.fullmatch(r"[0-9a-f]{64}", content_sha256):
+                raise CosError("COS 图片内容版本必须是 SHA-256 指纹")
+            path = PurePosixPath(relative)
+            extension = suffix.lower() if suffix is not None else path.suffix
+            if extension not in CONTENT_TYPES:
+                raise CosError("COS 发布仅支持 PNG、JPEG、WebP 或 GIF 图片")
+            relative = str(path.with_name(f"{path.stem}-{content_sha256}{extension}"))
         return f"{self.key_prefix}/{relative}" if self.key_prefix else relative
 
-    def url_for(self, product_id: str, slot: str) -> str:
-        key = self.key_for(product_id, slot)
+    def url_for(
+        self, product_id: str, slot: str, *, content_sha256: str | None = None,
+        suffix: str | None = None,
+    ) -> str:
+        key = self.key_for(product_id, slot, content_sha256=content_sha256, suffix=suffix)
         if self.public_base_url:
             return f"{self.public_base_url}/{quote(key)}"
         return f"https://{self.bucket}.cos.{self.region}.myqcloud.com/{quote(key)}"
@@ -193,22 +219,38 @@ class CosObjectStorage:
         product_id = product_dir.name
         slot = str(row["slot"])
         source = product_dir / str(row["output_path"])
-        key = self.key_for(product_id, slot)
+        if not source.resolve().is_relative_to(product_dir.resolve()):
+            raise CosError("图片计划的本地文件必须位于当前商品目录内")
         if not source.is_file():
             return {"slot": slot, "status": "missing", "reason": f"本地文件不存在：{row['output_path']}"}
 
-        size = source.stat().st_size
+        # Hash and upload the same immutable byte snapshot, not stat() then a later read.
+        body = source.read_bytes()
+        size = len(body)
+        digest = hashlib.sha256(body).hexdigest()
+        # COS simple PUT ETag is MD5; multipart/unknown ETags are never evidence for reuse.
+        md5 = hashlib.md5(body, usedforsecurity=False).hexdigest()
+        key = self.key_for(product_id, slot, content_sha256=digest, suffix=source.suffix)
+        url = self.url_for(product_id, slot, content_sha256=digest, suffix=source.suffix)
+        remote_matches = False
         try:
             head = self._call("head_object", Bucket=self.bucket, Key=key)
-            remote_size = int(head.get("Content-Length") or head.get("content-length") or -1)
-        except CosError:
-            remote_size = -1
-        if remote_size == size:
-            return {"slot": slot, "status": "unchanged", "key": key, "url": self.url_for(product_id, slot)}
+            headers = {str(name).lower(): str(value).strip() for name, value in head.items()}
+            remote_size = int(headers.get("content-length", "-1"))
+            etag = headers.get("etag", "").strip('"').lower()
+            remote_matches = (
+                remote_size == size
+                and headers.get("x-cos-meta-sha256") == digest
+                and re.fullmatch(r"[0-9a-f]{32}", etag) is not None
+                and etag == md5
+            )
+        except (CosError, TypeError, ValueError, AttributeError):
+            pass
+        if remote_matches:
+            return {"slot": slot, "status": "unchanged", "key": key, "url": url, "sha256": digest}
         if self.dry_run:
-            return {"slot": slot, "status": "would_upload", "key": key, "url": self.url_for(product_id, slot)}
+            return {"slot": slot, "status": "would_upload", "key": key, "url": url, "sha256": digest}
 
-        body = source.read_bytes()
         self._call(
             "put_object",
             Bucket=self.bucket,
@@ -216,13 +258,16 @@ class CosObjectStorage:
             Body=body,
             ContentType=content_type_for(source),
             CacheControl="public, max-age=2592000",
+            EnableMD5=True,
+            Metadata={"x-cos-meta-sha256": digest},
         )
         return {
             "slot": slot,
             "status": "uploaded",
             "key": key,
             "bytes": len(body),
-            "url": self.url_for(product_id, slot),
+            "url": url,
+            "sha256": digest,
         }
 
     def publish_product(
@@ -261,7 +306,20 @@ class CosObjectStorage:
             }
             path = directory / URLS_FILE
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            temporary_path: Path | None = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.",
+                    suffix=".tmp", delete=False,
+                ) as temporary:
+                    temporary_path = Path(temporary.name)
+                    temporary.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+                    temporary.flush()
+                    os.fsync(temporary.fileno())
+                os.replace(temporary_path, path)
+            finally:
+                if temporary_path is not None and temporary_path.exists():
+                    temporary_path.unlink()
             written = str(path)
 
         return {

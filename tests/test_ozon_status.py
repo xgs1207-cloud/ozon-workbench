@@ -7,6 +7,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
@@ -238,7 +239,12 @@ class UploadIntegrationTests(UploadFixture):
         self.registry_path = self.root / "config" / "shops.json"
         registry = store_registry.example_registry()
         store_registry.set_enabled(registry, "default", True)
+        # This fixture has explicitly confirmed RUB prices, not a CNY quote.
+        # Do not accidentally read the developer's real default registry.
+        next(shop for shop in registry["shops"] if shop["id"] == "default")["default_currency_code"] = "RUB"
         store_registry.save_registry(registry, self.registry_path)
+        registry_read = patch("pipeline.stores.ensure_registry", return_value=registry)
+        registry_read.start();self.addCleanup(registry_read.stop)
         create_batch(self.products, batches_root=self.batches, target_store_ids=["default"])
 
     def uploader(self, transport) -> OzonWriteUploader:

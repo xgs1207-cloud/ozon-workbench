@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import pathlib
 import sys
 import tempfile
@@ -49,6 +50,7 @@ class FakeCosClient:
 
     def __init__(self, *, existing: dict[str, int] | None = None, fail_put: int = 0) -> None:
         self.objects: dict[str, bytes] = {}
+        self.metadata: dict[str, dict[str, str]] = {}
         self.sizes = dict(existing or {})
         self.calls: list[tuple[str, dict]] = []
         self.fail_put = fail_put
@@ -59,7 +61,10 @@ class FakeCosClient:
         size = self.sizes.get(key)
         if size is None:
             raise RuntimeError("NoSuchKey: 404")
-        return {"Content-Length": str(size)}
+        head = {"Content-Length": str(size), **self.metadata.get(key, {})}
+        if key in self.objects:
+            head["ETag"] = f'"{hashlib.md5(self.objects[key], usedforsecurity=False).hexdigest()}"'
+        return head
 
     def put_object(self, **kwargs):
         self.calls.append(("put_object", kwargs))
@@ -68,12 +73,14 @@ class FakeCosClient:
             raise RuntimeError("500 InternalError")
         self.objects[kwargs["Key"]] = kwargs["Body"]
         self.sizes[kwargs["Key"]] = len(kwargs["Body"])
-        return {"ETag": '"abc"'}
+        self.metadata[kwargs["Key"]] = dict(kwargs.get("Metadata") or {})
+        return {"ETag": f'"{hashlib.md5(kwargs["Body"], usedforsecurity=False).hexdigest()}"'}
 
     def delete_object(self, **kwargs):
         self.calls.append(("delete_object", kwargs))
         self.objects.pop(kwargs["Key"], None)
         self.sizes.pop(kwargs["Key"], None)
+        self.metadata.pop(kwargs["Key"], None)
         return {}
 
     def get_object(self, **kwargs):  # pragma: no cover - 仅接口完整性
@@ -192,6 +199,11 @@ class UploadTests(StorageFixture):
         put_calls = [kwargs for name, kwargs in self.client.calls if name == "put_object"]
         self.assertEqual(put_calls[0]["ContentType"], "image/png")
         self.assertIn("max-age", put_calls[0]["CacheControl"])
+        self.assertTrue(put_calls[0]["EnableMD5"])
+        self.assertEqual(
+            put_calls[0]["Metadata"]["x-cos-meta-sha256"],
+            hashlib.sha256(put_calls[0]["Body"]).hexdigest(),
+        )
 
     def test_second_run_skips_unchanged(self):
         self.generate()
@@ -210,6 +222,105 @@ class UploadTests(StorageFixture):
         summary = self.storage.publish_product(self.product_dir)
         self.assertEqual(summary["uploaded"], 1)
         self.assertEqual(summary["unchanged"], 9)
+
+    def test_same_size_changed_bytes_get_new_key_and_public_url(self):
+        self.generate()
+        first = self.storage.publish_product(self.product_dir, slots=["main-S1"])
+        old = first["results"][0]
+        plan = json.loads((self.product_dir / "output" / "image-plan.json").read_text(encoding="utf-8"))
+        source = self.product_dir / plan["main_images"][0]["output_path"]
+        original = source.read_bytes()
+        changed = original[:-1] + bytes([original[-1] ^ 1])
+        self.assertEqual(len(original), len(changed))
+        source.write_bytes(changed)
+
+        second = self.storage.publish_product(self.product_dir, slots=["main-S1"])
+        new = second["results"][0]
+        self.assertEqual(second["uploaded"], 1)
+        self.assertEqual(second["unchanged"], 0)
+        self.assertNotEqual(old["key"], new["key"])
+        self.assertNotEqual(old["url"], new["url"])
+        self.assertEqual(self.client.objects[old["key"]], original)
+        self.assertEqual(self.client.objects[new["key"]], changed)
+        self.assertIn(hashlib.sha256(changed).hexdigest(), new["key"])
+        self.assertEqual(resolve_image_urls(self.product_dir)["main-S1"], new["url"])
+
+    def test_same_size_corrupt_remote_bytes_are_not_reused(self):
+        self.generate()
+        first = self.storage.publish_product(self.product_dir, slots=["main-S1"])
+        key = first["results"][0]["key"]
+        original = self.client.objects[key]
+        self.client.objects[key] = original[:-1] + bytes([original[-1] ^ 1])
+        second = self.storage.publish_product(self.product_dir, slots=["main-S1"])
+        self.assertEqual(second["uploaded"], 1)
+        self.assertEqual(second["unchanged"], 0)
+        self.assertEqual(self.client.objects[key], original)
+
+    def test_unverifiable_head_never_reuses_an_object(self):
+        from unittest import mock
+
+        self.generate()
+        first = self.storage.publish_product(self.product_dir, slots=["main-S1"])
+        row = first["results"][0]
+        body = self.client.objects[row["key"]]
+        good = {
+            "Content-Length": str(len(body)),
+            "ETag": f'"{hashlib.md5(body, usedforsecurity=False).hexdigest()}"',
+            "x-cos-meta-sha256": row["sha256"],
+        }
+        bad_headers = [
+            {"Content-Length": good["Content-Length"]},
+            {**good, "ETag": good["ETag"][:-1] + '-2"'},
+            {**good, "ETag": ""},
+            {**good, "x-cos-meta-sha256": "0" * 64},
+            {**good, "Content-Length": "invalid"},
+        ]
+        for head in bad_headers:
+            with self.subTest(head=head), mock.patch.object(self.client, "head_object", return_value=head):
+                result = self.storage.publish_product(self.product_dir, slots=["main-S1"])
+            self.assertEqual(result["uploaded"], 1)
+            self.assertEqual(result["unchanged"], 0)
+
+    def test_versioned_key_preserves_actual_jpeg_format(self):
+        source = self.product_dir / "output" / "generated-images" / "photo.JPG"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"\xff\xd8\xffjpeg")
+        row = {"slot": "detail-001", "output_path": str(source.relative_to(self.product_dir))}
+        storage = CosObjectStorage(
+            self.client, bucket=ENV["COS_BUCKET"], region=ENV["COS_REGION"],
+            key_prefix="custom path", public_base_url="https://cdn.example.com/media",
+        )
+        result = storage.publish_slot(self.product_dir, row)
+        self.assertTrue(result["key"].endswith(".jpg"))
+        self.assertIn("detail-001-" + hashlib.sha256(source.read_bytes()).hexdigest(), result["key"])
+        self.assertTrue(result["url"].startswith("https://cdn.example.com/media/custom%20path/"))
+        put = next(kwargs for name, kwargs in self.client.calls if name == "put_object")
+        self.assertEqual(put["ContentType"], "image/jpeg")
+
+    def test_external_source_path_rejected_before_any_cos_request(self):
+        source = self.root / "not-product.png"
+        source.write_bytes(IMAGE_BYTES)
+        with self.assertRaisesRegex(CosError, "当前商品目录"):
+            self.storage.publish_slot(self.product_dir, {"slot": "main-S1", "output_path": str(source)})
+        self.assertEqual(self.client.calls, [])
+
+    def test_invalid_public_base_url_rejected(self):
+        for base in ("http://cdn.example.com", "https://user:secret@cdn.example.com", "https://cdn.example.com?secret=1"):
+            with self.subTest(base=base), self.assertRaises(CosError):
+                CosObjectStorage(self.client, bucket=ENV["COS_BUCKET"], region=ENV["COS_REGION"], public_base_url=base)
+
+    def test_url_mapping_replace_failure_preserves_previous_map(self):
+        from unittest import mock
+
+        self.generate()
+        self.storage.publish_product(self.product_dir)
+        path = self.product_dir / "output" / "image-public-urls.json"
+        previous = path.read_bytes()
+        with mock.patch("pipeline.oss_cos.os.replace", side_effect=OSError("disk error")):
+            with self.assertRaises(OSError):
+                self.storage.publish_product(self.product_dir)
+        self.assertEqual(path.read_bytes(), previous)
+        self.assertEqual(list(path.parent.glob(".image-public-urls.json.*.tmp")), [])
 
     def test_dry_run_uploads_nothing(self):
         self.generate()

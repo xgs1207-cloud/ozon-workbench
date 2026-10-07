@@ -20,6 +20,7 @@ import re
 import shutil
 import tempfile
 import hmac
+from functools import wraps
 from pathlib import Path
 from typing import Any, Literal, Mapping
 
@@ -59,6 +60,20 @@ MARKET_DB_PATH = Path(
     os.environ.get("WORKBENCH_MARKET_DB_PATH")
     or (Path(__file__).resolve().parent / "runtime" / "market-intelligence.sqlite3")
 )
+
+
+def _locked_product_mutation(function):
+    """Commit local edits under the same cross-worker lock as final submission."""
+    @wraps(function)
+    def wrapped(product_id, *args, **kwargs):
+        from pipeline.product_edit_lock import product_edit_lock
+        try:
+            with product_edit_lock(_require_product(product_id)):
+                _require_pre_submission_edit(_require_product(product_id))
+                return function(product_id, *args, **kwargs)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+    return wrapped
 
 app = FastAPI(title="ozon-workbench · local workbench", version="0.2.0")
 
@@ -377,6 +392,7 @@ class OfficialCategoryRequest(BaseModel):
 
 
 @app.put("/api/workbench/products/{product_id}/ozon-category")
+@_locked_product_mutation
 def confirm_ozon_category(product_id: str, request: OfficialCategoryRequest) -> dict[str, Any]:
     directory = _require_product(product_id)
     _require_pre_submission_edit(directory)
@@ -957,6 +973,7 @@ def get_confirmed_measurements(product_id: str) -> dict[str, Any]:
 
 
 @app.put("/api/workbench/products/{product_id}/measurements")
+@_locked_product_mutation
 def set_confirmed_measurements(product_id: str, request: ConfirmedMeasurementsRequest) -> dict[str, Any]:
     directory = _require_product(product_id)
     _require_pre_submission_edit(directory)
@@ -983,6 +1000,7 @@ def get_manual_prices(product_id: str) -> dict[str, Any]:
 
 
 @app.put("/api/workbench/products/{product_id}/prices")
+@_locked_product_mutation
 def set_manual_prices(product_id: str, request: ManualPricesRequest) -> dict[str, Any]:
     from pipeline.sku_selection import active_skus
 
@@ -1017,7 +1035,7 @@ def workbench_product_skus(product_id: str) -> dict[str, Any]:
         "skus": [
             {
                 "sku_id": str(item.get("sku_id") or f"S{index}"),
-                "sku_name": item.get("sku_name") or item.get("name_zh") or item.get("spec_zh"),
+                "sku_name": item.get("sku_name") or item.get("name_zh") or item.get("name") or item.get("spec_zh"),
                 "option_values": item.get("option_values") or [],
                 "image_url": item.get("image_url") or item.get("variant_image_url"),
                 "image_path": item.get("image_path"),
@@ -1033,6 +1051,7 @@ def workbench_product_skus(product_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/workbench/products/{product_id}/skus")
+@_locked_product_mutation
 def workbench_set_product_skus(product_id: str, request: SkuSelectionRequest) -> dict[str, Any]:
     """设置上架 SKU。"""
     from pipeline.sku_selection import SkuSelectionError, clear_selection, set_selection, selection_state, source_skus
@@ -1086,6 +1105,9 @@ def workbench_launch(product_id: str, request: LaunchRequest) -> dict[str, Any]:
     from pipeline.upload import DryRunUploader, SimulatedUploader
 
     directory = _require_product(product_id)
+    _require_pre_submission_edit(directory)
+    if (directory / "input/guided-workflow.json").is_file():
+        raise HTTPException(status_code=409, detail="分步商品请分别确认摘要、文案、图片和卡片；最后使用确认提交入口")
 
     provider = None
     if str(request.provider or "fake").lower() not in {"none", "off"}:
@@ -1175,7 +1197,7 @@ def collector_detail(product_id: str) -> dict[str, Any]:
     return {
         "summary": _product_summary(product_id),
         "status": _read_json_file(directory / "status.json"),
-        "source": _read_json_file(directory / "input" / "source.json"),
+        "source": {key: value for key, value in _read_json_file(directory / "input" / "source.json").items() if key != "videos"},
         "manifest": _read_json_file(directory / "input" / "source-manifest.json"),
     }
 
@@ -1330,7 +1352,7 @@ def _require_product(product_id: str) -> Path:
 def _require_pre_submission_edit(directory: Path) -> None:
     from pipeline.status import load_status
 
-    if int(load_status(directory).get("api_write_count") or 0) > 0:
+    if int(load_status(directory).get("api_write_count") or 0) > 0 or (directory / "runtime/listing-submit-attempt.json").is_file():
         raise HTTPException(status_code=409, detail="商品已经向 Ozon 发起写入，请另建版本后再修改")
 
 
@@ -1344,6 +1366,7 @@ def get_selected_keywords(product_id: str) -> dict[str, Any]:
 
 
 @app.put("/api/workbench/products/{product_id}/keywords")
+@_locked_product_mutation
 def put_selected_keywords(product_id: str, request: KeywordSelectionRequest) -> dict[str, Any]:
     """选词：直接给词，或从关键词库按分数取（``from_library=true``）。"""
     from pipeline.selection import select_from_library, set_selected_keywords
@@ -1948,6 +1971,12 @@ def submit_product(product_id: str, request: StoreActionRequest) -> dict[str, An
     from pipeline.ozon_write import OzonWriteUploader
 
     directory = _require_product(product_id)
+    if (directory / "input/guided-workflow.json").is_file():
+        from workbench_listing_api import run_service
+        from pipeline.listing_draft import submit_listing
+        store = _store_for(directory, request.store)
+        return {"ok": True, "store": store,
+                "report": run_service(submit_listing, directory, shop=store)}
     if research_sessions.session_for_product(MARKET_DB_PATH, product_id):
         raise HTTPException(status_code=409, detail="选词批次商品须走逐项审核与批次自动发布，不可用旧入口绕过审核")
     store = _store_for(directory, request.store)
@@ -2086,6 +2115,7 @@ class HumanAttributesRequest(BaseModel):
 
 
 @app.put("/api/workbench/products/{product_id}/guided/facts")
+@_locked_product_mutation
 def guided_confirm_facts(product_id: str, request: HumanFactsRequest) -> dict[str, Any]:
     directory = _require_product(product_id)
     _require_pre_submission_edit(directory)
@@ -2122,6 +2152,7 @@ class GuidedGroupingRequest(BaseModel):
 
 
 @app.put("/api/workbench/products/{product_id}/guided/grouping")
+@_locked_product_mutation
 def guided_choose_grouping(product_id: str, request: GuidedGroupingRequest) -> dict[str, Any]:
     from contracts import validate_contract
     from pipeline.sku_selection import active_skus
@@ -2143,6 +2174,11 @@ def guided_choose_grouping(product_id: str, request: GuidedGroupingRequest) -> d
     if errors:
         raise HTTPException(status_code=422, detail="SKU 分组无效：" + "；".join(errors[:3]))
     path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if (directory / "input/guided-workflow.json").is_file():
+        from pipeline.listing_draft import grouping_scope
+        from pipeline.context import write_json
+        write_json(directory / "input/listing-grouping-choice.json", {
+            "strategy": request.strategy, "scope": grouping_scope(directory)})
     return {"ok": True, "grouping": result}
 
 
@@ -2150,10 +2186,15 @@ def guided_choose_grouping(product_id: str, request: GuidedGroupingRequest) -> d
 def guided_prepare(product_id: str, request: StoreActionRequest) -> dict[str, Any]:
     """Prepare Ark copy, real Ozon attributes and image plan; never write Ozon or generate paid images."""
     directory = _require_product(product_id)
+    _require_pre_submission_edit(directory)
     store = _store_for(directory, request.store)
     bound = _read_json_file(directory / "input/category-selection.json").get("shop_id")
     if bound and bound != store:
         raise HTTPException(status_code=409, detail="目标店铺与类目确认不一致，请为该店铺重新选择官方类目")
+    if (directory / "input/guided-workflow.json").is_file():
+        from workbench_listing_api import run_service
+        from pipeline.listing_draft import prepare_listing_card
+        return {"ok": True, "report": run_service(prepare_listing_card, directory, shop=store)}
     return workbench_launch(product_id, LaunchRequest(provider="ark", image_generator="none",
                                                        uploader="none", oss="none", stores=[store]))
 
@@ -2164,11 +2205,18 @@ def guided_product(product_id: str) -> dict[str, Any]:
 
     directory = _require_product(product_id)
     return {"ok": True, "product_id": product_id, "review": review_status(directory),
-            "source": _read_json_file(directory / "input" / "source.json"),
+            "workflow": __import__("pipeline.guided_workflow", fromlist=["workflow_status"]).workflow_status(directory),
+            "video_library": __import__("pipeline.source_videos", fromlist=["list_source_videos"]).list_source_videos(directory),
+            "media_selection": _read_json_file(directory / "input/listing-media.json"),
+            "source": {key: value for key, value in _read_json_file(directory / "input" / "source.json").items() if key != "videos"},
             "selected_keywords": _read_json_file(directory / "input" / "selected-keywords.json"),
             "analysis": _read_json_file(directory / "output" / "product-analysis.json"),
             "copy": _read_json_file(directory / "output" / "copy-ru.json"),
             "image_plan": _read_json_file(directory / "output" / "image-plan.json"),
+            "generated_image_paths": [path.relative_to(directory).as_posix()
+                for path in (directory / "output/generated-images").rglob("*")
+                if path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
+                and path.resolve().is_relative_to(directory.resolve())],
             "image_qc": _read_json_file(directory / "output" / "image-qc-report.json"),
             "grouping": _read_json_file(directory / "output" / "platform-grouping-result.json"),
             "attributes": _read_json_file(directory / "output" / "ozon-attributes-final.json"),
@@ -2180,6 +2228,7 @@ def guided_product(product_id: str) -> dict[str, Any]:
 
 
 @app.put("/api/workbench/products/{product_id}/guided/copy")
+@_locked_product_mutation
 def guided_edit_copy(product_id: str, request: GuidedCopyEditRequest) -> dict[str, Any]:
     from pipeline.guided_review import update_copy
 
@@ -2193,6 +2242,7 @@ def guided_edit_copy(product_id: str, request: GuidedCopyEditRequest) -> dict[st
 
 
 @app.put("/api/workbench/products/{product_id}/guided/image-plan/{slot}")
+@_locked_product_mutation
 def guided_edit_image_slot(product_id: str, slot: str, request: GuidedImageSlotRequest) -> dict[str, Any]:
     from pipeline.guided_review import update_plan_slot
 
@@ -2200,12 +2250,16 @@ def guided_edit_image_slot(product_id: str, slot: str, request: GuidedImageSlotR
         directory = _require_product(product_id)
         _require_pre_submission_edit(directory)
         plan = update_plan_slot(directory, slot=slot, **request.model_dump())
+        if (directory / "input/guided-workflow.json").is_file():
+            from pipeline.guided_workflow import refresh_plan_metadata
+            refresh_plan_metadata(directory)
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     return {"ok": True, "image_plan": plan}
 
 
 @app.post("/api/workbench/products/{product_id}/guided/approve")
+@_locked_product_mutation
 def guided_approve(product_id: str, request: GuidedApprovalRequest,
                    background_tasks: BackgroundTasks) -> dict[str, Any]:
     from pipeline.guided_review import approve
@@ -2215,7 +2269,7 @@ def guided_approve(product_id: str, request: GuidedApprovalRequest,
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     session_id = research_sessions.session_for_product(MARKET_DB_PATH, product_id)
-    if session_id and review["ready_to_preflight"]:
+    if session_id and review["ready_to_preflight"] and not (_require_product(product_id) / "input/guided-workflow.json").is_file():
         session = research_sessions.get_session(MARKET_DB_PATH, session_id)
         if session["auto_publish_enabled"] and os.environ.get("WORKBENCH_AUTO_PUBLISH_ARMED") == "1":
             background_tasks.add_task(_process_ready_background, session_id)
@@ -2223,6 +2277,7 @@ def guided_approve(product_id: str, request: GuidedApprovalRequest,
 
 
 @app.post("/api/workbench/products/{product_id}/guided/generate-image")
+@_locked_product_mutation
 def guided_generate_image(product_id: str, request: GuidedImageGenerateRequest) -> dict[str, Any]:
     """One paid Ark image request at a time, after plan approval; supports one-slot redo."""
     from contracts import validate_contract
@@ -2233,6 +2288,10 @@ def guided_generate_image(product_id: str, request: GuidedImageGenerateRequest) 
 
     directory = _require_product(product_id)
     _require_pre_submission_edit(directory)
+    if (directory / "input/guided-workflow.json").is_file():
+        from pipeline.guided_workflow import workflow_status
+        if workflow_status(directory)["plan"]["status"] != "ready":
+            raise HTTPException(status_code=409, detail="图片规划已过期，请先按最新规格和文案重新规划")
     if not review_status(directory)["sections"]["image_plan"]["approved"]:
         raise HTTPException(status_code=409, detail="先确认整套图片规划和参考图，再生成图片")
     plan = _read_json_file(directory / "output" / "image-plan.json")
@@ -2283,3 +2342,14 @@ def guided_media(product_id: str, relative_path: str) -> Any:
     if not any(target.is_relative_to(root.resolve()) for root in permitted):
         raise HTTPException(status_code=403, detail="图片路径不允许访问")
     return FileResponse(target)
+
+
+# Stepwise flow is isolated from legacy CLI orchestration and advanced console.
+from workbench_listing_api import router as listing_flow_router
+app.include_router(listing_flow_router)
+
+
+@app.get("/assets/listing-flow.js", include_in_schema=False)
+def listing_flow_script():
+    from fastapi.responses import FileResponse
+    return FileResponse(Path(__file__).resolve().parent / "web/listing-flow.js", media_type="text/javascript")

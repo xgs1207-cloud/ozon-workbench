@@ -113,7 +113,10 @@ class BuildRequestTests(unittest.TestCase):
         self.assertNotIn("https://cdn.example.com/P000001/main-S1.png", first["images"])  # 主图不重复放进图集
         self.assertEqual(len(first["images"]), 2)
         self.assertIn("Термос", first["name"])
-        self.assertEqual(first["description"], sample_payload()["description"])
+        self.assertNotIn("description", first)
+        self.assertEqual(next(row for row in first["attributes"] if row["id"] == 4191)["values"],
+                         [{"value": sample_payload()["description"]}])
+        self.assertEqual(first["promotions"], [{"type": "REVIEWS_PROMO", "operation": "DISABLE"}])
 
     def test_measurements_use_mm_and_grams(self):
         item = build_import_request(sample_payload())["items"][0]
@@ -150,12 +153,14 @@ class BuildRequestTests(unittest.TestCase):
                         f"属性 {attribute['id']} 的值既没有文本也没有字典 id",
                     )
 
-    def test_name_is_truncated_and_missing_measurements_are_omitted(self):
+    def test_invalid_name_is_rejected_and_missing_measurements_are_omitted(self):
         payload = sample_payload()
         payload["variants"][0]["display_name_ru"] = "я" * 300
         payload["sku_measurements"] = {}
+        with self.assertRaisesRegex(OzonWriteError, "200字符"):
+            build_import_request(payload)
+        payload["variants"][0]["display_name_ru"] = "Термос 500 мл"
         item = build_import_request(payload)["items"][0]
-        self.assertEqual(len(item["name"]), 255)
         self.assertNotIn("weight", item)  # 没确认尺寸重量就不填（不编造）
         self.assertNotIn("depth", item)
 
@@ -164,6 +169,78 @@ class BuildRequestTests(unittest.TestCase):
             build_import_request({"category": {"category_id": 0, "type_id": 0}, "variants": [{}]})
         with self.assertRaises(OzonWriteError):
             build_import_request({"category": {"category_id": 1001, "type_id": 2001}, "variants": []})
+
+    def test_confirmed_copy_attributes_win_and_tags_use_real_attribute(self):
+        payload = sample_payload()
+        payload["hashtags"] = ["#уютный_дом", "#подарок"]
+        payload["attributes"].append({"attribute_id": 4191, "value": "Подтверждённое описание"})
+        item = build_import_request(payload)["items"][0]
+        values = {row["id"]: row["values"] for row in item["attributes"]}
+        self.assertEqual(values[4191], [{"value": "Подтверждённое описание"}])
+        self.assertEqual(values[23171], [{"value": "#уютный_дом #подарок"}])
+
+    def test_invalid_copy_is_rejected_without_truncating(self):
+        for tags in (["word"], ["#bad-tag"], ["#a"] * 2, ["#" + "a" * 30], [f"#t{i}" for i in range(31)]):
+            with self.subTest(tags=tags), self.assertRaises(OzonWriteError):
+                payload = sample_payload();payload["hashtags"] = tags
+                build_import_request(payload)
+        for title in ("я" * 28, "x " * 101, ""):
+            with self.subTest(title=title), self.assertRaises(OzonWriteError):
+                payload = sample_payload();payload["title"] = title
+                for variant in payload["variants"]:variant["display_name_ru"] = title
+                build_import_request(payload)
+
+    def test_video_and_short_cover_use_complex_attributes_and_no_paid_promotion(self):
+        payload = sample_payload()
+        payload["videos"] = [{"url": "https://vkvideo.ru/video-123_456", "title": "Обзор", "duration_seconds": 10}]
+        payload["video_cover"] = {"url": "https://media.example.com/cover.mov", "duration_seconds": 8, "size_bytes": 5000}
+        item = build_import_request(payload)["items"][0]
+        ids = {row["id"]: row for group in item["complex_attributes"] for row in group["attributes"]}
+        self.assertEqual(ids[21841]["complex_id"], 100001)
+        self.assertEqual(ids[21837]["values"], [{"value": "Обзор"}])
+        self.assertEqual(ids[21845]["complex_id"], 100002)
+        self.assertNotIn(22273, ids)  # source SKU is not an existing Ozon product SKU.
+        self.assertEqual(item["promotions"][0]["operation"], "DISABLE")
+
+    def test_explicit_sku_media_clear_does_not_inherit(self):
+        payload = sample_payload()
+        payload["videos"] = [{"url": "https://vkvideo.ru/video-123_456", "title": "Обзор"}]
+        payload["video_cover"] = {"url": "https://media.example.com/cover.mp4"}
+        payload["variants"][0].update(videos=[], video_cover=None)
+        items = build_import_request(payload)["items"]
+        self.assertEqual(items[0]["complex_attributes"], [])
+        self.assertEqual(len(items[1]["complex_attributes"]), 2)
+
+    def test_bad_media_and_cross_sku_sources_are_rejected(self):
+        for url in ("https://localhost/a.mp4", "https://127.0.0.1/a.mp4", "https://10.0.0.1/a.mp4",
+                    "https://user:secret@example.com/a.mp4", "https://media.example.com/a.jpg"):
+            with self.subTest(url=url), self.assertRaises(OzonWriteError):
+                payload = sample_payload();payload["video_cover"] = {"url": url}
+                build_import_request(payload)
+        payload = sample_payload()
+        payload["videos"] = [{"url": "https://vkvideo.ru/video-123_456", "title": "Обзор", "source_sku_id": "unknown"}]
+        with self.assertRaisesRegex(OzonWriteError, "不能静默丢弃"):
+            build_import_request(payload)
+        payload["videos"] = []
+        payload["variants"][0]["videos"] = [{"url": "https://vkvideo.ru/video-123_456", "title": "Обзор", "source_sku_id": "S2"}]
+        with self.assertRaisesRegex(OzonWriteError, "另一规格"):
+            build_import_request(payload)
+
+    def test_no_primary_does_not_drop_first_image_and_price_must_be_finite(self):
+        payload = sample_payload();payload["variants"][0].pop("color_image")
+        item = build_import_request(payload)["items"][0]
+        self.assertEqual(item["images"][0], "https://cdn.example.com/P000001/detail-001.png")
+        for price in ("NaN", "Infinity", -1, 0.001, True, None):
+            with self.subTest(price=price), self.assertRaises(OzonWriteError):
+                payload = sample_payload();payload["variants"][0]["price"] = price
+                build_import_request(payload)
+
+    def test_normal_video_requires_supported_public_host_not_collected_1688_cdn(self):
+        for url in ("https://cdn.example.com/demo.mp4", "https://cloud.video.taobao.com/demo.mp4",
+                    "https://www.youtube.com/watch?v=123", "https://vkvideo.ru/video-123_456?token=secret"):
+            with self.subTest(url=url), self.assertRaises(OzonWriteError):
+                payload = sample_payload();payload["videos"] = [{"url": url, "title": "Обзор"}]
+                build_import_request(payload)
 
 
 class ParseResponseTests(unittest.TestCase):

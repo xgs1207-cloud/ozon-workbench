@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Ozon 工作台采集助手",
-  "version": "0.4.32",
+  "version": "0.4.33",
   "description": "采集 1688 商品、Ozon 参考页及 Seerfar 可见报表（支持限页翻页）到 Ozon 工作台。",
   "permissions": ["activeTab", "scripting", "storage", "tabs", "alarms"],
   "host_permissions": [

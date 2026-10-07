@@ -269,7 +269,7 @@ class PayloadTests(UploadFixture):
     def test_missing_pricing_is_a_blocker(self):
         (self.product_dir / "output" / "pricing-result.json").unlink()
         payload = build_upload_payload(self.product_dir, shop_name="shop-a")
-        self.assertTrue(any("卢布售价" in item for item in payload["production_blockers"]))
+        self.assertTrue(any("RUB售价" in item for item in payload["production_blockers"]))
         self.assertFalse(payload["product_group"]["upload_allowed"])
 
     def test_missing_image_url_is_a_blocker(self):

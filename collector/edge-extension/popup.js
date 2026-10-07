@@ -367,6 +367,7 @@ async function loadPreview() {
         els.status.textContent = skuCheck.complete
             ? "可采集（SKU图片已完整加载）"
             : `可采集（SKU图片${skuCheck.withImages}/${skuCheck.total}，缺图已标记）`;
+        els.status.textContent += `；商品视频 ${latestCapture.videos?.length || 0} 段（地址资料，后台保存原视频）`;
         els.title.textContent = latestCapture.title_cn || "unknown";
         els.mainCount.textContent = latestCapture.main_images.length;
         els.skuCount.textContent = latestCapture.skus.length;
@@ -378,6 +379,8 @@ async function loadPreview() {
         setResult({
             warnings: latestCapture.capture_warnings,
             diagnostics: latestCapture.field_diagnostics,
+            videos: {count: latestCapture.videos?.length || 0,
+                states: (latestCapture.videos || []).map(item => item.status), download_performed: false},
             sku_debug: latestCapture.raw_snapshot?.sku_debug || null
         });
     }
@@ -498,9 +501,9 @@ async function captureCurrentProduct(allowNewVersion = false) {
                 return;
             }
         }
-        els.progress.textContent = `正在保存全部 ${capture.skus?.length || 0} 个规格和图片，请保持弹窗打开…`;
+        els.progress.textContent = `正在保存全部 ${capture.skus?.length || 0} 个规格、图片和 ${capture.videos?.length || 0} 段视频资料，请保持弹窗打开…`;
         const result = await postCapture({ ...capture, collection_mode: 'all_skus' }, allowNewVersion);
-        els.progress.textContent = `采集完成：${result.counts?.skus || 0} 个规格，请到工作台选择上架规格`;
+        els.progress.textContent = `采集完成：${result.counts?.skus || 0} 个规格、${result.counts?.videos || 0} 段视频资料，请到工作台选择上架规格和保存视频`;
         setResult(result);
         await loadFactoryConfig();
         chrome.tabs.create({ url: workbenchEntryUrl('1688', { product_id: result.product_id }), active: true });

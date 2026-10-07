@@ -19,14 +19,18 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
+import math
 import re
 import sys
 import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
+from urllib.parse import urlsplit
 
 from .ozon_http import OzonCredentials, OzonHttpError, Transport, UrllibTransport
+from .source_videos import validate_listing_video_url
 
 SCHEMA_VERSION = "1.0.0"
 PATH_IMPORT = "/v3/product/import"
@@ -34,8 +38,10 @@ PATH_IMPORT_INFO = "/v1/product/import/info"
 
 WEIGHT_UNIT = "g"
 DIMENSION_UNIT = "mm"
-MAX_IMAGES_PER_ITEM = 15
-MAX_NAME_LENGTH = 255
+MAX_IMAGES_PER_ITEM = 50
+MAX_NAME_LENGTH = 200
+DESCRIPTION_ATTRIBUTE_ID = 4191
+HASHTAGS_ATTRIBUTE_ID = 23171
 
 RETRY_STATUSES = (429, 500, 502, 503, 504)
 DEFAULT_MAX_ATTEMPTS = 3
@@ -61,13 +67,19 @@ class OzonWriteError(RuntimeError):
 
 def _money(value: Any) -> str:
     try:
-        return f"{float(value):.2f}"
-    except (TypeError, ValueError):
-        return "0.00"
+        number = float(value)
+        if isinstance(value, bool) or not math.isfinite(number) or number <= 0:
+            raise ValueError
+        formatted = f"{number:.2f}"
+        if float(formatted) <= 0:
+            raise ValueError
+        return formatted
+    except (TypeError, ValueError) as error:
+        raise OzonWriteError("每个规格必须填写有限正数售价") from error
 
 
 def _item_measurements(payload: Mapping[str, Any], sku_id: str) -> dict[str, Any]:
-    """取该 SKU 的包装尺寸重量（优先 SKU 级，回退商品级）；没有就不填（不编造）。"""
+    """只取载荷中已确认的含包装尺寸重量，不用商品本体尺寸代替。"""
     surface = payload.get("sku_measurements") if isinstance(payload.get("sku_measurements"), Mapping) else {}
     package = surface.get("package_dimensions") if isinstance(surface.get("package_dimensions"), Mapping) else None
     result: dict[str, Any] = {}
@@ -75,10 +87,10 @@ def _item_measurements(payload: Mapping[str, Any], sku_id: str) -> dict[str, Any
         return result
     for key, field in (("length_mm", "depth"), ("width_mm", "width"), ("height_mm", "height")):
         value = package.get(key)
-        if isinstance(value, int) and value > 0:
+        if type(value) is int and value > 0:
             result[field] = value
     weight = package.get("weight_g")
-    if isinstance(weight, int) and weight > 0:
+    if type(weight) is int and weight > 0:
         result["weight"] = weight
     if result:
         if "weight" in result:
@@ -115,25 +127,122 @@ def _attribute_entry(item: Mapping[str, Any]) -> dict[str, Any] | None:
     return entry
 
 
+def normalize_hashtags(value: Any) -> str:
+    """Validate official hashtag syntax; never convert SEO keywords into tags."""
+    if value in (None, "", []):
+        return ""
+    if isinstance(value, str):
+        tags = value.split()
+    elif isinstance(value, (list, tuple)) and all(isinstance(tag, str) for tag in value):
+        tags = list(value)
+    else:
+        raise OzonWriteError("主题标签必须是字符串或字符串数组")
+    if len(tags) > 30:
+        raise OzonWriteError("主题标签最多30个")
+    for tag in tags:
+        if len(tag) > 30 or not tag.startswith("#") or len(tag) < 2 or not all(
+            char.isalpha() or char.isdecimal() or char == "_" for char in tag[1:]
+        ):
+            raise OzonWriteError("主题标签需以#开头，仅字母、数字和下划线，每个最多30字符")
+    if len(set(tags)) != len(tags):
+        raise OzonWriteError("主题标签不能重复")
+    return " ".join(tags)
+
+
+def _media_url(value: Any) -> str:
+    url = str(value or "").strip()
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.port not in (None, 443):
+            raise ValueError
+        host = parsed.hostname.lower()
+        if host == "localhost" or host.endswith((".localhost", ".local")):
+            raise ValueError
+        try:
+            if not ipaddress.ip_address(host).is_global:
+                raise ValueError
+        except ValueError:
+            if re.fullmatch(r"[0-9a-fA-F:.]+", host):
+                raise
+    except ValueError as error:
+        raise OzonWriteError("媒体地址必须为公开HTTPS地址，不能含登录凭据或本地地址") from error
+    return url
+
+
+def _video_entry(raw: Any, *, cover: bool = False) -> dict[str, Any]:
+    if not isinstance(raw, Mapping):
+        raise OzonWriteError("视频必须包含url和title等结构化字段")
+    url = _media_url(raw.get("url"))
+    if not cover:
+        try:
+            url = validate_listing_video_url(url)
+        except ValueError as error:
+            raise OzonWriteError(str(error)) from error
+    format_value = str(raw.get("format") or "").lower().lstrip(".")
+    path_format = Path(urlsplit(url).path).suffix.lower().lstrip(".")
+    if (format_value and format_value not in ("mp4", "mov")) or (path_format and path_format not in ("mp4", "mov")):
+        raise OzonWriteError("视频及视频封面必须为MP4/MOV，视频封面不是静态图片")
+    for key, lower, upper in (("duration_seconds", 8, 30 if cover else 300), ("size_bytes", 1, 20 * 1024**2 if cover else 5 * 1024**3)):
+        if raw.get(key) is not None:
+            number = raw[key]
+            if isinstance(number, bool) or not isinstance(number, (int, float)) or not math.isfinite(number) or not lower <= number <= upper:
+                raise OzonWriteError(f"视频{key}超出允许范围")
+    if cover:
+        return {"attributes": [{"id": 21845, "complex_id": 100002, "values": [{"value": url}]}]}
+    title = str(raw.get("title") or "").strip()
+    if not title:
+        raise OzonWriteError("视频缺少标题，不能静默生成视频名称")
+    return {"attributes": [
+        {"id": 21841, "complex_id": 100001, "values": [{"value": url}]},
+        {"id": 21837, "complex_id": 100001, "values": [{"value": title}]},
+    ]}
+
+
+def media_for_variant(payload: Mapping[str, Any], variant: Mapping[str, Any]) -> tuple[list[Mapping[str, Any]], Mapping[str, Any] | None]:
+    """Explicit SKU overrides (including []/None) suppress common media."""
+    videos = variant.get("videos") if "videos" in variant else payload.get("videos", [])
+    if videos is None:
+        videos = []
+    if not isinstance(videos, list) or any(not isinstance(row, Mapping) for row in videos):
+        raise OzonWriteError("videos必须是视频对象数组")
+    sku_id = str(variant.get("source_sku_id") or "")
+    selected = [row for row in videos if not row.get("source_sku_id") or str(row["source_sku_id"]) == sku_id]
+    if len(selected) > 5:
+        raise OzonWriteError("每个规格最多5个视频")
+    cover = variant.get("video_cover") if "video_cover" in variant else payload.get("video_cover")
+    if cover is not None and not isinstance(cover, Mapping):
+        raise OzonWriteError("video_cover必须是视频对象或null")
+    if cover and cover.get("source_sku_id") and str(cover["source_sku_id"]) != sku_id:
+        cover = None
+    return selected, cover
+
+
 def build_import_request(payload: Mapping[str, Any]) -> dict[str, Any]:
     """把上传载荷翻译成 ``/v3/product/import`` 的请求体（不含库存字段）。"""
+    if payload.get("production_blockers"):
+        raise OzonWriteError("商品存在上架阻断项，禁止构造可提交请求")
+    if payload.get("complex_attributes"):
+        raise OzonWriteError("未支持的complex_attributes不能静默丢弃，请使用规范videos/video_cover字段")
     category = payload.get("category") if isinstance(payload.get("category"), Mapping) else {}
     category_id = int(category.get("category_id") or 0)
     type_id = int(category.get("type_id") or 0)
     if category_id < 1 or type_id < 1:
         raise OzonWriteError("载荷里的类目不完整（description_category_id / type_id 必须 > 0）")
 
-    variants = [item for item in (payload.get("variants") or []) if isinstance(item, Mapping)]
-    if not variants:
+    variants = payload.get("variants")
+    if not isinstance(variants, list) or not variants or any(not isinstance(item, Mapping) for item in variants):
         raise OzonWriteError("载荷里没有可提交的变体（variants 为空）")
+    sku_ids = {str(row.get("source_sku_id") or f"S{index}") for index, row in enumerate(variants, 1)}
+    for row in payload.get("videos") or []:
+        if isinstance(row, Mapping) and row.get("source_sku_id") and str(row["source_sku_id"]) not in sku_ids:
+            raise OzonWriteError("视频关联的规格不在本次选中规格中，不能静默丢弃")
+    shared_cover = payload.get("video_cover")
+    if isinstance(shared_cover, Mapping) and shared_cover.get("source_sku_id") and str(shared_cover["source_sku_id"]) not in sku_ids:
+        raise OzonWriteError("视频封面关联的规格不在本次选中规格中，不能静默丢弃")
 
     common_attributes = [item for item in (payload.get("attributes") or []) if isinstance(item, Mapping)]
     images = [item for item in (payload.get("images") or []) if isinstance(item, Mapping)]
-    detail_urls = [
-        str(item.get("url"))
-        for item in images
-        if item.get("role") == "detail" and str(item.get("url") or "").startswith("https://")
-    ]
+    detail_urls = [_media_url(item.get("url")) for item in images if item.get("role") == "detail"]
     description = str(payload.get("description") or "")
 
     items: list[dict[str, Any]] = []
@@ -153,27 +262,54 @@ def build_import_request(payload: Mapping[str, Any]) -> dict[str, Any]:
                 for value in entry["values"]:
                     if value not in aggregate["values"]:
                         aggregate["values"].append(value)
+        # Confirmed attribute values win over legacy generated-copy aliases.
+        if DESCRIPTION_ATTRIBUTE_ID not in grouped and description:
+            grouped[DESCRIPTION_ATTRIBUTE_ID] = {"id": DESCRIPTION_ATTRIBUTE_ID, "values": [{"value": description}]}
+        tags_input = variant.get("hashtags") if "hashtags" in variant else payload.get("hashtags")
+        if HASHTAGS_ATTRIBUTE_ID not in grouped and tags_input is not None:
+            tags = normalize_hashtags(tags_input)
+            if tags:
+                grouped[HASHTAGS_ATTRIBUTE_ID] = {"id": HASHTAGS_ATTRIBUTE_ID, "values": [{"value": tags}]}
+        if HASHTAGS_ATTRIBUTE_ID in grouped:
+            tags = normalize_hashtags(" ".join(str(v.get("value") or "") for v in grouped[HASHTAGS_ATTRIBUTE_ID]["values"]))
+            grouped[HASHTAGS_ATTRIBUTE_ID]["values"] = [{"value": tags}]
+        if DESCRIPTION_ATTRIBUTE_ID in grouped:
+            if any(len(str(value.get("value") or "")) > 6000 for value in grouped[DESCRIPTION_ATTRIBUTE_ID]["values"]):
+                raise OzonWriteError("简介最多6000字符")
         attributes = list(grouped.values())
 
-        primary = str(variant.get("color_image") or "")
+        primary = _media_url(variant["color_image"]) if variant.get("color_image") else ""
         gallery: list[str] = []
-        for url in [str(item) for item in ([primary] if primary.startswith("https://") else []) + detail_urls]:
+        for url in [str(item) for item in ([primary] if primary else []) + detail_urls]:
             if url.startswith("https://") and url not in gallery:
                 gallery.append(url)
 
+        name = str(variant.get("display_name_ru") or payload.get("title") or "")
+        if not name.strip() or len(name) > MAX_NAME_LENGTH or any(len(word) > 27 for word in name.split()):
+            raise OzonWriteError("商品标题不能为空，最多200字符，单词最多27字符；禁止静默截断")
+        if len(gallery) > MAX_IMAGES_PER_ITEM:
+            raise OzonWriteError("每个商品最多50张图片，不能静默丢弃图片")
+        videos, cover = media_for_variant(payload, variant)
+        if "videos" in variant and any(row.get("source_sku_id") and str(row["source_sku_id"]) != sku_id for row in variant.get("videos") or []):
+            raise OzonWriteError("规格视频不能引用另一规格")
+        if "video_cover" in variant and variant.get("video_cover") and variant["video_cover"].get("source_sku_id") and str(variant["video_cover"]["source_sku_id"]) != sku_id:
+            raise OzonWriteError("规格视频封面不能引用另一规格")
+        complex_attributes = [_video_entry(video) for video in videos]
+        if cover:
+            complex_attributes.append(_video_entry(cover, cover=True))
         item: dict[str, Any] = {
             "offer_id": str(variant.get("offer_id") or ""),
-            "name": str(variant.get("display_name_ru") or "")[:MAX_NAME_LENGTH],
+            "name": name,
             "description_category_id": category_id,
             "type_id": type_id,
             "price": _money(variant.get("price")),
             "currency_code": str(variant.get("currency_code") or "RUB"),
             "vat": "0",
             "attributes": attributes,
-            "images": gallery[1:MAX_IMAGES_PER_ITEM] if len(gallery) > 1 else gallery,
+            "images": gallery[1:] if primary.startswith("https://") else gallery,
+            "complex_attributes": complex_attributes,
+            "promotions": [{"type": "REVIEWS_PROMO", "operation": "DISABLE"}],
         }
-        if description:
-            item["description"] = description
         if primary.startswith("https://"):
             item["primary_image"] = primary
         item.update(_item_measurements(payload, sku_id))

@@ -260,6 +260,8 @@ SYSTEM_JSON = (
 def _context_block(**parts: Any) -> str:
     lines = []
     for key, value in parts.items():
+        if key == "source" and isinstance(value, Mapping):
+            value = {name: item for name, item in value.items() if name != "videos"}
         if value in (None, {}, []):
             continue
         lines.append(f"### {key}\n{json.dumps(value, ensure_ascii=False)[:6000]}")
@@ -308,7 +310,7 @@ def enrich_facts_from_inputs(payload: dict[str, Any], request: Any) -> list[str]
     if not facts.get("category_cn"):
         selection = source.get("selected_category") if isinstance(source.get("selected_category"), Mapping) else {}
         hint = selection.get("category_path_zh") or selection.get("category_name")
-        if not hint:
+        if not hint and not source.get("fact_collection_only"):
             side = read_json("input/category-selection.json")
             hint = side.get("category_path_zh") or side.get("category_name")
         if hint:
@@ -389,7 +391,7 @@ def enrich_facts_from_inputs(payload: dict[str, Any], request: Any) -> list[str]
         f"input/sku-images/{item.name}" for item in (Path(product_dir) / "input" / "sku-images").glob("*")
         if item.is_file()
     ) if product_dir else []
-    if sku_images:
+    if sku_images and not source.get("sku_selection_explicit") and not source.get("fact_collection_only"):
         filled = 0
         for index, sku in enumerate(facts.get("skus") or []):
             if not isinstance(sku, dict) or sku.get("image_refs"):
@@ -420,7 +422,7 @@ def enrich_facts_from_inputs(payload: dict[str, Any], request: Any) -> list[str]
         notes.append(f"weight 用人工确认值补全：{weight} g")
 
     modern_form = bool(read_json("input/category-form.json"))
-    if not modern_form and not facts.get("brand") and not str(source.get("brand") or "").strip():
+    if not modern_form and not source.get("fact_collection_only") and not facts.get("brand") and not str(source.get("brand") or "").strip():
         from pipeline.attributes import UNBRANDED_TEXT  # 延迟导入：避免 models↔pipeline 循环依赖
 
         facts["brand"] = UNBRANDED_TEXT
@@ -816,6 +818,11 @@ class HttpModelProvider:
 
         user = (
             "请基于采集数据、商品分析与已选关键词，产出俄文标题/简介/关键词三份文档 + copy_bundle。\n"
+            + {"search_first": "本候选采用搜索匹配优先：核心产品词靠前，自然表达，不堆词。\n",
+               "conversion_first": "本候选采用买家理解优先：优先说明真实用途与有证据的利益点。\n",
+               "differentiation_first": "本候选采用真实差异优先：强调已证实的规格或特点，不制造差异。\n"}.get(request.extra.get("candidate_mode"), "")
+            + "只描述 source.selected_sku_ids 中的规格；未选规格禁止进入文案。\n"
+            +
             f"{_schema_hint('title-ru')}\n{_schema_hint('description-ru')}\n{_schema_hint('keywords-ru')}\n"
             f"{copy_bundle_hint()}\n"
             "要求：标题 25–120 字符且包含核心词；简介正文 1200–2000 字符（每个 section 80–250 字符）；"
@@ -845,6 +852,65 @@ class HttpModelProvider:
         bundle["warnings"] = list(bundle.get("warnings") or []) + warnings
         payload["copy_bundle"] = bundle
         return payload
+
+    def write_copy_candidates_ru(self, request: CopyRequest) -> dict[str, Any]:
+        """Generate all three compact alternatives in a single paid completion.
+
+        The same bounded repair mechanism as other stages may retry invalid JSON;
+        successful batches are cached by the workflow and never auto-selected.
+        """
+        from rules.validate import copy_bundle_hint, validate_copy_bundle
+        modes = {"search_first", "conversion_first", "differentiation_first"}
+
+        def validate(data: dict[str, Any]) -> list[str]:
+            rows = data.get("candidates") or []
+            if not isinstance(rows, list) or len(rows) != 3:
+                return ["candidates 必须恰好包含三组候选"]
+            if {row.get("mode") for row in rows if isinstance(row, Mapping)} != modes:
+                return ["候选 mode 必须为 search_first/conversion_first/differentiation_first 各一组"]
+            errors = []
+            for row in rows:
+                copy = row.get("copy_bundle") if isinstance(row.get("copy_bundle"), Mapping) else {}
+                errors.extend(f"{row['mode']}: {error}" for error in validate_copy_bundle(copy))
+            return errors
+
+        user = (
+            "一次生成三个不同侧重点的俄文标题、简介和标签候选，不要选择其中任何一个。"
+            "仅输出 {\"candidates\":[{\"mode\":\"search_first\",\"copy_bundle\":{...}},"
+            "{\"mode\":\"conversion_first\",\"copy_bundle\":{...}},"
+            "{\"mode\":\"differentiation_first\",\"copy_bundle\":{...}}]}。"
+            "search_first 核心产品词靠前、自然匹配搜索；conversion_first 买家理解和真实用途优先；"
+            "differentiation_first 已证实的规格或特点优先，不编造与竞品的差异。"
+            "三个侧重点必须都使用同一份已证实事实，只描述 source.selected_sku_ids 的规格。"
+            "不要输出完整的 title_ru/description_ru/keywords_ru 子文档，只输出每组 copy_bundle。\n"
+            + copy_bundle_hint()
+            + "\n节省输出：每组简介正文 300–500 字符，五个 description_sections 每项 20–70 字符，"
+            "标题 25–120 字符，hashtags 3–8 个。核心词不得改变商品含义。"
+            "primary_keywords 仅能使用已选关键词，ad/reject/exclude 或事实冲突词不得使用。"
+            "copy_bundle 另含 claim_evidence 数组，每项 {claim:文案中的原文,fact_ids:[verified_facts 中的 ID]}；"
+            "所有材质和数值声明都要引用事实 ID，不能为凑关键词创造事实。无事实支撑的词不要使用。\n\n"
+            + _context_block(source=request.source, analysis=request.analysis,
+                             selected_keywords=request.selected_keywords,
+                             verified_facts=request.extra.get("verified_facts") or [])
+        )
+        payload, warnings = self._call_json(task="russian_copy_candidates", user=user, validate=validate)
+        # Metadata documents are deterministic projections, not extra model calls.
+        from models.fake import FakeProvider
+        template = FakeProvider().write_copy_ru(request)
+        rows = []
+        from copy import deepcopy
+        for row in payload["candidates"]:
+            copy = dict(row["copy_bundle"])
+            documents = deepcopy(template)
+            documents["copy_bundle"] = copy
+            documents["title_ru"].update(title_ru=copy["title_ru"], short_title_ru=copy.get("short_title_ru") or copy["title_ru"][:80])
+            documents["description_ru"].update(description_ru=copy["description_ru"], sections=copy["description_sections"])
+            documents["keywords_ru"].update(primary_keywords=copy.get("primary_keywords") or [],
+                                             secondary_keywords=copy.get("secondary_keywords") or [])
+            copy["generated_by"] = f"{getattr(self.transport, 'name', self.name)}+http"
+            copy["warnings"] = list(copy.get("warnings") or []) + warnings
+            rows.append({"mode": row["mode"], "documents": documents})
+        return {"candidates": rows}
 
     def position_product(self, request: PositionRequest) -> dict[str, Any]:
         from contracts import validate_contract

@@ -219,6 +219,14 @@ class FakeProvider:
 
     # ------------------------------------------------------------- 文案
 
+    def write_copy_candidates_ru(self, request: CopyRequest) -> dict[str, Any]:
+        """One batch interface; fake's three local projections incur no API fee."""
+        from dataclasses import replace
+        return {"candidates": [
+            {"mode": mode, "documents": self.write_copy_ru(replace(request, extra={**request.extra, "candidate_mode": mode}))}
+            for mode in ("search_first", "conversion_first", "differentiation_first")
+        ]}
+
     def write_copy_ru(self, request: CopyRequest) -> dict[str, Any]:
         keywords = [str(item.get("keyword") or "").strip() for item in request.selected_keywords]
         keywords = [item for item in keywords if len(item) >= 2]

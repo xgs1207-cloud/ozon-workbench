@@ -20,6 +20,10 @@ from rules.validate import validate_copy_bundle
 
 
 REVIEW_FILE = "input/guided-review.json"
+# A report-level label is not evidence that every slot is a final image.  Keep
+# this list explicit so an unknown/local-placeholder backend cannot be promoted
+# simply by regenerating one slot with a supported paid backend.
+REAL_IMAGE_GENERATORS = frozenset({"doubao", "rightapi"})
 DEPENDENCIES = {
     "grouping": ("input/selected-skus.json", "input/category-selection.json", "output/platform-grouping-result.json"),
     "copy": ("input/source.json", "input/selected-skus.json", "input/selected-keywords.json",
@@ -126,8 +130,11 @@ def problems(directory: Path | str, section: str) -> list[str]:
         return validate_contract("image-plan", plan)
     if section == "images":
         generation = _read(directory / "output" / "image-generation-report.json")
-        if generation.get("final_images") is not True or generation.get("generator") != "doubao":
-            return ["当前不是豆包生成的正式图片；占位图不能用于批次自动上架"]
+        generator = generation.get("generator")
+        if (generation.get("final_images") is not True
+                or not isinstance(generator, str)
+                or generator not in REAL_IMAGE_GENERATORS | {"mixed"}):
+            return ["当前不是支持的生图后端生成的正式图片；占位图或未知来源图片不能用于批次自动上架"]
         if generation.get("generated_slots") != generation.get("planned_slots"):
             return ["图片尚未覆盖整套规划图位"]
         plan = _read(directory / "output" / "image-plan.json")
@@ -137,12 +144,17 @@ def problems(directory: Path | str, section: str) -> list[str]:
         produced = {str(item.get("slot")): item for item in generation.get("files") or []
                     if isinstance(item, Mapping)}
         if set(produced) != set(expected) or any(
-            produced[slot].get("generator") != "doubao"
+            not isinstance(produced[slot].get("generator"), str)
+            or produced[slot].get("generator") not in REAL_IMAGE_GENERATORS
             or produced[slot].get("path") != spec.get("output_path")
             or produced[slot].get("slot_fingerprint") != slot_fingerprint(spec)
             for slot, spec in expected.items()
         ):
             return ["图片与当前图位提示词/参考图不一致，须重做变更的图位"]
+        generators = {item["generator"] for item in produced.values()}
+        report_generator = next(iter(generators)) if len(generators) == 1 else "mixed"
+        if generation.get("generator") != report_generator:
+            return ["图片整套来源摘要与各图位实际生图后端不一致，请重新汇总生图报告"]
         qc = _read(directory / "output" / "image-qc-report.json")
         if qc.get("critical_failures") or qc.get("decision") == "reject":
             return ["图片质检未通过"]

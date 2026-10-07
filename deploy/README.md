@@ -3,6 +3,9 @@
 > 目标：工作台跑在**你的服务器**上，生成的图片存在**你的服务器**上并通过 https 给 Ozon 抓取。
 > 本文里的 `/opt/ozon-workbench`、`/var/www/ozon-images`、`img.example.com` 都可以改，改的时候整篇保持一致。
 
+桌面工作台请按[七步上架流程](../docs/guided-listing-flow.md)逐项确认；以下一条链 CLI 为旧流程的运维入口，不代替工作台人工审核。
+生图默认服务可在环境文件配置 `IMAGE_GENERATOR=rightapi`，见[RightAPI 接入说明](../docs/rightapi-images.md)。
+
 ---
 
 ## 0. 先确认三件事

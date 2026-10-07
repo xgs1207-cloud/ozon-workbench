@@ -1988,11 +1988,12 @@ def submit_product(product_id: str, request: StoreActionRequest) -> dict[str, An
         provider = None
 
     image_generator = None
-    if os.environ.get("ARK_IMAGE_MODEL"):
+    if (os.environ.get("ARK_IMAGE_MODEL") or os.environ.get("IMAGE_GENERATOR")
+            or os.environ.get("WORKBENCH_WEB_IMAGE_GENERATOR")):
         try:
-            from models.doubao_image import DoubaoImageGenerator
+            from models import load_web_image_generator
 
-            image_generator = DoubaoImageGenerator.from_env()
+            image_generator = load_web_image_generator()
         except ModelError:
             image_generator = None
 
@@ -2202,13 +2203,16 @@ def guided_prepare(product_id: str, request: StoreActionRequest) -> dict[str, An
 @app.get("/api/workbench/products/{product_id}/guided")
 def guided_product(product_id: str) -> dict[str, Any]:
     from pipeline.guided_review import status as review_status
+    from models import image_backend_settings
 
     directory = _require_product(product_id)
     return {"ok": True, "product_id": product_id, "review": review_status(directory),
+            "image_backend": image_backend_settings(),
             "workflow": __import__("pipeline.guided_workflow", fromlist=["workflow_status"]).workflow_status(directory),
             "video_library": __import__("pipeline.source_videos", fromlist=["list_source_videos"]).list_source_videos(directory),
             "media_selection": _read_json_file(directory / "input/listing-media.json"),
-            "source": {key: value for key, value in _read_json_file(directory / "input" / "source.json").items() if key != "videos"},
+            "source": {key: value for key, value in _read_json_file(directory / "input" / "source.json").items()
+                       if key not in {"videos", "image_sources"}},
             "selected_keywords": _read_json_file(directory / "input" / "selected-keywords.json"),
             "analysis": _read_json_file(directory / "output" / "product-analysis.json"),
             "copy": _read_json_file(directory / "output" / "copy-ru.json"),
@@ -2279,11 +2283,10 @@ def guided_approve(product_id: str, request: GuidedApprovalRequest,
 @app.post("/api/workbench/products/{product_id}/guided/generate-image")
 @_locked_product_mutation
 def guided_generate_image(product_id: str, request: GuidedImageGenerateRequest) -> dict[str, Any]:
-    """One paid Ark image request at a time, after plan approval; supports one-slot redo."""
+    """One explicitly requested paid image slot, with no backend fallback."""
     from contracts import validate_contract
-    from models import ImageRequest, ModelError
-    from models.doubao_image import DoubaoImageGenerator
-    from pipeline.guided_review import slot_fingerprint, status as review_status
+    from models import ImageRequest, ModelError, load_web_image_generator
+    from pipeline.guided_review import REAL_IMAGE_GENERATORS, slot_fingerprint, status as review_status
     from pipeline.image_qc import run_image_qc
 
     directory = _require_product(product_id)
@@ -2301,32 +2304,46 @@ def guided_generate_image(product_id: str, request: GuidedImageGenerateRequest) 
     if request.slot not in slots:
         raise HTTPException(status_code=422, detail="图位不在已确认的图片计划中")
     try:
-        generator = DoubaoImageGenerator.from_env(slot_filter=[request.slot])
+        generator = load_web_image_generator(slot_filter=[request.slot])
         result = generator.generate(ImageRequest(product_id=product_id, product_dir=directory,
-                                                 source=_read_json_file(directory / "input" / "source.json")))
+                                                 source=_read_json_file(directory / "input" / "source.json"),
+                                                 slot=request.slot))
     except (ModelError, ValueError) as error:
-        raise HTTPException(status_code=422, detail=f"豆包生图失败：{error}") from error
+        raise HTTPException(status_code=422, detail=f"生图失败：{error}") from error
+    backend_name = str(result.get("generator") or generator.name)
+    if backend_name not in REAL_IMAGE_GENERATORS or result.get("final_images") is not True:
+        raise HTTPException(status_code=422, detail="生图后端未返回已知的正式图片产物")
     report_path = directory / "output" / "image-generation-report.json"
+    import uuid
+    generation_id = uuid.uuid4().hex
     report = _read_json_file(report_path)
     files = {str(item.get("slot")): item for item in report.get("files") or []
-             if isinstance(item, Mapping) and item.get("generator") == "doubao"}
+             if isinstance(item, Mapping) and item.get("generator") in REAL_IMAGE_GENERATORS}
     for item in result.get("generated") or []:
         slot_name = str(item["slot"])
         if slot_name not in slots or item.get("path") != slots[slot_name].get("output_path"):
-            raise HTTPException(status_code=422, detail="豆包返回图位与当前图片计划不一致")
+            raise HTTPException(status_code=422, detail="生图返回图位与当前图片计划不一致")
         files[slot_name] = {"slot": slot_name, "path": item["path"], "bytes": item["bytes"],
-                            "generator": "doubao", "slot_fingerprint": slot_fingerprint(slots[slot_name])}
-    report.update(schema_version="1.0.0", product_id=product_id, generator="doubao", final_images=True,
+                            "generator": backend_name, "model": result.get("model"),
+                            "generation_id": generation_id,
+                            "slot_fingerprint": slot_fingerprint(slots[slot_name])}
+    files = {name: item for name, item in files.items() if name in slots}
+    backend_names = {item["generator"] for item in files.values()}
+    combined_backend = next(iter(backend_names)) if len(backend_names) == 1 else "mixed"
+    report.update(schema_version="1.0.0", product_id=product_id, generator=combined_backend, final_images=True,
+                  generation_id=generation_id,
                   planned_slots=len(slots), generated_slots=len(files), files=list(files.values()), note=result.get("note"))
-    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    qc = run_image_qc(directory, generator_name="doubao", produces_final_images=True)
+    from pipeline.listing_form import write_json
+    write_json(report_path, report)
+    qc = run_image_qc(directory, generator_name=combined_backend, produces_final_images=True)
     failures = validate_contract("image-qc-report", qc)
     if failures:
         raise HTTPException(status_code=422, detail="图片质检结果不符合契约：" + "；".join(failures[:3]))
     (directory / "output" / "image-qc-report.json").write_text(
         json.dumps(qc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    return {"ok": True, "generated": result.get("generated"), "skipped": result.get("skipped"), "qc": qc}
+    return {"ok": True, "generator": backend_name, "model": result.get("model"),
+            "generated": result.get("generated"), "skipped": result.get("skipped"), "qc": qc}
 
 
 @app.get("/api/workbench/products/{product_id}/media/{relative_path:path}")

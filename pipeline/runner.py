@@ -481,7 +481,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--image-generator",
         default=None,
-        help="生图后端：placeholder（本地占位图）/ doubao（豆包，需 ARK_API_KEY）/ none",
+        help="生图后端：placeholder / doubao（需 ARK_API_KEY）/ rightapi（需 RIGHTAPI_API_KEY）/ none",
     )
     parser.add_argument(
         "--ozon-fixture",

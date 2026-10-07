@@ -412,7 +412,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--batches-root", default=None)
     parser.add_argument("--store", action="append", dest="stores", help="目标店铺（可重复；批量时必填）")
     parser.add_argument("--provider", default="fake", help="模型层：fake / ark / http / none")
-    parser.add_argument("--image-generator", default=None, help="生图后端：placeholder / doubao / none")
+    parser.add_argument("--image-generator", default=None, help="生图后端：placeholder / doubao / rightapi / none")
     parser.add_argument("--uploader", default="dry-run", help="上传器：dry-run / simulated / ozon-api / none")
     parser.add_argument("--execute-upload", action="store_true", help="真提交（需 --store 与生产模式确认）")
     parser.add_argument("--i-understand-this-hits-ozon", action="store_true")

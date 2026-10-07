@@ -612,6 +612,12 @@ def ingest_capture(
         "selected_category": normalized["category"],
         "images": {role: count for role, count in image_counts.items()},
         "stored_images": stored_images,
+        "image_sources": [
+            {"path": entry["stored_path"], "url": entry["url"], "role": role,
+             "source_sku_id": entry.get("sku_id")}
+            for role, entries in normalized["images"].items() for entry in entries
+            if entry.get("stored_path") and entry.get("url")
+        ],
         "videos": normalized["videos"],
         "extra": normalized["extra"],
     }

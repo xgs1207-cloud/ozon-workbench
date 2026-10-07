@@ -42,7 +42,7 @@ def selected_source(directory: Path | str, source: Mapping[str, Any], *, require
     # A raw snapshot/extra body can contain all variants; do not pass that second
     # unfiltered copy to the model after filtering the primary skus array.
     projected = {key: deepcopy(value) for key, value in source.items()
-                 if key not in {"extra", "raw_snapshot", "raw", "keywords", "selected_keywords"}}
+                 if key not in {"extra", "raw_snapshot", "raw", "keywords", "selected_keywords", "image_sources"}}
     for row in rows:
         row.setdefault("name_zh", row.get("sku_name") or row.get("name") or row.get("spec_zh") or row.get("spec_text") or row.get("sku_id"))
     projected["skus"] = rows

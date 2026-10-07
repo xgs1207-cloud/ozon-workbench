@@ -17,6 +17,7 @@ from .listing_form import read_json, write_json, _require_editable
 from .product_edit_lock import product_file_transaction, serialized_product_edit
 from .selected_source import selected_source
 from .selection import load_selected_keywords
+from .analysis_gates import risk_gates
 
 STATE_FILE = "input/guided-workflow.json"
 CANDIDATES_FILE = "output/copy-candidates.json"
@@ -143,7 +144,10 @@ def workflow_status(directory: Path | str) -> dict[str, Any]:
                         and plan_payload and plan.get("artifact_sha256") == _hash(plan_payload))
     plan.update(fingerprint=current_plan, payload=plan_payload,
                 status="ready" if plan_current else "stale" if plan_payload else "missing")
+    gates = risk_gates(payload) if analysis_current else {"preparation": [], "publication": [], "deferred": []}
     return {"selected_sku_ids": ids, "analysis": analysis, "copy": copy, "plan": plan,
+            "preparation_blockers": gates["preparation"], "publication_blockers": gates["publication"],
+            "deferred_risks": gates["deferred"],
             "blockers": [], "api_writes_performed": False}
 
 
@@ -191,7 +195,8 @@ def analyze_selected_product(directory: Path | str, provider: Any, *, force: boo
              "certifications": bool(payload["facts"].get("certifications"))}
     payload["unknowns"] = [row for row in payload.get("unknowns") or [] if not known.get(row.get("field"))]
     risks = payload.get("risks") or []
-    category_risks = [row for row in risks if isinstance(row, Mapping) and row.get("area") == "category"]
+    category_risks = [row for row in risks if isinstance(row, Mapping) and row.get("area") == "category"
+                      and not risk_gates({"risks": [row]})["preparation"]]
     for row in category_risks:
         row["blocking"] = False
     if category_risks and not any(row.get("blocking") for row in risks if isinstance(row, Mapping)):
@@ -220,9 +225,8 @@ def confirm_analysis(directory: Path | str, input_fingerprint: str) -> dict[str,
     if analysis["status"] not in {"ready", "confirmed"} or input_fingerprint != analysis["fingerprint"]:
         raise ValueError("规格或事实已变更，请重新分析后确认")
     payload = analysis["payload"]
-    if (payload.get("recommendation") or {}).get("decision") == "reject" or any(
-            row.get("blocking") for row in payload.get("risks") or [] if isinstance(row, Mapping)):
-        raise ValueError("商品分析仍有阻断性风险，不能确认继续")
+    if risk_gates(payload)["preparation"]:
+        raise ValueError("商品分析仍有阻断性风险，不能确认继续：" + "；".join(risk_gates(payload)["preparation"][:3]))
     state = read_json(directory / STATE_FILE)
     state["analysis"].update(confirmed_fingerprint=input_fingerprint, confirmed_at=_now())
     write_json(directory / STATE_FILE, state)
@@ -234,7 +238,9 @@ def _keywords(directory: Path) -> list[dict[str, Any]]:
     selected = [dict(row) for row in rows if isinstance(row, Mapping)
                 and row.get("role") not in {"ad", "reject", "exclude"} and row.get("relevance") != "conflict"]
     if not selected:
-        raise ValueError("请先选择与商品事实相符的关键词，再生成文案候选")
+        # The confirmed real Ozon type and selected product facts suffice for
+        # natural copy. Do not fabricate search demand or pull unrelated words.
+        return []
     explicit_cores = [row for row in selected if row.get("role") == "core"]
     if len(explicit_cores) > 1:
         raise ValueError("请保留一个核心关键词，其余词设为辅助词或长尾词")
@@ -361,7 +367,7 @@ def _candidate_evidence(copy: Mapping[str, Any], facts: list[dict[str, Any]], ke
     checks = official_copy_checks(copy)
     return {"claim_evidence": evidence, "keyword_usage": usage, "excluded_keywords": [],
             "audit": {"title_chars": len(copy["title_ru"]), "description_chars": len(copy["description_ru"]),
-                      "core_coverage": bool(next(row for row in usage if row["role"] == "core")["placement"]),
+                      "core_coverage": next((bool(row["placement"]) for row in usage if row["role"] == "core"), None),
                       "secondary_coverage": None, "fact_consistency": None, "readability": None,
                       "risk_flags": checks["advisory"] + ["材质、用途和俄语词形需要人工核对"], **checks}}
 
@@ -388,7 +394,7 @@ def generate_copy_candidates(directory: Path | str, provider: Any, *, force: boo
     batches = batch_method(CopyRequest(product_id=directory.name, product_dir=directory,
                                       source=source, analysis=current["analysis"]["payload"],
                                       source_refs=_refs(directory), selected_keywords=keywords,
-                                      extra={"verified_facts": verified_facts}))
+                                      extra={"verified_facts": verified_facts, "allow_category_only_copy": not keywords}))
     rows = batches.get("candidates") or []
     if len(rows) != 3 or {row.get("mode") for row in rows if isinstance(row, Mapping)} != set(MODES):
         raise ValueError("模型必须在同一批次返回三个不同侧重点的候选")

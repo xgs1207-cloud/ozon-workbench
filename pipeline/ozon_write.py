@@ -175,7 +175,7 @@ def _video_entry(raw: Any, *, cover: bool = False) -> dict[str, Any]:
     url = _media_url(raw.get("url"))
     if not cover:
         try:
-            url = validate_listing_video_url(url)
+            url = validate_listing_video_url(url, publication=raw.get("publication"))
         except ValueError as error:
             raise OzonWriteError(str(error)) from error
     format_value = str(raw.get("format") or "").lower().lstrip(".")

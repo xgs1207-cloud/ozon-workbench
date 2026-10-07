@@ -49,6 +49,12 @@ def load_contract(name: str) -> dict[str, Any]:
         path = directory / filename
         if path.is_file():
             schema = json.loads(path.read_text(encoding="utf-8"))
+            if filename == "keywords-ru.schema.json":
+                # Category/fact-led copy no longer requires a keyword-library
+                # query. Empty arrays mean no measured/user-selected keywords,
+                # not fabricated analytics or weakened product-fact checks.
+                for key in ("primary_keywords", "keyword_basis"):
+                    schema["properties"][key]["minItems"] = 0
             if filename == "ozon-upload-payload.schema.json":
                 # Add our media fields without editing ignored upstream files.
                 schema.setdefault("properties", {}).update({

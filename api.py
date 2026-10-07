@@ -424,10 +424,15 @@ def confirm_ozon_category(product_id: str, request: OfficialCategoryRequest) -> 
                 stale.unlink()
     write_json(path, selected)
     persist_category_form(directory, form)
+    # This explicit category confirmation also applies the user's card policy.
+    # Read endpoints remain read-only; generated model names are stable on disk.
+    from pipeline.listing_defaults import persist_user_defaults
+    defaults = persist_user_defaults(directory, MARKET_DB_PATH.parent, shop_id=form["shop_id"])
     from pipeline.guided_review import invalidate_from
 
     invalidate_from(directory, "product_analysis")
-    return {"ok": True, "category": selected, "form": form, "api_writes_performed": False}
+    return {"ok": True, "category": selected, "form": form,
+            "defaults": defaults.get("defaults"), "api_writes_performed": False}
 
 
 @app.get("/api/ozon/category-values")
@@ -500,7 +505,7 @@ def _listing_autofill(product_id: str, shop: str | None, *, resolve: bool) -> di
     directory = _require_product(product_id)
     try:
         result = build_autofill(directory, MARKET_DB_PATH.parent, shop_id=shop,
-                                resolve_dictionaries=resolve)
+                                resolve_dictionaries=resolve, include_defaults=True)
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     except Exception as error:
@@ -1383,9 +1388,13 @@ def put_selected_keywords(product_id: str, request: KeywordSelectionRequest) -> 
                 limit=request.limit,
             )
         else:
-            if not request.keywords:
-                raise HTTPException(status_code=422, detail="keywords 为空；或设 from_library=true")
-            payload = set_selected_keywords(directory, request.keywords, source="manual")
+            if request.keywords is None:
+                raise HTTPException(status_code=422, detail="请提供 keywords 数组，或设 from_library=true")
+            category = _read_json_file(directory / "input/category-selection.json")
+            empty_allowed = category.get("confirmed_by_user") is True and category.get("source") == "ozon_seller_api"
+            if not request.keywords and not empty_allowed:
+                raise HTTPException(status_code=422, detail="不使用关键词时，请先确认 Ozon 官方类目")
+            payload = set_selected_keywords(directory, request.keywords, source="manual", allow_empty=empty_allowed)
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     from pipeline.guided_review import invalidate_from
@@ -2204,10 +2213,12 @@ def guided_prepare(product_id: str, request: StoreActionRequest) -> dict[str, An
 def guided_product(product_id: str) -> dict[str, Any]:
     from pipeline.guided_review import status as review_status
     from models import image_backend_settings
+    from models.image_plan import _list_reference_images
 
     directory = _require_product(product_id)
     return {"ok": True, "product_id": product_id, "review": review_status(directory),
             "image_backend": image_backend_settings(),
+            "captured_reference_images": _list_reference_images(directory),
             "workflow": __import__("pipeline.guided_workflow", fromlist=["workflow_status"]).workflow_status(directory),
             "video_library": __import__("pipeline.source_videos", fromlist=["list_source_videos"]).list_source_videos(directory),
             "media_selection": _read_json_file(directory / "input/listing-media.json"),
@@ -2364,6 +2375,9 @@ def guided_media(product_id: str, relative_path: str) -> Any:
 # Stepwise flow is isolated from legacy CLI orchestration and advanced console.
 from workbench_listing_api import router as listing_flow_router
 app.include_router(listing_flow_router)
+
+from workbench_prompt_api import router as prompt_library_router
+app.include_router(prompt_library_router)
 
 
 @app.get("/assets/listing-flow.js", include_in_schema=False)

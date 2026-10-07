@@ -88,9 +88,17 @@ def choose_candidate(product_id: str, request: CandidateChoiceRequest):
 def confirm_copy(product_id: str, request: FingerprintRequest):
     from pipeline.guided_workflow import confirm_selected_copy
     from pipeline.guided_review import approve
+    from pipeline.listing_form import read_json
+    from pipeline.listing_defaults import persist_user_defaults
+    from pipeline.product_edit_lock import product_edit_lock
+    import api
     directory = directory_for(product_id)
-    workflow = run_service(confirm_selected_copy, directory, request.input_fingerprint)
-    return {"ok": True, "workflow": workflow, "review": run_service(approve, directory, "copy")}
+    with product_edit_lock(directory):
+        workflow = run_service(confirm_selected_copy, directory, request.input_fingerprint)
+        selection = read_json(directory / "input/category-selection.json")
+        run_service(persist_user_defaults, directory, api.MARKET_DB_PATH.parent, shop_id=selection.get("shop_id"),
+                    resolve_dictionaries=False)
+        return {"ok": True, "workflow": workflow, "review": run_service(approve, directory, "copy")}
 
 
 @router.post("/guided/plan")
@@ -135,6 +143,31 @@ def publish_media(product_id: str, request: StoreRequest):
     if result.get("missing") or not result.get("https_ok"):
         raise HTTPException(422, "图片尚未全部发布为可用 HTTPS 地址")
     return {"ok": True, "publication": result, "api_writes_performed": False}
+
+
+class VideoPublicationChoice(BaseModel):
+    video_id: str = Field(min_length=1, max_length=100)
+    title: str = Field(default="", max_length=200)
+    source_sku_id: str | None = Field(default=None, max_length=100)
+
+
+class VideoPublicationRequest(BaseModel):
+    confirm: str
+    rights_confirmed: bool = False
+    videos: list[VideoPublicationChoice] = Field(min_length=1, max_length=5)
+
+
+@router.post("/guided/publish-videos")
+def publish_videos(product_id: str, request: VideoPublicationRequest):
+    from pipeline.video_publish import publish_source_videos
+    if request.confirm != "PUBLISH_VIDEOS":
+        raise HTTPException(400, "公开原视频需要明确确认 PUBLISH_VIDEOS")
+    result = run_service(publish_source_videos, directory_for(product_id),
+                         [row.model_dump() for row in request.videos],
+                         rights_confirmed=request.rights_confirmed)
+    return {"ok": True, "publication": result,
+            "selection": {"rights_confirmed": True, "videos": result["videos"]},
+            "api_writes_performed": False}
 
 
 @router.post("/guided/submit")

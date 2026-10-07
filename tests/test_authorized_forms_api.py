@@ -93,7 +93,7 @@ class AuthorizedFormsApiTests(unittest.TestCase):
         self.assertEqual(result.status_code, 200, result.text)
         return result.json()["items"]
 
-    def test_encrypted_authorization_to_full_form_has_no_eager_dictionary_or_write(self):
+    def test_encrypted_authorization_to_full_form_resolves_only_user_defaults_without_write(self):
         report = self.authorize()
         self.assertFalse(report["api_writes_performed"])
         self.assertFalse(report["shop"]["capabilities"]["import_products"])
@@ -102,11 +102,13 @@ class AuthorizedFormsApiTests(unittest.TestCase):
         self.assertEqual(categories["items"][0]["type_id"], 93080)
         form = self.client.get(base + "/listing-form", params={"shop": "qa-store"}).json()
         self.assertEqual(len(form["form"]["fields"]), 6)
-        self.assertEqual(form["missing_required"], [85, 101, 103])
+        self.assertEqual(form["missing_required"], [101, 103])
+        self.assertEqual(form["attributes"]["85"][0]["value"], "Нет бренда")
+        self.assertEqual(form["provenance"]["attributes"]["85"]["source"], "user_requested_default")
         paths = [call["path"] for transport in self.transports for call in transport.calls]
-        self.assertNotIn(PATH_ATTRIBUTE_VALUES, paths)
-        self.assertNotIn(PATH_ATTRIBUTE_VALUES_SEARCH, paths)
-        self.assertTrue(all(path in {"/v1/roles", PATH_TREE, PATH_ATTRIBUTES} for path in paths))
+        self.assertLessEqual(sum(path in {PATH_ATTRIBUTE_VALUES, PATH_ATTRIBUTE_VALUES_SEARCH} for path in paths), 6)
+        self.assertTrue(all(path in {"/v1/roles", PATH_TREE, PATH_ATTRIBUTES, PATH_ATTRIBUTE_VALUES,
+                                    PATH_ATTRIBUTE_VALUES_SEARCH} for path in paths))
         raw_registry = (self.root / "config/shops.json").read_text(encoding="utf-8")
         for secret in (self.payload["client_id"], self.payload["api_key"]):
             self.assertNotIn(secret, raw_registry)
@@ -212,7 +214,11 @@ class AuthorizedFormsApiTests(unittest.TestCase):
                                       "sku_attributes": {"S1": {"103": [{"value": "旧颜色"}]}}}), encoding="utf-8")
         changed = self.client.put(base + "/ozon-category", json={"shop": "qa-store", "category_id": 2000001, "type_id": 93081})
         self.assertEqual(changed.status_code, 200, changed.text)
-        self.assertEqual(json.loads(target.read_text(encoding="utf-8")), {"material": "硅胶"})
+        saved = json.loads(target.read_text(encoding="utf-8"))
+        self.assertEqual(saved["material"], "硅胶")
+        self.assertNotIn("101", saved["attributes"])
+        self.assertEqual(saved["sku_attributes"], {})
+        self.assertEqual(saved["attribute_provenance"]["attributes"]["85"]["source"], "user_requested_default")
 
 
 if __name__ == "__main__":

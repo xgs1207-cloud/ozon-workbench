@@ -22,9 +22,13 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
+import ipaddress
 import json
 import os
 import re
+import socket
+import ssl
 import sys
 import tempfile
 import time
@@ -49,6 +53,7 @@ CONTENT_TYPES = {
     ".webp": "image/webp",
     ".gif": "image/gif",
 }
+VIDEO_CONTENT_TYPES = {".mp4": "video/mp4", ".mov": "video/quicktime"}
 
 
 class CosError(RuntimeError):
@@ -68,7 +73,50 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def content_type_for(path: Path | str) -> str:
-    return CONTENT_TYPES.get(Path(path).suffix.lower(), "application/octet-stream")
+    suffix = Path(path).suffix.lower()
+    return CONTENT_TYPES.get(suffix, VIDEO_CONTENT_TYPES.get(suffix, "application/octet-stream"))
+
+
+def _anonymous_video_headers(url: str, *, timeout: int = 15) -> dict[str, str]:
+    """One anonymous HEAD, public IP pinned with TLS verification; no redirects."""
+    connection = None
+    response = None
+    try:
+        parsed = urlsplit(url)
+        if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
+                or parsed.password is not None or parsed.port not in (None, 443)
+                or parsed.query or parsed.fragment or any(ord(c) < 33 or ord(c) == 127 for c in url)
+                or "\\" in url):
+            raise ValueError
+        parsed.hostname.encode("ascii")
+        addresses = list(dict.fromkeys(row[4][0] for row in
+            socket.getaddrinfo(parsed.hostname, 443, type=socket.SOCK_STREAM)))
+        if not addresses or any(
+            not ipaddress.ip_address(address).is_global or ipaddress.ip_address(address).is_multicast
+            or ipaddress.ip_address(address).is_reserved for address in addresses):
+            raise ValueError
+        connection = http.client.HTTPSConnection(parsed.hostname, 443, timeout=timeout,
+                                                context=ssl.create_default_context())
+        raw = socket.create_connection((addresses[0], 443), timeout)
+        try:
+            connection.sock = connection._context.wrap_socket(raw, server_hostname=parsed.hostname)
+        except BaseException:
+            raw.close()
+            raise
+        connection.request("HEAD", parsed.path or "/", headers={
+            "Accept": "video/mp4,video/quicktime", "Accept-Encoding": "identity",
+            "User-Agent": "OzonWorkbench/1.0"})
+        response = connection.getresponse()
+        if response.status != 200:
+            raise ValueError
+        return {str(name).lower(): str(value).strip() for name, value in response.getheaders()}
+    except Exception:
+        raise CosError("公开视频地址未通过匿名访问校验，请检查 COS 公有读、HTTPS 域名及对象元数据") from None
+    finally:
+        if response is not None:
+            response.close()
+        if connection is not None:
+            connection.close()
 
 
 def planned_slots(product_dir: Path | str) -> list[dict[str, Any]]:
@@ -269,6 +317,87 @@ class CosObjectStorage:
             "url": url,
             "sha256": digest,
         }
+
+    def video_key_for(self, product_id: str, video_id: str, sha256: str, suffix: str) -> str:
+        """Dedicated immutable video namespace; never uses the image layout."""
+        if (not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", product_id)
+                or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", video_id)
+                or not re.fullmatch(r"[0-9a-f]{64}", sha256)
+                or suffix not in VIDEO_CONTENT_TYPES
+                or "\\" in self.key_prefix or ".." in PurePosixPath(self.key_prefix).parts
+                or ":" in self.key_prefix or len(self.key_prefix) > 1300
+                or any(ord(c) < 33 or ord(c) == 127 for c in self.key_prefix)):
+            raise CosError("COS 视频对象标识或前缀无效")
+        relative = f"{product_id}/videos/{video_id}-{sha256}{suffix}"
+        return f"{self.key_prefix}/{relative}" if self.key_prefix else relative
+
+    def publish_video(self, product_dir: Path | str, row: Mapping[str, Any]) -> dict[str, Any]:
+        """Publish a manifest-owned video snapshot, verify COS metadata and public read.
+
+        The PUT is content addressed and idempotent. A signed HEAD plus an
+        anonymous HEAD must agree on length, simple-PUT MD5 ETag and media type;
+        the signed HEAD must also carry the expected SHA-256 metadata. No SDK
+        body/exception or credentials are returned to the application.
+        """
+        root = Path(product_dir).resolve()
+        video_id, digest, size = row.get("video_id"), row.get("sha256"), row.get("size_bytes")
+        relative = row.get("stored_path")
+        if not isinstance(relative, str) or not isinstance(digest, str) or not isinstance(video_id, str):
+            raise CosError("视频发布缺少已核验的本地文件索引")
+        source = (root / relative).resolve()
+        suffix = source.suffix.lower()
+        if (not source.is_relative_to(root / "runtime/source-videos")
+                or relative != f"runtime/source-videos/{digest}{suffix}" or not source.is_file()
+                or isinstance(size, bool) or not isinstance(size, int) or not 1 <= size <= 100 * 1024 * 1024):
+            raise CosError("视频发布文件必须位于当前商品的内容寻址视频库")
+        key = self.video_key_for(root.name, video_id, digest, suffix)
+        url = (f"{self.public_base_url}/{quote(key)}" if self.public_base_url else
+               f"https://{self.bucket}.cos.{self.region}.myqcloud.com/{quote(key)}")
+        parsed = urlsplit(url)
+        if (parsed.scheme != "https" or not parsed.hostname or parsed.port not in (None, 443)
+                or parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment
+                or any(ord(c) < 33 or ord(c) == 127 for c in url) or "\\" in url):
+            raise CosError("COS 视频公网地址必须是不含签名的 HTTPS 直链")
+        if self.dry_run:
+            raise CosError("视频 dry-run 不能写入正式视频选择或发布凭据")
+        # Read and hash the exact snapshot that is sent to PUT, not a later read.
+        if source.stat().st_size != size:
+            raise CosError("视频文件大小已变更，请重新保存")
+        body = source.read_bytes()
+        if len(body) != size or hashlib.sha256(body).hexdigest() != digest:
+            raise CosError("视频文件 SHA-256 校验失败，请重新保存")
+        md5 = hashlib.md5(body, usedforsecurity=False).hexdigest()
+        content_type = VIDEO_CONTENT_TYPES[suffix]
+
+        def matches(headers: Mapping[str, Any], *, require_sha: bool) -> bool:
+            values = {str(name).lower(): str(value).strip() for name, value in headers.items()}
+            return (values.get("content-length") == str(size)
+                    and values.get("etag", "").strip('"').lower() == md5
+                    and values.get("content-type", "").split(";", 1)[0].strip().lower() == content_type
+                    and (not require_sha or values.get("x-cos-meta-sha256") == digest))
+
+        unchanged = False
+        try:
+            unchanged = matches(self._call("head_object", Bucket=self.bucket, Key=key), require_sha=True)
+        except (CosError, TypeError, ValueError, AttributeError):
+            pass
+        try:
+            if not unchanged:
+                self._call("put_object", Bucket=self.bucket, Key=key, Body=body,
+                    ContentType=content_type, CacheControl="public, max-age=2592000", EnableMD5=True,
+                    Metadata={"x-cos-meta-sha256": digest})
+                if not matches(self._call("head_object", Bucket=self.bucket, Key=key), require_sha=True):
+                    raise CosError("视频上传后 COS 的 SHA/大小/媒体元数据未通过校验")
+            public = _anonymous_video_headers(url)
+            if not matches(public, require_sha=False):
+                raise CosError("视频公开地址大小、媒体类型或 ETag 不一致，未保存为上架视频")
+            if public.get("x-cos-meta-sha256") not in (None, digest):
+                raise CosError("视频公开地址的 SHA 元数据不一致")
+        except Exception:
+            raise CosError("视频发布或匿名可读性核验失败；请检查 COS 对象及权限，原视频和卡片未被覆盖") from None
+        return {"video_id": video_id, "status": "unchanged" if unchanged else "uploaded",
+                "key": key, "url": url, "sha256": digest, "size_bytes": size,
+                "content_type": content_type, "remote_verified": True, "anonymous_verified": True}
 
     def publish_product(
         self,

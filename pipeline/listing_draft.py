@@ -54,6 +54,8 @@ def prepare_listing_card(directory: Path, *, shop: str) -> dict[str, Any]:
         selection = read_json(directory / "input/category-selection.json")
         if selection.get("shop_id") != shop:
             raise ValueError("目标店铺与已确认类目不一致，请重新确认店铺类目")
+        from .listing_defaults import persist_user_defaults
+        persist_user_defaults(directory, api.MARKET_DB_PATH.parent, shop_id=shop)
         form = product_form(directory, api.MARKET_DB_PATH.parent, shop_id=shop)
         persist_category_form(directory, form["form"])
         write_json(directory / "input/manual-pricing-required.json", {"required": True,
@@ -117,7 +119,9 @@ def canonical_listing(directory: Path, *, shop: str) -> dict[str, Any]:
     from .upload import build_upload_payload, payload_problems
     from .ozon_write import build_import_request
 
-    _modern_ready(directory, plan=True)
+    workflow = _modern_ready(directory, plan=True)
+    if workflow.get("publication_blockers"):
+        raise ValueError("发布前须解决商品合规风险：" + "；".join(workflow["publication_blockers"][:4]))
     if not card_ready(directory):
         raise ValueError("卡片资料已变化或尚未编译，请重新填充并检查卡片")
     from .guided_review import status as review_status

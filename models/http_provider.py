@@ -456,7 +456,10 @@ def build_narrative_prompt(request: Any, *, facts: Mapping[str, Any] | None = No
         "\"message\": 字符串, \"blocking\": true|false}\n"
         "- `recommendation`：{\"decision\": \"continue\"|\"needs_human_input\"|\"reject\"|\"unknown\", \"reason\": 字符串}\n"
         "硬规则：只依据下面的事实与关键词；不要编造参数、认证、品牌或材质；"
-        "拿不准就写进 unknowns，或把 decision 设为 needs_human_input。"
+        "拿不准就写进 unknowns。当前仅是准备摘要，不是发布审核；缺少材质、尺寸重量、品牌或认证资料，"
+        "在 unknowns 和风险提示中保留，不要因此阻止准备事实准确的文案和图片；"
+        "包装参数和必填字段将在卡片阶段检查，合规资料缺失将在发布前拦截。"
+        "已确认的禁售、侵权、虚假认证或产品身份矛盾仍须 blocking=true。"
         "数组字段不能是 null；只输出 JSON，不要解释文字。\n\n"
         + _context_block(
             confirmed_facts=facts,
@@ -887,6 +890,8 @@ class HttpModelProvider:
             + "\n节省输出：每组简介正文 300–500 字符，五个 description_sections 每项 20–70 字符，"
             "标题 25–120 字符，hashtags 3–8 个。核心词不得改变商品含义。"
             "primary_keywords 仅能使用已选关键词，ad/reject/exclude 或事实冲突词不得使用。"
+            "若没有已选关键词，依据已确认的真实 Ozon 商品类型与商品事实，自然表达俄文产品名称；"
+            "primary_keywords 和 secondary_keywords 保持空数组，不编造采集词、搜索量或竞争数据。"
             "copy_bundle 另含 claim_evidence 数组，每项 {claim:文案中的原文,fact_ids:[verified_facts 中的 ID]}；"
             "所有材质和数值声明都要引用事实 ID，不能为凑关键词创造事实。无事实支撑的词不要使用。\n\n"
             + _context_block(source=request.source, analysis=request.analysis,

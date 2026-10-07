@@ -142,9 +142,10 @@ def _verified_provenance(directory: Path, cache_root: Path, form: Mapping[str, A
     original = _saved_provenance(confirmations, _as_values(confirmations.get("attributes")),
                                  {key: _as_values(value) for key, value in (confirmations.get("sku_attributes") or {}).items()})
     candidates = None
+    default_candidates = None
 
     def verify(key: str, values: Any, sku_id: str | None) -> dict[str, Any]:
-        nonlocal candidates
+        nonlocal candidates, default_candidates
         explicit = ((proposed.get("per_sku_attributes", {}).get(sku_id) or {}).get(key) if sku_id else
                     proposed.get("attributes", {}).get(key))
         old_meta = ((original["per_sku_attributes"].get(sku_id) or {}).get(key) if sku_id else original["attributes"].get(key))
@@ -161,17 +162,23 @@ def _verified_provenance(directory: Path, cache_root: Path, form: Mapping[str, A
             return _manual_meta(values)
         if not values:
             raise ValueError("清空的属性不能标记为采集确认值")
-        if candidates is None:
-            candidates = source_attribute_candidates(directory, cache_root, form["shop_id"])
-        expected_values = ((candidates["per_sku_attributes"].get(sku_id) or {}).get(key) if sku_id else
-                           candidates["attributes"].get(key))
-        expected_meta = ((candidates["provenance"]["per_sku_attributes"].get(sku_id) or {}).get(key) if sku_id else
-                         candidates["provenance"]["attributes"].get(key))
+        if metadata.get("source") in {"user_requested_default", "ai_generated_copy"}:
+            if default_candidates is None:
+                default_candidates = source_attribute_candidates(directory, cache_root, form["shop_id"], include_defaults=True)
+            expected = default_candidates
+        else:
+            if candidates is None:
+                candidates = source_attribute_candidates(directory, cache_root, form["shop_id"])
+            expected = candidates
+        expected_values = ((expected["per_sku_attributes"].get(sku_id) or {}).get(key) if sku_id else
+                           expected["attributes"].get(key))
+        expected_meta = ((expected["provenance"]["per_sku_attributes"].get(sku_id) or {}).get(key) if sku_id else
+                         expected["provenance"]["attributes"].get(key))
         if sku_id and expected_values is None:
             # A common collected fact can be installed individually for the
             # unaffected SKUs when another SKU was deliberately cleared.
-            expected_values = candidates["attributes"].get(key)
-            expected_meta = candidates["provenance"]["attributes"].get(key)
+            expected_values = expected["attributes"].get(key)
+            expected_meta = expected["provenance"]["attributes"].get(key)
         if expected_values != values or not expected_meta or metadata.get("source") != expected_meta["source"]:
             # A stale stored source badge can degrade to manual on an unchanged
             # value; new client assertions must not fabricate evidence.
@@ -206,9 +213,11 @@ def product_form(directory: Path, cache_root: Path, *, shop_id: str | None = Non
         # schema/dictionary draft as a validated complete card.
         missing = list(form["required_attribute_ids"])
         missing_by_sku = {row["sku_id"]: list(missing) for row in skus}
+    from .listing_defaults import field_display_metadata
     return {"form": form, "attributes": common, "per_sku_attributes": by_sku,
             "selected_skus": skus, "missing_required": missing, "missing_by_sku": missing_by_sku,
             "provenance": _saved_provenance(confirmations, common, by_sku),
+            "field_display": field_display_metadata(form, directory=directory, attributes=common, per_sku_attributes=by_sku),
             "validation_errors": validation_errors,
             "api_writes_performed": False}
 
@@ -260,8 +269,10 @@ def save_product_form(directory: Path, cache_root: Path, *, shop_id: str | None,
         handle_field_completion(StepContext(directory, "field_completion"))
     skus = selected_skus(directory)
     missing, missing_by_sku = _missing(form, common, by_sku, skus)
+    from .listing_defaults import field_display_metadata
     return {"form": form, "attributes": common, "per_sku_attributes": by_sku,
             "selected_skus": skus, "missing_required": missing, "missing_by_sku": missing_by_sku,
             "provenance": verified_provenance,
+            "field_display": field_display_metadata(form, directory=directory, attributes=common, per_sku_attributes=by_sku),
             "warnings": common_report["warnings"], "compiled": read_json(directory / "output/ozon-attributes-final.json"),
             "api_writes_performed": False}

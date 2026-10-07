@@ -48,6 +48,7 @@ def set_selected_keywords(
     category: Mapping[str, Any] | None = None,
     source: str = "manual",
     note: str | None = None,
+    allow_empty: bool = False,
 ) -> dict[str, Any]:
     """写入选中的关键词。``keywords`` 可以是字符串列表，也可以是库里的记录字典。"""
     directory = Path(product_dir)
@@ -76,7 +77,7 @@ def set_selected_keywords(
         seen.add(text.casefold())
         normalized.append(record)
 
-    if not normalized:
+    if not normalized and not allow_empty:
         raise ValueError("至少要选一个长度 ≥2 的关键词")
 
     payload = {

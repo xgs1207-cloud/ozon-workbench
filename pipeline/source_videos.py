@@ -273,13 +273,18 @@ def video_file(directory: Path | str, video_id: str, *, verify_hash: bool = Fals
     return path, "video/quicktime" if path.suffix == ".mov" else "video/mp4"
 
 
-def validate_listing_video_url(value: Any, *, cover: bool = False) -> str:
-    """Offline, conservative first-release Ozon video-host gate shared with compiler.
+def validate_listing_video_url(value: Any, *, cover: bool = False,
+                               directory: Path | str | None = None,
+                               video_id: str | None = None, sha256: str | None = None,
+                               publication: Mapping[str, Any] | None = None) -> str:
+    """Stable sharing links or this workbench's verified ordinary-video COS URL.
 
-    Current official guidance permits VK, Yandex Disk and Rutube. A precise existing
-    Ozon video CDN/link format could not be reverified, so it is deliberately not
-    guessed here. This is not a public-access check and performs no HTTP/DNS calls.
-    Alibaba source URLs and arbitrary object-storage URLs are not listing URLs.
+    The official import method describes MP4/MOV links without a host whitelist.
+    Generic object-storage URLs are nevertheless accepted only with an exact
+    workbench publication record, never just because their suffix is .mp4.
+    The directory-free compiler checks canonical proof structure; production
+    preparation has already revalidated the product ledger and immutable bytes.
+    This offline check does not claim live Ozon acceptance or cover support.
     """
     if cover:
         raise ValueError("首版暂不支持 Ozon 短视频封面；静态 poster 不能代替短视频封面")
@@ -307,13 +312,17 @@ def validate_listing_video_url(value: Any, *, cover: bool = False) -> str:
             or host in rutube_hosts and bool(re.fullmatch(r"/(?:video|play/embed)/[0-9a-fA-F]{32}/?", path))
         )
         if not accepted:
-            raise ValueError
+            from .video_publish import publication_for, validate_cos_video_publication
+            if directory is not None:
+                publication = publication_for(directory, video_id, sha256, url, required=True)
+            validate_cos_video_publication(url, publication)
     except ValueError:
-        raise ValueError("首版仅支持 VK、Yandex Disk、Rutube 不含临时签名的公开视频分享链接；1688源地址和自定义视频域暂不支持") from None
+        raise ValueError("仅支持稳定的视频平台分享链接或本工作台已核验发布的 COS 视频直链；1688临时源地址和任意外部视频域不能直接用于上架") from None
     return url
 
 
-def validate_listing_videos(directory: Path | str, selection: Any) -> list[dict[str, Any]]:
+def validate_listing_videos(directory: Path | str, selection: Any, *,
+                            require_url: bool = True, reprobe: bool = False) -> list[dict[str, Any]]:
     """Revalidate immutable local bytes and explicit bindings at save AND production.
 
     Returns safe compiler rows with measured metadata. User-supplied duration,
@@ -375,7 +384,7 @@ def validate_listing_videos(directory: Path | str, selection: Any) -> list[dict[
             raise ValueError("视频原始规格关联不明确，请人工选择对应规格，不能直接用于全部规格")
         if row.get("status") != "stored" or not row.get("stored_path"):
             raise ValueError("所选视频尚未私有保存，请先保存源视频或上传有权使用的原文件")
-        if row.get("media_verified") is not True:
+        if not reprobe and row.get("media_verified") is not True:
             raise ValueError("视频真实时长和分辨率尚未验证；需本机ffprobe校验后才能用于上架")
         if item.get("sha256") is not None and item.get("sha256") != row.get("sha256"):
             raise ValueError("已选视频文件已被替换，请重新确认视频及其分享链接")
@@ -383,7 +392,10 @@ def validate_listing_videos(directory: Path | str, selection: Any) -> list[dict[
             path, mime = video_file(root, video_id, verify_hash=True)
             if path.suffix not in {".mp4", ".mov"} or mime not in {"video/mp4", "video/quicktime"}:
                 raise ValueError("普通商品视频必须为MP4或MOV")
-            duration, width, height = (_finite(row.get(field)) for field in ("duration_seconds", "width", "height"))
+            measured = _inspect_file(path) if reprobe else row
+            if measured.get("media_verified") is not True:
+                raise ValueError("视频真实时长和分辨率尚未验证；需本机ffprobe校验后才能用于上架")
+            duration, width, height = (_finite(measured.get(field)) for field in ("duration_seconds", "width", "height"))
             if not duration or not 8 <= duration <= 300:
                 raise ValueError("普通商品视频时长必须为8–300秒")
             if not width or not height or not 1080 <= max(width, height) <= 1920:
@@ -393,19 +405,28 @@ def validate_listing_videos(directory: Path | str, selection: Any) -> list[dict[
                 raise ValueError("视频文件超出工作台100MB上限")
             verified[video_id] = {"format": path.suffix.lstrip("."), "size_bytes": size,
                                   "duration_seconds": duration, "width": width, "height": height, "sha256": row["sha256"]}
-        url = validate_listing_video_url(item.get("url"))
+        url = (validate_listing_video_url(item.get("url"), directory=root,
+               video_id=video_id, sha256=verified[video_id]["sha256"]) if require_url else None)
         title = item.get("title")
         if not isinstance(title, str) or not title.strip() or len(title.strip()) > 200 or any(ord(c) < 32 for c in title):
             raise ValueError("请人工填写1–200字符的视频标题，不得含控制字符")
         for sku_id in targets:
-            if url in urls[sku_id]:
+            identity = url if require_url else verified[video_id]["sha256"]
+            if identity in urls[sku_id]:
                 raise ValueError("同一上架规格不能重复使用同一视频分享链接")
-            urls[sku_id].add(url)
+            urls[sku_id].add(identity)
             counts[sku_id] += 1
             if counts[sku_id] > 5:
                 raise ValueError("每个上架规格最多5个视频（公共视频与独立视频合并计数）")
-        results.append({"video_id": video_id, "url": url, "title": title.strip(), "source_sku_id": target_sku,
-                        **verified[video_id]})
+        result = {"video_id": video_id, "title": title.strip(), "source_sku_id": target_sku,
+                  **verified[video_id]}
+        if require_url:
+            result["url"] = url
+            from .video_publish import publication_for
+            proof = publication_for(root, video_id, verified[video_id]["sha256"], url)
+            if proof is not None:
+                result["publication"] = proof
+        results.append(result)
     return results
 
 

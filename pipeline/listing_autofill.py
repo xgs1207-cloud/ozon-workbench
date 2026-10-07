@@ -555,12 +555,26 @@ def _build(directory: Path, cache_root: Path, *, shop_id: str | None, resolve_di
 
 
 def build_autofill(directory: Path | str, cache_root: Path | str, shop_id: str | None = None,
-                   resolve_dictionaries: bool = False) -> dict[str, Any]:
-    return _build(Path(directory), Path(cache_root), shop_id=shop_id, resolve_dictionaries=resolve_dictionaries)
+                   resolve_dictionaries: bool = False, include_defaults: bool = False) -> dict[str, Any]:
+    directory, cache_root = Path(directory), Path(cache_root)
+    result = _build(directory, cache_root, shop_id=shop_id, resolve_dictionaries=resolve_dictionaries)
+    if not include_defaults or not result.get("scope"):
+        return result
+    from .listing_defaults import apply_user_defaults
+    form = _cached_form(directory, cache_root, shop_id)
+    return apply_user_defaults(directory, cache_root, form, result,
+                               resolve_dictionaries=resolve_dictionaries,
+                               max_dictionary_lookups=MAX_DICTIONARY_LOOKUPS) if form else result
 
 
 def source_attribute_candidates(directory: Path | str, cache_root: Path | str,
-                                shop_id: str | None = None) -> dict[str, Any]:
+                                shop_id: str | None = None, include_defaults: bool = False) -> dict[str, Any]:
     """Re-derive provenance before saves without ignoring manual clear policy in UI."""
-    return _build(Path(directory), Path(cache_root), shop_id=shop_id, resolve_dictionaries=False,
-                  ignore_saved=True, all_skus_for_evidence=True)
+    directory, cache_root = Path(directory), Path(cache_root)
+    result = _build(directory, cache_root, shop_id=shop_id, resolve_dictionaries=False,
+                    ignore_saved=True, all_skus_for_evidence=True)
+    if not include_defaults or not result.get("scope"):
+        return result
+    from .listing_defaults import apply_user_defaults
+    form = _cached_form(directory, cache_root, shop_id)
+    return apply_user_defaults(directory, cache_root, form, result, ignore_saved=True) if form else result

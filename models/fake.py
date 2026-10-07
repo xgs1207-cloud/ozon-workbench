@@ -230,12 +230,14 @@ class FakeProvider:
     def write_copy_ru(self, request: CopyRequest) -> dict[str, Any]:
         keywords = [str(item.get("keyword") or "").strip() for item in request.selected_keywords]
         keywords = [item for item in keywords if len(item) >= 2]
-        if not keywords:
+        if not keywords and not request.extra.get("allow_category_only_copy"):
             raise ModelError("没有已选关键词：请先在关键词库里选词（input/selected-keywords.json）")
 
         source = dict(request.source)
         product_id = str(source.get("product_id") or request.product_id)
-        core = keywords[0]
+        # Offline template only; a real provider derives the Russian product
+        # noun from confirmed category/facts, not invented keyword analytics.
+        core = keywords[0] if keywords else str((source.get("selected_category") or {}).get("category_name_ru") or "Товар")
         capacity = _capacity(source)
         colors = _colors(source)
 

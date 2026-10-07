@@ -119,6 +119,19 @@ test('a report with SKU plus category and revenue remains a product dataset', ()
     assert.equal(result.records[0].SKU, '123456');
 });
 
+test('product report preserves visible image and detail link in any column', () => {
+    const result = captureContext(['SKU', '商品', '销量'], [
+        row([cell('123456'), cell('保温杯', '保温杯', {
+            links: [{ href: 'https://www.ozon.ru/product/123456' }],
+            images: [{ src: 'https://cdn.example/cup.jpg' }],
+        }), cell('80')]),
+    ]);
+    assert.equal(result.dataset, 'products');
+    assert.equal(result.records[0]['商品'], '保温杯');
+    assert.deepEqual(Array.from(result.records[0]['商品链接']), ['https://www.ozon.ru/product/123456']);
+    assert.deepEqual(Array.from(result.records[0]['商品图片']), ['https://cdn.example/cup.jpg']);
+});
+
 test('unrecognized tables are rejected instead of guessed into the database', () => {
     const result = captureContext(['名称', '流量', '数量'], [
         row([cell('unknown'), cell('1000'), cell('30')]),
@@ -273,6 +286,56 @@ test('market ranking uses its dedicated pagination wrapper before other pagers',
     });
     vm.runInContext(read('seerfar-content.js'), context);
     assert.equal(vm.runInContext('marketPager()', context), rankingPager);
+});
+
+test('custom pagination wrapper is selected instead of its total and size children', () => {
+    const total = { getClientRects: () => [{}] };
+    const sizes = { getClientRects: () => [{}] };
+    const wrapper = { getClientRects: () => [{}], contains: (node) => node === total || node === sizes };
+    const context = vm.createContext({
+        document: { querySelectorAll: (selector) => selector.includes('.el-pagination') ? []
+            : selector.includes("[class*='pagination']") ? [wrapper, total, sizes] : [] },
+        location: { origin: 'https://www.seerfar.cn', pathname: '/admin/category' },
+        chrome: { runtime: { onMessage: { addListener: () => {} } } },
+        window: {},
+    });
+    vm.runInContext(read('seerfar-content.js'), context);
+    assert.equal(vm.runInContext('marketPager()', context), wrapper);
+});
+
+test('multiple market ranking pagination wrappers bind to the captured report table', async () => {
+    let current = 0;
+    let wrongClicks = 0;
+    let rightClicks = 0;
+    const header = row(['排名', '关键词', '月搜热度'].map((value) => cell(value)));
+    const body = [row([cell('1'), cell('плед'), cell('1000')]),
+        row([cell('21'), cell('ковер'), cell('900')])];
+    const makePager = (click) => ({
+        getClientRects: () => [{}],
+        querySelectorAll: (selector) => selector.includes('btn-next')
+            ? [{ getClientRects: () => [{}], disabled: false, click }] : [],
+    });
+    const ownPager = makePager(() => { rightClicks += 1; current = 1; });
+    const otherPager = makePager(() => { wrongClicks += 1; });
+    const reportSection = { parentElement: null, contains: (node) => node === ownPager };
+    const widget = { parentElement: reportSection, contains: () => false };
+    const table = { querySelectorAll: (selector) => selector === 'tr' ? [header, body[current]] : [],
+        closest: () => widget };
+    const wrapper = (pager) => ({ getClientRects: () => [{}], querySelector: () => pager });
+    const context = vm.createContext({
+        document: { querySelectorAll: (selector) => selector === 'table' ? [table]
+            : selector === '[data-ranking-pagination]' ? [wrapper(otherPager), wrapper(ownPager)] : [] },
+        location: { origin: 'https://www.seerfar.cn', pathname: '/admin/market' },
+        chrome: { runtime: { onMessage: { addListener: () => {} } } },
+        window: { setTimeout: (callback) => setImmediate(callback) },
+        Date,
+    });
+    vm.runInContext(read('seerfar-content.js'), context);
+    const result = await vm.runInContext('advanceMarketPage()', context);
+    assert.equal(result.advanced, true);
+    assert.equal(result.snapshot.records[0]['关键词'], 'ковер');
+    assert.equal(rightClicks, 1);
+    assert.equal(wrongClicks, 0);
 });
 
 test('popup deduplicates repeated rows and splits uploads below the size cap', () => {

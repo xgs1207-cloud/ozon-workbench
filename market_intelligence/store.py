@@ -21,9 +21,30 @@ DATASETS = {"categories", "keywords", "products"}
 METHODS = {"browser_extension", "official_api", "file_import"}
 PERIOD_KINDS = {"calendar_month", "rolling_30d"}
 
+# The live Seerfar Ozon reports were checked on 2026-10-07. Old observations
+# were serialized with sort_keys=True, so this restores their visible header
+# order where possible. Newly imported observations retain source field order.
+SEERFAR_COLUMN_ORDER = {
+    "keywords": (
+        "col_0", "排名", "关键词", "类目", "关键词相关商品（前10条）", "平均价格", "销量", "销售额",
+        "月搜热度", "月搜增长", "商品数", "竞对数", "竞品数", "加购人数", "加购率", "转化率",
+        "评论数", "评分", "市场空间", "商品可见度", "转化集中度", "退货取消率", "重量", "体积", "操作",
+    ),
+    "categories": (
+        "col_0", "排名", "类目", "类目相关商品（前10条）", "销售额", "销量", "跨境商品份额",
+        "销售额占比", "中位数价格", "平均销售额", "平均销量", "竞对数", "竞品数", "品牌数量",
+        "转化集中度", "退货取消率", "平均评分", "平均评论数", "季节性", "平均重量", "平均体积", "操作",
+    ),
+}
+
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _raw_json(value: Any) -> str:
+    """Keep source field order for display; hashes still use canonical _json."""
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
 def _now() -> str:
@@ -142,14 +163,17 @@ def ingest_snapshot(path: Path | str, *, source: str, dataset: str, capture_meth
         entity = _entity_key(source, dataset, row)
         if not entity:
             raise ValueError("存在缺少类目、关键词或 SKU/商品 ID 的数据行")
-        normalized.append((entity, _category_key(dataset, row, category_key), _json(row)))
+        normalized.append((entity, _category_key(dataset, row, category_key), _json(row), _raw_json(row)))
     # Endpoints such as Ozon top queries do not expose an explicit reporting
     # month. Keep one observation per capture day even if figures happen to be
     # unchanged; otherwise a later month's identical figure vanishes forever.
     dedupe_bucket = period or (captured_at or _now())[:10]
     # Keep the legacy calendar-month hashes stable for existing databases.
     # Rolling observations with the same visible numbers are a different grain.
-    batch_key = [source, dataset, capture_method, dedupe_bucket, page_url, normalized]
+    # Preserve the previous canonical batch hash so a re-import after this
+    # migration still deduplicates against observations already in the DB.
+    batch_key = [source, dataset, capture_method, dedupe_bucket, page_url,
+                 [(entity, category, canonical) for entity, category, canonical, _ in normalized]]
     if period_kind != "calendar_month":
         batch_key.append(period_kind)
     batch_hash = hashlib.sha256(_json(batch_key).encode()).hexdigest()
@@ -163,8 +187,8 @@ def ingest_snapshot(path: Path | str, *, source: str, dataset: str, capture_meth
             (source, dataset, capture_method, period, period_kind, page_url, captured_at or _now(), _now(), batch_hash, len(records)),
         )
         inserted = 0
-        for entity, category, raw in normalized:
-            row_key = [dedupe_bucket, raw]
+        for entity, category, canonical, raw in normalized:
+            row_key = [dedupe_bucket, canonical]
             if period_kind != "calendar_month":
                 row_key.append(period_kind)
             row_hash = hashlib.sha256(_json(row_key).encode()).hexdigest()
@@ -195,6 +219,66 @@ def list_observations(path: Path | str, *, dataset: str, source: str | None = No
         ).fetchall()
     return [{key: value for key, value in dict(row).items() if key != "raw_json"}
             | {"raw": json.loads(row["raw_json"])} for row in rows]
+
+
+def _source_columns(items: list[dict[str, Any]], dataset: str) -> list[str]:
+    """Union raw fields on the page without inventing/renaming Seerfar labels."""
+    columns: list[str] = []
+    seen: set[str] = set()
+    priority = SEERFAR_COLUMN_ORDER.get(dataset, ())
+    for item in items:
+        keys = list(item["raw"])
+        # Old snapshots stored JSON with alphabetically sorted keys. The
+        # source's exact order cannot be recovered, so use known report order.
+        if keys == sorted(keys) and priority:
+            preferred = []
+            for header in priority:
+                preferred.extend(key for key in (header, f"{header}链接", f"{header}图片") if key in item["raw"])
+            keys = preferred + [key for key in keys if key not in preferred]
+        for key in keys:
+            if key not in seen:
+                seen.add(key)
+                columns.append(key)
+    return columns
+
+
+def list_source_records(path: Path | str, *, dataset: str, source: str = "seerfar",
+                        category_key: str | None = None, period: str | None = None,
+                        q: str | None = None, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+    """Page through source-native observations for the workbench raw-data view.
+
+    This route does not request or consume the ingestion token. Public access
+    must still be gated by the workbench's reverse-proxy authentication.
+    """
+    if dataset not in DATASETS or source != "seerfar":
+        raise ValueError("原始报表仅支持 Seerfar 类目、关键词和商品数据")
+    if not 1 <= limit <= 100 or offset < 0:
+        raise ValueError("无效的分页参数")
+    clauses = ["o.dataset=?", "o.source=?"]
+    args: list[Any] = [dataset, source]
+    for column, value in (("o.category_key", category_key), ("o.period", period)):
+        if value is not None and value != "":
+            clauses.append(f"{column}=?")
+            args.append(value)
+    query = (q or "").strip()
+    if len(query) > 120:
+        raise ValueError("搜索词过长")
+    if query:
+        clauses.append("(instr(o.raw_json, ?) > 0 OR instr(o.entity_key, ?) > 0 OR instr(o.category_key, ?) > 0)")
+        args.extend((query, query, query))
+    where = " AND ".join(clauses)
+    with closing(connect(path)) as conn:
+        total = conn.execute(f"SELECT count(*) FROM observations o WHERE {where}", args).fetchone()[0]
+        rows = conn.execute(
+            "SELECT o.id,o.batch_id,o.source,o.dataset,o.entity_key,o.category_key,o.period,"
+            "o.period_kind,o.captured_at,o.raw_json,b.capture_method,b.page_url,b.imported_at "
+            "FROM observations o JOIN ingest_batches b ON b.id=o.batch_id "
+            f"WHERE {where} ORDER BY o.id DESC LIMIT ? OFFSET ?", [*args, limit, offset],
+        ).fetchall()
+    items = [{key: value for key, value in dict(row).items() if key != "raw_json"}
+             | {"raw": json.loads(row["raw_json"])} for row in rows]
+    return {"items": items, "total": total, "columns": _source_columns(items, dataset),
+            "limit": limit, "offset": offset}
 
 
 def database_stats(path: Path | str) -> dict[str, Any]:

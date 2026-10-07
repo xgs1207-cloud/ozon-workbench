@@ -79,6 +79,49 @@ class MarketStoreTests(unittest.TestCase):
         items = store.list_observations(self.db, dataset="keywords")
         self.assertEqual({item["period_kind"] for item in items}, {"calendar_month", "rolling_30d"})
 
+    def test_source_records_keep_original_fields_order_values_and_pagination(self):
+        common = dict(source="seerfar", dataset="keywords", capture_method="browser_extension",
+                      period="2026-10", period_kind="rolling_30d",
+                      page_url="https://seerfar.cn/admin/market", captured_at="2026-10-07T00:00:00Z")
+        first = {"排名": "1", "关键词": "термос\n保温杯", "类目": "保温杯",
+                 "关键词相关产品图片": ["https://example.com/1.jpg"], "月搜热度": "1,000"}
+        second = {"排名": "2", "关键词": "кружка", "类目": "杯子", "月搜热度": "980"}
+        store.ingest_snapshot(self.db, records=[first, second], **common)
+        all_rows = store.list_source_records(self.db, dataset="keywords", limit=1)
+        self.assertEqual(all_rows["total"], 2)
+        self.assertEqual((all_rows["limit"], all_rows["offset"]), (1, 0))
+        self.assertEqual(all_rows["items"][0]["raw"], second)
+        self.assertEqual(all_rows["items"][0]["capture_method"], "browser_extension")
+        self.assertEqual(all_rows["items"][0]["page_url"], common["page_url"])
+        filtered = store.list_source_records(self.db, dataset="keywords", q="термос", period="2026-10",
+                                             category_key="保温杯", limit=1, offset=0)
+        self.assertEqual(filtered["total"], 1)
+        self.assertEqual(filtered["items"][0]["raw"], first)
+        self.assertEqual(filtered["columns"], list(first))
+        self.assertEqual(store.list_source_records(self.db, dataset="keywords", limit=1, offset=2)["items"], [])
+        self.assertEqual(store.list_source_records(self.db, dataset="keywords", period="2026-09")["total"], 0)
+        with self.assertRaises(ValueError):
+            store.list_source_records(self.db, dataset="keywords", source="ozon_seller_api")
+
+    def test_source_records_restore_known_header_order_for_legacy_json(self):
+        raw = {"关键词": "термос", "排名": "1", "月搜热度": "1,000", "类目": "保温杯"}
+        store.ingest_snapshot(self.db, source="seerfar", dataset="keywords", capture_method="file_import",
+                              period="2026-09", page_url="", captured_at="2026-10-06T00:00:00Z",
+                              records=[raw])
+        # Simulate JSON written by older releases with sort_keys=True.
+        with closing(sqlite3.connect(self.db)) as conn, conn:
+            conn.execute("UPDATE observations SET raw_json=?", (store._json(raw),))
+        page = store.list_source_records(self.db, dataset="keywords")
+        self.assertEqual(page["columns"], ["排名", "关键词", "类目", "月搜热度"])
+
+    def test_order_preservation_does_not_change_existing_dedup_hash(self):
+        common = dict(source="seerfar", dataset="keywords", capture_method="file_import",
+                      period="2026-09", page_url="", captured_at="2026-10-06T00:00:00Z")
+        first = store.ingest_snapshot(self.db, records=[{"关键词": "термос", "月搜热度": "1000"}], **common)
+        again = store.ingest_snapshot(self.db, records=[{"月搜热度": "1000", "关键词": "термос"}], **common)
+        self.assertEqual(first["inserted"], 1)
+        self.assertTrue(again["duplicate_batch"])
+
     def test_invalid_period_kind_and_rolling_without_bucket_rejected(self):
         common = dict(source="seerfar", dataset="keywords", capture_method="browser_extension",
                       page_url="https://seerfar.cn/admin/market", captured_at="2026-10-07T00:00:00Z",
@@ -174,6 +217,22 @@ class MarketApiTests(unittest.TestCase):
         body["period_kind"] = "unknown"
         rejected = self.client.post("/api/collector/market-snapshots", json=body, headers=headers)
         self.assertEqual(rejected.status_code, 422)
+
+    def test_workbench_source_records_are_read_only_token_free_and_seerfar_only(self):
+        body = {"source": "seerfar", "dataset": "categories", "capture_method": "browser_extension",
+                "period": "2026-10", "page_url": "https://seerfar.cn/admin/market",
+                "captured_at": "2026-10-07T00:00:00Z",
+                "records": [{"排名": "1", "类目": "保温杯", "销售额": "100,000₽"}]}
+        headers = {"X-Market-Ingest-Token": "test-only-secret"}
+        self.assertEqual(self.client.post("/api/collector/market-snapshots", json=body, headers=headers).status_code, 200)
+        listed = self.client.get("/api/research/source-records", params={"dataset": "categories", "q": "保温杯"})
+        self.assertEqual(listed.status_code, 200, listed.text)
+        self.assertEqual(listed.headers["cache-control"], "private, no-store")
+        self.assertEqual(listed.json()["total"], 1)
+        self.assertEqual(listed.json()["items"][0]["raw"]["销售额"], "100,000₽")
+        self.assertEqual(listed.json()["columns"], ["排名", "类目", "销售额"])
+        self.assertEqual(self.client.get("/api/research/source-records", params={"source": "ozon_seller_api"}).status_code, 422)
+        self.assertEqual(self.client.get("/api/market-data/observations", params={"dataset": "categories"}).status_code, 401)
 
 
 if __name__ == "__main__":

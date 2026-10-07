@@ -21,9 +21,9 @@ import shutil
 import tempfile
 import hmac
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
 
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
@@ -160,6 +160,33 @@ def research_categories() -> dict[str, Any]:
     return {"ok": True, **market_recommend.recommend(
         MARKET_DB_PATH, dataset="categories", config=market_recommend.load_config(MARKET_DB_PATH)
     )}
+
+
+@app.get("/api/research/source-records")
+def research_source_records(
+    response: Response,
+    dataset: Literal["categories", "keywords", "products"] = "categories",
+    source: Literal["seerfar"] = "seerfar",
+    category_key: str | None = Query(default=None, max_length=200),
+    period: str | None = Query(default=None, max_length=7),
+    q: str | None = Query(default=None, max_length=120),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
+) -> dict[str, Any]:
+    """Read-only source report. The public workbench is behind nginx Basic Auth.
+
+    Never put the market ingestion token into browser JavaScript just to view
+    imported rows. FastAPI itself must remain bound to loopback on the server.
+    """
+    response.headers["Cache-Control"] = "private, no-store"
+    try:
+        result = market_store.list_source_records(
+            MARKET_DB_PATH, dataset=dataset, source=source, category_key=category_key,
+            period=period, q=q, limit=limit, offset=offset,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return {"ok": True, **result}
 
 
 @app.get("/api/research/keywords")

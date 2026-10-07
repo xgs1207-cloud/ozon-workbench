@@ -4,7 +4,9 @@ let marketPageStopRequested = false;
 let activeMarketWidget = null;
 const MARKET_TABLE_CONTAINERS = ".el-table, .ant-table, .vxe-table, .semi-table, [role='grid'], [role='table']";
 const MARKET_PAGER_SELECTOR = ".el-pagination, .ant-pagination, .vxe-pager, .semi-page, "
-    + ".pagination, [class*='pagination'], [aria-label*='分页']";
+    + ".pagination, nav[aria-label*='分页'], nav[aria-label*='Pagination'], "
+    + "[role='navigation'][aria-label*='分页'], [role='navigation'][aria-label*='Pagination']";
+const MARKET_PAGER_FALLBACK_SELECTOR = "[class*='pagination'], [aria-label*='分页']";
 
 function marketDataset(headers) {
     const has = (label) => headers.some((header) => header.includes(label));
@@ -65,14 +67,17 @@ function marketRecords(headers, rows, cellSelector) {
             continue;
         const record = Object.fromEntries(headers.map((header, index) => [header, values[index]]));
         headers.forEach((header, index) => {
-            if (!/相关商品|相关产品/.test(header))
-                return;
+            // Preserve visual assets for every displayed column. Product and
+            // category reports also show clickable thumbnails, not only the
+            // keyword report's "related products" column.
             const links = Array.from(cells[index].querySelectorAll("a[href]"))
                 .map((link) => link.href || link.getAttribute("href"))
-                .filter((url) => /^https?:\/\//.test(url)).slice(0, 10);
+                .filter((url, position, urls) => /^https?:\/\//.test(url) && urls.indexOf(url) === position)
+                .slice(0, 10);
             const images = Array.from(cells[index].querySelectorAll("img[src]"))
                 .map((image) => image.currentSrc || image.src || image.getAttribute("src"))
-                .filter((url) => /^https?:\/\//.test(url)).slice(0, 10);
+                .filter((url, position, urls) => /^https?:\/\//.test(url) && urls.indexOf(url) === position)
+                .slice(0, 10);
             if (links.length)
                 record[`${header}链接`] = links;
             if (images.length)
@@ -159,32 +164,41 @@ function marketPageSignature(snapshot) {
     return JSON.stringify([snapshot?.dataset, snapshot?.records || []]);
 }
 
-function marketPager() {
-    if (/^\/admin\/market(?:\.html)?\/?$/.test(location.pathname)) {
-        const ranking = Array.from(document.querySelectorAll("[data-ranking-pagination]"))
-            .filter((node) => node.getClientRects?.().length);
-        if (ranking.length === 1)
-            return ranking[0].querySelector?.(MARKET_PAGER_SELECTOR) || ranking[0];
-    }
-    const candidates = Array.from(document.querySelectorAll(MARKET_PAGER_SELECTOR))
+function visibleMarketPagers() {
+    let candidates = Array.from(document.querySelectorAll(MARKET_PAGER_SELECTOR))
         .filter((pager) => pager.getClientRects?.().length);
-    const pagers = candidates.filter((pager) => !candidates.some((other) => other !== pager && pager.contains?.(other)));
+    if (!candidates.length) {
+        // Legacy Seerfar pages use custom pager classes. Avoid treating each
+        // Element Plus child (total, size picker, page number) as a pager.
+        candidates = Array.from(document.querySelectorAll(MARKET_PAGER_FALLBACK_SELECTOR))
+            .filter((pager) => pager.getClientRects?.().length);
+    }
+    return candidates.filter((pager) => !candidates.some((other) =>
+        other !== pager && other.contains?.(pager)));
+}
+
+function pagerForActiveMarketTable(pagers) {
     if (pagers.length === 1)
-        return pagers[0];
+        return activeMarketWidget?.contains?.(pagers[0]) ? null : pagers[0];
     if (!activeMarketWidget || !pagers.length)
         return null;
-    for (let ancestor = activeMarketWidget.parentElement, depth = 0; ancestor && depth < 5;
+    // Related-product widgets can contain their own pagers inside a market
+    // row. The report's pager is normally outside the table widget.
+    const outside = pagers.filter((pager) => !activeMarketWidget.contains?.(pager));
+    const candidates = outside.length ? outside : pagers;
+    for (let ancestor = activeMarketWidget.parentElement, depth = 0; ancestor && depth < 12;
          ancestor = ancestor.parentElement, depth++) {
-        const local = pagers.filter((pager) => ancestor.contains?.(pager));
+        const local = candidates.filter((pager) => ancestor.contains?.(pager));
         if (local.length === 1)
             return local[0];
     }
     const tableRect = activeMarketWidget.getBoundingClientRect?.();
     if (!tableRect)
         return null;
-    const nearby = pagers.map((pager) => {
+    const nearby = candidates.map((pager) => {
         const rect = pager.getBoundingClientRect?.();
-        if (!rect || rect.top < tableRect.top || rect.top > tableRect.bottom + 700)
+        if (!rect || rect.top < tableRect.bottom - 20 || rect.top > tableRect.bottom + 700
+            || rect.right < tableRect.left || rect.left > tableRect.right)
             return null;
         const tableCenter = (tableRect.left + tableRect.right) / 2;
         const pagerCenter = (rect.left + rect.right) / 2;
@@ -193,6 +207,17 @@ function marketPager() {
     if (!nearby.length || (nearby.length > 1 && nearby[1].score - nearby[0].score < 40))
         return null;
     return nearby[0].pager;
+}
+
+function marketPager() {
+    if (/^\/admin\/market(?:\.html)?\/?$/.test(location.pathname)) {
+        const ranking = Array.from(document.querySelectorAll("[data-ranking-pagination]"))
+            .filter((node) => node.getClientRects?.().length)
+            .map((node) => node.querySelector?.(MARKET_PAGER_SELECTOR) || node);
+        if (ranking.length)
+            return pagerForActiveMarketTable(ranking);
+    }
+    return pagerForActiveMarketTable(visibleMarketPagers());
 }
 
 function marketCurrentPage() {
@@ -237,8 +262,7 @@ async function advanceMarketPage() {
     if (!previous.records?.length)
         return { advanced: false, error: previous.reason || "当前页没有可采集数据" };
     if (!marketPager()) {
-        const visiblePagers = Array.from(document.querySelectorAll(MARKET_PAGER_SELECTOR))
-            .filter((pager) => pager.getClientRects?.().length);
+        const visiblePagers = visibleMarketPagers();
         return visiblePagers.length
             ? { advanced: false, error: "页面有多个分页器，无法确定哪个属于当前报表；已停止避免误翻页" }
             : { advanced: false, done: true, reason: "当前报表没有分页器" };

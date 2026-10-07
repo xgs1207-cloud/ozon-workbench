@@ -355,7 +355,7 @@ def normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
 #: 详情页属性表里我们关心的键（中文原文，用于属性填值与 facts 补全）
 ATTRIBUTE_ALIASES: dict[str, tuple[str, ...]] = {
     "material": ("材质", "材料", "面料", "成分", "材质成分", "材质说明"),
-    "package_quantity": ("包装数量", "每包数量", "件数", "数量", "规格数量", "装箱数量"),
+    "package_quantity": ("包装数量", "每包数量", "单包数量", "套装件数"),
     "certifications": ("认证", "证书", "检测报告", "资质", "认证证书"),
     "weight_g": ("克重", "重量", "单品重量", "毛重"),
     "brand": ("品牌", "商标"),
@@ -383,8 +383,10 @@ def _normalize_attributes(payload: Mapping[str, Any]) -> dict[str, Any]:
             for item in prod_attrs:
                 if not isinstance(item, Mapping):
                     continue
-                name = str(item.get("name") or item.get("key") or item.get("label") or "").strip()
-                value = str(item.get("value") or item.get("values") or "").strip()
+                name = str(item.get("name_cn") or item.get("name") or item.get("key") or item.get("label") or "").strip()
+                value = next((item.get(key) for key in ("value_cn", "value", "values")
+                              if item.get(key) is not None and item.get(key) != ""), "")
+                value = str(value).strip()
                 if name and value:
                     raw[name] = value
 

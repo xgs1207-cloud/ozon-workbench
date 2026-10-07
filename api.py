@@ -397,7 +397,7 @@ def confirm_ozon_category(product_id: str, request: OfficialCategoryRequest) -> 
     if any(previous.get(key) != selected.get(key) for key in ("category_id", "type_id", "shop_id")):
         confirmations_path = directory / "input/human-confirmations.json"
         confirmations = _read_json_file(confirmations_path)
-        for key in ("attributes", "sku_attributes", "category_form_scope", "category_form_confirmed_at"):
+        for key in ("attributes", "sku_attributes", "attribute_provenance", "category_form_scope", "category_form_confirmed_at"):
             confirmations.pop(key, None)
         if confirmations_path.is_file():
             write_json(confirmations_path, confirmations)
@@ -437,6 +437,7 @@ class ListingFormRequest(BaseModel):
     type_id: int = Field(gt=0)
     attributes: dict[str, Any] = Field(default_factory=dict)
     per_sku_attributes: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    provenance: dict[str, Any] = Field(default_factory=dict)
 
 
 @app.get("/api/workbench/products/{product_id}/listing-form")
@@ -462,13 +463,70 @@ def save_workbench_listing_form(product_id: str, request: ListingFormRequest) ->
     try:
         result = save_product_form(directory, MARKET_DB_PATH.parent, shop_id=request.shop,
                                   category_id=request.category_id, type_id=request.type_id,
-                                  attributes=request.attributes, per_sku_attributes=request.per_sku_attributes)
+                                  attributes=request.attributes, per_sku_attributes=request.per_sku_attributes,
+                                  provenance=request.provenance)
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     except PipelineGateError as error:
         raise HTTPException(status_code=409, detail=error.reason) from error
     except Exception as error:
         raise HTTPException(status_code=503, detail=f"保存官方表单失败：{error}") from error
+    return {"ok": True, **result}
+
+
+class ListingAutofillRequest(BaseModel):
+    shop: str | None = None
+
+
+def _listing_autofill(product_id: str, shop: str | None, *, resolve: bool) -> dict[str, Any]:
+    from pipeline.listing_autofill import build_autofill
+
+    directory = _require_product(product_id)
+    try:
+        result = build_autofill(directory, MARKET_DB_PATH.parent, shop_id=shop,
+                                resolve_dictionaries=resolve)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=503, detail=f"采集资料自动匹配暂不可用：{error}") from error
+    return {"ok": True, **result}
+
+
+@app.get("/api/workbench/products/{product_id}/listing-autofill")
+def listing_autofill_cached(product_id: str, shop: str | None = None) -> dict[str, Any]:
+    """Source + cached official metadata only; no model or live product write."""
+    return _listing_autofill(product_id, shop, resolve=False)
+
+
+@app.post("/api/workbench/products/{product_id}/listing-autofill")
+def listing_autofill_resolve(product_id: str, request: ListingAutofillRequest) -> dict[str, Any]:
+    """Bounded official dictionary reads; suggestions do not save a product."""
+    return _listing_autofill(product_id, request.shop, resolve=True)
+
+
+class ListingDetailsRequest(BaseModel):
+    details: dict[str, Any] = Field(default_factory=dict, max_length=10)
+
+
+@app.get("/api/workbench/products/{product_id}/listing-details")
+def listing_details_get(product_id: str) -> dict[str, Any]:
+    from pipeline.product_editor import read_listing_details
+
+    return {"ok": True, **read_listing_details(_require_product(product_id))}
+
+
+@app.put("/api/workbench/products/{product_id}/listing-details")
+def listing_details_put(product_id: str, request: ListingDetailsRequest) -> dict[str, Any]:
+    from pipeline.product_editor import save_listing_details
+
+    directory = _require_product(product_id)
+    _require_pre_submission_edit(directory)
+    try:
+        result = save_listing_details(directory, request.details)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except OSError as error:
+        raise HTTPException(status_code=503, detail="商品资料保存失败，原资料已保留；请稍后重试") from error
     return {"ok": True, **result}
 
 #: 远程采集入库单次请求的图片总量上限（base64 之后按解码后字节算）

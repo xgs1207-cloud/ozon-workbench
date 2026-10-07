@@ -352,6 +352,7 @@ def compile_attributes(
     dictionary_lookups: Mapping[str, Any] | None = None,
     human_attributes: Mapping[str, Any] | None = None,
     human_sku_attributes: Mapping[str, Any] | None = None,
+    confirmed_only: bool = False,
 ) -> dict[str, Any]:
     """把类目属性快照 + 填值输入编译成 ``ozon-attributes-final``。
 
@@ -381,6 +382,14 @@ def compile_attributes(
             if required:
                 missing_ids.append(attribute_id)
             warnings.append(f"复合属性 {attribute_id} 必须按组填写，不能扁平编译；需人工处理")
+            continue
+
+        if confirmed_only:
+            # Modern official forms are the visible source of truth. Never
+            # silently inject "no brand", a singleton dictionary option, or a
+            # inferred SKU fact the editor has not saved and verified.
+            if required:
+                missing_ids.append(attribute_id)
             continue
 
         entry: dict[str, Any] | None = None

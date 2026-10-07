@@ -322,6 +322,7 @@ def enrich_facts_from_inputs(payload: dict[str, Any], request: Any) -> list[str]
     attributes = source.get("attributes_zh") if isinstance(source.get("attributes_zh"), Mapping) else {}
     # 人工确认入口：运营填一次 input/human-confirmations.json，**优先于**采集值（真商品总会缺信息）
     confirmations = read_json("input/human-confirmations.json")
+    details = confirmations.get("listing_details") if isinstance(confirmations.get("listing_details"), Mapping) else {}
     if confirmations:
         notes.append("已应用 input/human-confirmations.json（人工确认值优先）")
 
@@ -352,6 +353,24 @@ def enrich_facts_from_inputs(payload: dict[str, Any], request: Any) -> list[str]
             "product_width_mm": dims_confirmed["width"],
             "product_height_mm": dims_confirmed["height"],
         }
+
+    # A modern editor clear is deliberate. Do not resurrect a supplier value,
+    # legacy alias, or model guess behind the empty field visible to the user.
+    if "material" in details:
+        material = str(details["material"] or "").strip()
+        facts["materials"] = [material] if material else []
+    if "package_quantity" in details:
+        quantity = details["package_quantity"]
+        facts["package_quantity"] = ({"value": quantity, "source": "商品编辑表单确认"}
+                                     if quantity is not None else "unknown")
+    dimension_names = ("product_length_mm", "product_width_mm", "product_height_mm")
+    for key in (*dimension_names, "product_weight_g"):
+        if key in details:
+            product_block[key] = details[key]
+    if any(key in details and details[key] is None for key in dimension_names):
+        facts["dimensions"] = "unknown"
+    if "product_weight_g" in details and details["product_weight_g"] is None:
+        facts["weight"] = "unknown"
 
     if material and not facts.get("materials"):
         facts["materials"] = [material]
@@ -400,7 +419,8 @@ def enrich_facts_from_inputs(payload: dict[str, Any], request: Any) -> list[str]
         facts["weight"] = {"value_g": weight, "source": "input/workbench-sku-overrides.json（人工确认）"}
         notes.append(f"weight 用人工确认值补全：{weight} g")
 
-    if not facts.get("brand") and not str(source.get("brand") or "").strip():
+    modern_form = bool(read_json("input/category-form.json"))
+    if not modern_form and not facts.get("brand") and not str(source.get("brand") or "").strip():
         from pipeline.attributes import UNBRANDED_TEXT  # 延迟导入：避免 models↔pipeline 循环依赖
 
         facts["brand"] = UNBRANDED_TEXT

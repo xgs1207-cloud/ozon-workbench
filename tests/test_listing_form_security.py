@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pipeline.category_form import load_form
-from pipeline.listing_form import save_product_form, write_json
+from pipeline.listing_form import FORM_TRANSACTION_FILES, save_product_form, write_json
 from pipeline.ozon_http import FixtureTransport, OzonClient, PATH_ATTRIBUTES, PATH_TREE
 
 
@@ -47,6 +47,10 @@ class ListingFormSecurityTests(unittest.TestCase):
 
     def confirmation_bytes(self):
         return (self.product / "input/human-confirmations.json").read_bytes()
+
+    def snapshot(self):
+        return {path.relative_to(self.product).as_posix(): path.read_bytes()
+                for path in self.product.rglob("*") if path.is_file()}
 
     def test_wrong_shop_binding_rejects_before_fetch_or_writing(self):
         before = self.confirmation_bytes()
@@ -115,6 +119,107 @@ class ListingFormSecurityTests(unittest.TestCase):
                                     fill_input={"skus": [{"sku_id": "S1", "color_ru": "красный", "capacity_ru": "1 л"}]})
         self.assertEqual(result["attributes_by_sku"], {})
         self.assertEqual(result["required_summary"]["missing_attribute_ids"], [10097, 20])
+
+    def test_modern_form_compiles_only_saved_visible_values(self):
+        from pipeline.attributes import compile_attributes
+        snapshot = {"category_id": 1001, "type_id": 2001, "attributes": [
+            {"attribute_id": 85, "attribute_name": "品牌", "required": True,
+             "dictionary_id": 888, "allowed_values": [{"id": 501, "value": "Нет бренда"}]},
+            {"attribute_id": 999, "attribute_name": "适用对象", "required": True,
+             "dictionary_id": 889, "allowed_values": [{"id": 502, "value": "儿童"}]},
+            {"attribute_id": 10097, "attribute_name": "颜色", "required": True,
+             "dictionary_id": 890, "allowed_values": [{"id": 503, "value": "красный"}]},
+        ]}
+        result = compile_attributes(product_id="P000001", category_snapshot=snapshot,
+                                    fill_input={"skus": [{"sku_id": "S1", "color_ru": "красный"}]},
+                                    confirmed_only=True)
+        self.assertEqual(result["common_attributes"], [])
+        self.assertEqual(result["attributes_by_sku"], {})
+        self.assertEqual(result["required_summary"]["missing_attribute_ids"], [85, 999, 10097])
+        result = compile_attributes(product_id="P000001", category_snapshot=snapshot,
+                                    fill_input={"skus": [{"sku_id": "S1"}]}, confirmed_only=True,
+                                    human_attributes={"85": [{"value": "Нет бренда", "dictionary_value_id": 501}]})
+        self.assertEqual(result["common_attributes"][0]["dictionary_value_id"], 501)
+        self.assertEqual(result["required_summary"]["missing_attribute_ids"], [999, 10097])
+
+    def test_submitted_product_backend_rejects_before_fetch_or_any_product_file_change(self):
+        write_json(self.product / "status.json", {"api_write_count": 1})
+        before = self.snapshot()
+        with patch("pipeline.listing_form.load_form") as load:
+            with self.assertRaisesRegex(ValueError, "已有 Ozon 写入"):
+                save_product_form(self.product, self.cache, shop_id="shop-a", category_id=1001,
+                                  type_id=2001, attributes={"10": "1"})
+            load.assert_not_called()
+        self.assertEqual(before, self.snapshot())
+
+    def test_submission_during_metadata_read_rejects_without_mutating_product_inputs(self):
+        before = self.snapshot()
+        def fetch(*args, **kwargs):
+            write_json(self.product / "status.json", {"api_write_count": 1})
+            return self.form
+        with patch("pipeline.listing_form.load_form", side_effect=fetch):
+            with self.assertRaisesRegex(ValueError, "已有 Ozon 写入"):
+                save_product_form(self.product, self.cache, shop_id="shop-a", category_id=1001,
+                                  type_id=2001, attributes={"10": "1"})
+        after = self.snapshot()
+        self.assertEqual(before, {path: data for path, data in after.items() if path != "status.json"})
+        self.assertEqual(json.loads(after["status.json"])["api_write_count"], 1)
+
+    def test_category_changed_during_metadata_read_does_not_restore_old_form(self):
+        before = self.snapshot()
+        def fetch(*args, **kwargs):
+            write_json(self.product / "input/category-selection.json", {
+                "category_id": 3001, "type_id": 4001, "shop_id": "shop-a", "source": "ozon_seller_api",
+            })
+            return self.form
+        with patch("pipeline.listing_form.load_form", side_effect=fetch):
+            with self.assertRaisesRegex(ValueError, "类目已变更"):
+                save_product_form(self.product, self.cache, shop_id="shop-a", category_id=1001,
+                                  type_id=2001, attributes={"10": "1"})
+        after = self.snapshot()
+        before.pop("input/category-selection.json")
+        selected = json.loads(after.pop("input/category-selection.json"))
+        self.assertEqual(before, after)
+        self.assertEqual(selected["category_id"], 3001)
+
+    def test_compile_failure_restores_every_existing_transaction_file(self):
+        for path in FORM_TRANSACTION_FILES:
+            if path == "input/human-confirmations.json":
+                continue
+            write_json(self.product / path, {"old": path, "api_write_count": 0})
+        before = self.snapshot()
+        def fail(ctx):
+            ctx.write_json("output/attribute-fill-input.json", {"partial": "fill"})
+            ctx.write_json("output/ozon-attributes-final.json", {"partial": "compiled"})
+            raise RuntimeError("offline simulated compiler failure")
+        with patch("pipeline.catalog.handle_field_completion", side_effect=fail):
+            with self.assertRaisesRegex(RuntimeError, "simulated compiler failure"):
+                self.save(attributes={"10": "1"})
+        self.assertEqual(before, self.snapshot())
+
+    def test_compile_failure_removes_new_transaction_files_and_keeps_inputs(self):
+        before = self.snapshot()
+        def fail(ctx):
+            ctx.write_json("output/attribute-fill-input.json", {"partial": "fill"})
+            ctx.write_json("output/ozon-attributes-final.json", {"partial": "compiled"})
+            raise RuntimeError("offline simulated compiler failure")
+        with patch("pipeline.catalog.handle_field_completion", side_effect=fail):
+            with self.assertRaises(RuntimeError):
+                self.save(attributes={"10": "1"})
+        self.assertEqual(before, self.snapshot())
+
+    def test_persistence_failure_restores_previous_state_and_removes_new_schema_files(self):
+        write_json(self.product / "status.json", {"api_write_count": 0, "completed_steps": ["validate_source"]})
+        before = self.snapshot()
+        original_write = write_json
+        def fail_write(path, value):
+            if path == self.product / "input/human-confirmations.json":
+                raise OSError("offline simulated write failure")
+            return original_write(path, value)
+        with patch("pipeline.listing_form.write_json", side_effect=fail_write):
+            with self.assertRaisesRegex(OSError, "simulated write failure"):
+                self.save(attributes={"10": "1"})
+        self.assertEqual(before, self.snapshot())
 
 
 if __name__ == "__main__":

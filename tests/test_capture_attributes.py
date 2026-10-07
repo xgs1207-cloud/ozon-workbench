@@ -70,6 +70,26 @@ class IngestAttributesTests(unittest.TestCase):
         source = json.loads((product / "input" / "source.json").read_text(encoding="utf-8"))
         self.assertNotIn("attributes_zh", source)  # 没有属性就不写这个键
 
+    def test_actual_plugin_chinese_attribute_names_are_preserved(self):
+        product = self.ingest(attributes_zh={}, product_attributes=[
+            {"name_cn": "材质", "value_cn": "硅胶"},
+            {"name_cn": "包装数量", "value_cn": "2"},
+            {"name_cn": "是否含电池", "value_cn": False},
+            {"name_cn": "功率", "value_cn": 0},
+        ])
+        source = json.loads((product / "input/source.json").read_text(encoding="utf-8"))
+        attributes = source["attributes_zh"]
+        self.assertEqual(attributes["material"], "硅胶")
+        self.assertEqual(attributes["package_quantity"], 2)
+        self.assertEqual(attributes["raw"]["是否含电池"], "False")
+        self.assertEqual(attributes["raw"]["功率"], "0")
+
+    def test_carton_count_is_not_unit_package_quantity(self):
+        product = self.ingest(attributes_zh={"装箱数量": "120", "数量": "300"})
+        source = json.loads((product / "input/source.json").read_text(encoding="utf-8"))
+        self.assertNotIn("package_quantity", source["attributes_zh"])
+        self.assertEqual(source["attributes_zh"]["raw"]["装箱数量"], "120")
+
 
 class PushCapturePassthroughTests(unittest.TestCase):
     def setUp(self):
@@ -103,6 +123,30 @@ class PushCapturePassthroughTests(unittest.TestCase):
 
 
 class FactsFromAttributesTests(unittest.TestCase):
+    def test_modern_editor_clear_blocks_source_alias_and_model_guesses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            product = pathlib.Path(tmp)
+            (product / "input").mkdir()
+            (product / "input/human-confirmations.json").write_text(json.dumps({
+                "material_zh": "旧材质", "product_weight_g": 999,
+                "product_dimensions_mm": {"length": 100, "width": 100, "height": 100},
+                "listing_details": {"material": None, "package_quantity": None,
+                                    "product_length_mm": None, "product_weight_g": None},
+            }), encoding="utf-8")
+            (product / "input/category-form.json").write_text('{"scope":"official"}', encoding="utf-8")
+            payload = {"facts": {"materials": ["模型猜测"], "package_quantity": {"value": 100},
+                                  "weight": {"value_g": 999}, "dimensions": {"length_mm": 999},
+                                  "brand": None}}
+            request = AnalysisRequest(product_id="P000001", product_dir=product,
+                                      source={"attributes_zh": {"material": "源材质", "package_quantity": 100}},
+                                      selected_keywords=[])
+            enrich_facts_from_inputs(payload, request)
+            self.assertEqual(payload["facts"]["materials"], [])
+            self.assertEqual(payload["facts"]["package_quantity"], "unknown")
+            self.assertEqual(payload["facts"]["weight"], "unknown")
+            self.assertEqual(payload["facts"]["dimensions"], "unknown")
+            self.assertIsNone(payload["facts"]["brand"])
+
     def test_facts_filled_from_capture_attributes(self):
         payload = {
             "facts": {

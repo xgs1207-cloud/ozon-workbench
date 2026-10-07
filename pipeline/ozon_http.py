@@ -49,8 +49,8 @@ class Transport(Protocol):
 
 @dataclass
 class OzonCredentials:
-    client_id: str
-    api_key: str
+    client_id: str = field(repr=False)
+    api_key: str = field(repr=False)
     base_url: str = BASE_URL
     shop_id: str | None = None
 
@@ -70,12 +70,12 @@ class OzonCredentials:
                 f"店铺 {report['shop_id']} 缺少凭据环境变量：{', '.join(report['missing_env'])}"
                 "（在进程环境里设置它们，不要把密钥写进注册表）"
             )
-        import os
+        from pipeline.stores import credential_values
 
-        source = env if env is not None else os.environ
+        client_id, api_key = credential_values(shop, env)
         return cls(
-            client_id=source[report["client_id_env"]],
-            api_key=source[report["api_key_env"]],
+            client_id=client_id,
+            api_key=api_key,
             base_url=base_url,
             shop_id=str(report["shop_id"]) if report.get("shop_id") else None,
         )
@@ -94,6 +94,13 @@ class UrllibTransport:
         self.credentials = credentials
         self.timeout = timeout
         self._urlopen = urlopen or urllib.request.urlopen
+
+    def _redact(self, text: Any) -> str:
+        sanitized = str(text)
+        for secret in (self.credentials.api_key, self.credentials.client_id):
+            if secret:
+                sanitized = sanitized.replace(secret, "[已隐藏]")
+        return sanitized
 
     def build_request(self, path: str, body: Mapping[str, Any]) -> urllib.request.Request:
         payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
@@ -116,18 +123,18 @@ class UrllibTransport:
         except urllib.error.HTTPError as error:
             detail = ""
             try:
-                detail = error.read().decode("utf-8")[:300]
+                detail = self._redact(error.read().decode("utf-8"))[:300]
             except Exception:  # noqa: BLE001 - 读取错误体失败不影响主错误
                 detail = ""
             raise OzonHttpError(
-                f"Ozon 返回 HTTP {error.code}：{detail or error.reason}", status=error.code, path=path, body=detail
+                f"Ozon 返回 HTTP {error.code}：{detail or self._redact(error.reason)}", status=error.code, path=path, body=detail
             ) from error
         except urllib.error.URLError as error:
-            raise OzonHttpError(f"无法连接 Ozon：{error.reason}", path=path) from error
+            raise OzonHttpError(f"无法连接 Ozon：{self._redact(error.reason)}", path=path) from error
         try:
             value = json.loads(raw)
         except ValueError as error:
-            raise OzonHttpError(f"响应不是 JSON：{raw[:200]}", path=path) from error
+            raise OzonHttpError(f"响应不是 JSON：{self._redact(raw)[:200]}", path=path) from error
         if not isinstance(value, dict):
             raise OzonHttpError(f"响应不是对象：{type(value).__name__}", path=path)
         return value
@@ -193,7 +200,10 @@ class OzonClient:
         type_id: int,
         limit: int = 1000,
         language: str = "ZH_HANS",
+        last_value_id: int = 0,
     ) -> dict[str, Any]:
+        if not 1 <= int(limit) <= 2000 or int(last_value_id) < 0:
+            raise ValueError("字典分页 limit 必须为 1–2000，last_value_id 不能为负数")
         return self.transport.post(
             PATH_ATTRIBUTE_VALUES,
             {
@@ -201,7 +211,7 @@ class OzonClient:
                 "description_category_id": int(category_id),
                 "type_id": int(type_id),
                 "language": language,
-                "last_value_id": 0,
+                "last_value_id": int(last_value_id),
                 "limit": int(limit),
             },
         )
@@ -221,6 +231,8 @@ class OzonClient:
         用途举例：品牌字典 1000+ 且分页，但"无品牌"的官方值 ``Нет бренда`` 可以用这个端点直接查到，
         不必把整个字典拉下来。
         """
+        if len(str(value).strip()) < 2 or not 1 <= int(limit) <= 100:
+            raise ValueError("字典搜索至少输入 2 个字符，limit 必须为 1–100")
         return self.transport.post(
             PATH_ATTRIBUTE_VALUES_SEARCH,
             {
@@ -229,7 +241,6 @@ class OzonClient:
                 "type_id": int(type_id),
                 "value": str(value),
                 "limit": int(limit),
-                "language": language,
             },
         )
 
@@ -247,6 +258,8 @@ def find_category_in_tree(
     """
 
     def walk(node: Mapping[str, Any], path: list[str], inherited_category_id: int | None) -> dict[str, Any] | None:
+        if node.get("disabled") is True:
+            return None
         name = str(node.get("category_name") or node.get("type_name") or node.get("name") or "")
         here = [*path, name] if name else list(path)
         current_category_id = _to_int_or_none(node.get("description_category_id") or node.get("category_id")) or inherited_category_id
@@ -256,6 +269,7 @@ def find_category_in_tree(
             and current_category_id is not None
             and int(node_type_id) == int(type_id)
             and int(current_category_id) == int(category_id)
+            and not node.get("children")
         ):
             return {
                 "category_id": int(current_category_id),
@@ -294,7 +308,7 @@ def normalize_attribute(raw: Mapping[str, Any]) -> dict[str, Any]:
         "required": bool(raw.get("is_required") if raw.get("is_required") is not None else raw.get("required")),
         "type": str(raw.get("type") or "String"),
         "dictionary_id": _to_int_or_none(raw.get("dictionary_id")),
-        "complex_id": _to_int_or_none(raw.get("complex_id")),
+        "complex_id": _to_int_or_none(raw.get("attribute_complex_id") or raw.get("complex_id")),
         "is_collection": bool(raw.get("is_collection") or False),
         "allowed_values": [
             {"id": int(item.get("id")), "value": str(item.get("value"))}

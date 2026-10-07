@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -64,6 +65,38 @@ def handle_category_match(ctx: StepContext) -> dict[str, Any]:
             ctx.step,
             "采集时没有选择 Ozon 类目（input/category-selection.json 缺 category_id/type_id）",
         )
+
+    # The new official form flow already confirms a real category and reads its
+    # schema. Reuse the shop-scoped cache instead of fetching every dictionary
+    # eagerly on each AI preparation run.
+    if selected.get("shop_id"):
+        from .category_form import load_form, validate_attributes
+        from .listing_form import persist_category_form
+        from .sku_selection import active_skus
+
+        shop_id = str(selected["shop_id"])
+        credentials = getattr(getattr(client, "transport", None), "credentials", None)
+        actual_shop = getattr(credentials, "shop_id", None)
+        if actual_shop and actual_shop != shop_id:
+            raise PipelineGateError(ctx.step, "Ozon 客户端店铺与已确认类目店铺不一致")
+        cache_root = Path(os.environ.get("WORKBENCH_MARKET_DB_PATH") or
+                          Path(__file__).resolve().parents[1] / "runtime/market-intelligence.sqlite3").parent
+        try:
+            form = load_form(cache_root, category_id, type_id, shop_id=shop_id, client=client)
+            confirmed = ctx.read_json("input/human-confirmations.json")
+            validate_attributes(form, confirmed.get("attributes") or {}, cache_root=cache_root)
+            active_ids = {str(row["sku_id"]) for row in active_skus(ctx.product_dir, source.get("skus") or [])}
+            for sku_id, values in (confirmed.get("sku_attributes") or {}).items():
+                if sku_id in active_ids:
+                    validate_attributes(form, values, cache_root=cache_root)
+        except (ValueError, OzonHttpError) as error:
+            raise PipelineGateError(ctx.step, f"官方类目表单需要核验：{error}") from error
+        persist_category_form(ctx.product_dir, form)
+        return {"warnings": form.get("warnings") or [],
+                "artifacts": [SNAPSHOT_FILE, CATEGORY_FILE, ASPECT_FILE, "input/category-form.json"],
+                "match_status": "api_confirmed", "attributes": len(form["fields"]),
+                "dictionary_attributes": len([row for row in form["fields"] if row["dictionary_id"]]),
+                "dictionary_fetch_mode": "on_demand", "cache_hit": form.get("cache_hit", False)}
 
     warnings: list[str] = []
     try:

@@ -127,6 +127,7 @@ def handle_field_completion(ctx: StepContext) -> dict[str, Any]:
         fill_input_hash=sha256_of(fill_input_path),
         dictionary_lookups=dictionary_lookups,
         human_attributes=human_attributes,
+        human_sku_attributes=confirmations.get("sku_attributes") if isinstance(confirmations, Mapping) else None,
     )
     problems = validate_contract("ozon-attributes-final", compiled)
     if problems:

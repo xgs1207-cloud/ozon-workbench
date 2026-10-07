@@ -351,6 +351,7 @@ def compile_attributes(
     fill_input_hash: str | None = None,
     dictionary_lookups: Mapping[str, Any] | None = None,
     human_attributes: Mapping[str, Any] | None = None,
+    human_sku_attributes: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """把类目属性快照 + 填值输入编译成 ``ozon-attributes-final``。
 
@@ -376,6 +377,11 @@ def compile_attributes(
             continue
         if required:
             required_total += 1
+        if attribute.get("complex_id"):
+            if required:
+                missing_ids.append(attribute_id)
+            warnings.append(f"复合属性 {attribute_id} 必须按组填写，不能扁平编译；需人工处理")
+            continue
 
         entry: dict[str, Any] | None = None
         if _matches(name, BRAND_PATTERNS):
@@ -425,6 +431,9 @@ def compile_attributes(
                 if not color:
                     continue
                 match = _dictionary_match(allowed_values, color)
+                if attribute.get("dictionary_id") and match is None:
+                    warnings.append(f"SKU {sku.get('sku_id')} 的颜色需从官方字典选择，不能只提交文字")
+                    continue
                 by_sku.setdefault(str(sku.get("sku_id")), []).append(
                     _attribute_entry(
                         attribute_id=attribute_id,
@@ -449,6 +458,9 @@ def compile_attributes(
                 if not capacity:
                     continue
                 match = _dictionary_match(allowed_values, capacity)
+                if attribute.get("dictionary_id") and match is None:
+                    warnings.append(f"SKU {sku.get('sku_id')} 的容量需从官方字典选择，不能只提交文字")
+                    continue
                 by_sku.setdefault(str(sku.get("sku_id")), []).append(
                     _attribute_entry(
                         attribute_id=attribute_id,
@@ -498,7 +510,7 @@ def compile_attributes(
     confirmed = {
         int(key): value
         for key, value in ((human_attributes or {}).items() if isinstance(human_attributes, Mapping) else [])
-        if str(key).lstrip("-").isdigit() and str(value or "").strip()
+        if str(key).lstrip("-").isdigit() and not isinstance(value, (list, dict)) and str(value or "").strip()
     }
     if confirmed:
         by_id = {attribute.get("attribute_id"): attribute for attribute in attributes if isinstance(attribute, Mapping)}
@@ -506,6 +518,8 @@ def compile_attributes(
             if attribute_id in {item["attribute_id"] for item in common}:
                 continue
             attribute = by_id.get(attribute_id) or {}
+            if not attribute or attribute.get("complex_id") or attribute.get("dictionary_id"):
+                continue
             common.append(
                 _attribute_entry(
                     attribute_id=attribute_id,
@@ -527,13 +541,68 @@ def compile_attributes(
             if bool(attribute.get("required")):
                 required_filled += 1
 
+    # Official-form values were type/dictionary-validated before persistence.
+    # Lists retain each chosen dictionary ID instead of stringifying the list.
+    # An explicit form edit takes precedence over inference; legacy string inputs
+    # above retain their historical fill-missing-only behavior.
+    metadata = {str(row["attribute_id"]): row for row in attributes}
+
+    def confirmed_entries(key: str, rows: Any, sku_id: str | None = None) -> list[dict[str, Any]]:
+        attribute = metadata.get(str(key))
+        if not attribute or attribute.get("complex_id") or not isinstance(rows, list):
+            return []
+        entries = []
+        for row in rows:
+            if not isinstance(row, Mapping) or row.get("value") in (None, ""):
+                continue
+            entries.append(_attribute_entry(
+                attribute_id=int(key), attribute_name=str(attribute["attribute_name"]),
+                required=bool(attribute.get("required")), value=row["value"],
+                dictionary_value_id=row.get("dictionary_value_id"), source="human_confirmation",
+                scope="sku" if sku_id else "common", sku_id=sku_id, confidence=1.0,
+                evidence=["input/human-confirmations.json"], mapping_method="official_form_confirmed",
+            ))
+        return entries
+
+    for key, rows in (human_attributes or {}).items():
+        entries = confirmed_entries(str(key), rows)
+        if not isinstance(rows, list) or str(key) not in metadata or metadata[str(key)].get("complex_id"):
+            continue
+        common = [row for row in common if row["attribute_id"] != int(key)] + entries
+        by_sku = {sku: [row for row in values if row["attribute_id"] != int(key)]
+                  for sku, values in by_sku.items()}
+    selected_ids = {str(row["sku_id"]) for row in skus}
+    explicit_by_sku: dict[str, set[int]] = {}
+    cleared_ids: set[int] = set()
+    for sku_id, values in (human_sku_attributes or {}).items():
+        if sku_id not in selected_ids or not isinstance(values, Mapping):
+            continue
+        for key, rows in values.items():
+            entries = confirmed_entries(str(key), rows, sku_id)
+            if isinstance(rows, list) and str(key) in metadata and not metadata[str(key)].get("complex_id"):
+                explicit_by_sku.setdefault(sku_id, set()).add(int(key))
+                if not entries:
+                    cleared_ids.add(int(key))
+                by_sku[sku_id] = [row for row in by_sku.get(sku_id, []) if row["attribute_id"] != int(key)] + entries
+
+    # A blank per-SKU override is a deliberate omission, not inheritance. For
+    # fields overridden on any SKU, resolve common defaults into the other SKUs
+    # locally so import cannot accidentally reapply a common value to that SKU.
+    overridden_ids = cleared_ids
+    for entry in common:
+        if entry["attribute_id"] in overridden_ids:
+            for sku_id in selected_ids:
+                if entry["attribute_id"] not in explicit_by_sku.get(sku_id, set()):
+                    if not any(row["attribute_id"] == entry["attribute_id"] for row in by_sku.get(sku_id, [])):
+                        by_sku.setdefault(sku_id, []).append({**entry, "scope": "sku", "sku_id": sku_id})
+    common = [entry for entry in common if entry["attribute_id"] not in overridden_ids]
+
     filled_common_ids = {item["attribute_id"] for item in common}
-    filled_sku_ids = {
-        attribute["attribute_id"]
-        for entries in by_sku.values()
-        for attribute in entries
+    filled_ids = filled_common_ids | {
+        attribute["attribute_id"] for attribute in attributes
+        if selected_ids and all(any(row["attribute_id"] == attribute["attribute_id"]
+                                    for row in by_sku.get(sku_id, [])) for sku_id in selected_ids)
     }
-    filled_ids = filled_common_ids | filled_sku_ids
     required_attributes = [
         item for item in attributes if isinstance(item, Mapping) and item.get("required")
     ]

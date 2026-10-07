@@ -108,7 +108,7 @@ def _attribute_entry(item: Mapping[str, Any]) -> dict[str, Any] | None:
     if isinstance(dictionary_id, int) and dictionary_id > 0:
         payload_value["dictionary_value_id"] = int(dictionary_id)
     if value not in (None, ""):
-        payload_value["value"] = str(value)
+        payload_value["value"] = str(value).lower() if isinstance(value, bool) else str(value)
     if not payload_value:
         return None
     entry["values"].append(payload_value)
@@ -140,12 +140,20 @@ def build_import_request(payload: Mapping[str, Any]) -> dict[str, Any]:
     for index, variant in enumerate(variants, start=1):
         sku_id = str(variant.get("source_sku_id") or f"S{index}")
         attributes: list[dict[str, Any]] = []
-        for item in [*common_attributes, *(variant.get("attributes") or [])]:
+        sku_attributes = [row for row in variant.get("attributes") or [] if isinstance(row, Mapping)]
+        override_ids = {row.get("attribute_id") for row in sku_attributes}
+        effective = [row for row in common_attributes if row.get("attribute_id") not in override_ids] + sku_attributes
+        grouped: dict[int, dict[str, Any]] = {}
+        for item in effective:
             if not isinstance(item, Mapping):
                 continue
             entry = _attribute_entry(item)
-            if entry and entry not in attributes:
-                attributes.append(entry)
+            if entry:
+                aggregate = grouped.setdefault(entry["id"], {"id": entry["id"], "values": []})
+                for value in entry["values"]:
+                    if value not in aggregate["values"]:
+                        aggregate["values"].append(value)
+        attributes = list(grouped.values())
 
         primary = str(variant.get("color_image") or "")
         gallery: list[str] = []

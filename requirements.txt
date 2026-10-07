@@ -6,6 +6,9 @@ uvicorn==0.34.0
 # （服务器上跑 `python -m unittest` 做部署自检时必需）
 httpx>=0.27
 
+# 店铺授权：凭据以 Fernet 加密持久化，注册表/浏览器响应不包含密钥
+cryptography>=44.0,<47
+
 # 图片存储：腾讯云 COS 官方 SDK（用它的签名；自己实现 v5 签名容易"看着对、实际被拒"）
 cos-python-sdk-v5>=1.9
 

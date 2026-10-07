@@ -23,9 +23,12 @@ import hmac
 from pathlib import Path
 from typing import Any, Literal, Mapping
 
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query, Response
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.responses import JSONResponse
 from fastapi.responses import HTMLResponse, RedirectResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 from collector.ingest import (
     CaptureValidationError,
@@ -58,6 +61,47 @@ MARKET_DB_PATH = Path(
 )
 
 app = FastAPI(title="ozon-workbench · local workbench", version="0.2.0")
+
+
+def _shop_authorization_context(request: Request) -> dict[str, Any]:
+    """Never submit credentials over public HTTP, even behind a loopback proxy."""
+    from urllib.parse import urlsplit
+
+    host = (request.url.hostname or "").lower()
+    local = host in {"127.0.0.1", "localhost", "::1"} and bool(
+        request.client and request.client.host in {"127.0.0.1", "::1"}
+    )
+    secure = request.url.scheme == "https" or local
+    origin = request.headers.get("origin")
+    same_origin = True
+    if origin:
+        parsed = urlsplit(origin)
+        same_origin = (parsed.scheme, parsed.netloc) == (request.url.scheme, request.url.netloc)
+    if request.headers.get("sec-fetch-site") == "cross-site":
+        same_origin = False
+    reason = "" if secure and same_origin else (
+        "授权请求必须来自当前工作台页面" if not same_origin else
+        "请通过 HTTPS 或已建立 SSH 隧道的 http://127.0.0.1:8766 打开工作台后授权，公网 HTTP 禁止传输店铺密钥"
+    )
+    return {"can_submit_credentials": secure and same_origin, "reason": reason}
+
+
+def _require_shop_admin(request: Request) -> None:
+    context = _shop_authorization_context(request)
+    if not context["can_submit_credentials"]:
+        raise HTTPException(status_code=403, detail=context["reason"])
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error_without_credentials(request: Request, error: RequestValidationError) -> Response:
+    # FastAPI normally echoes the failing input. A malformed credential must never
+    # be copied into a response, including failures in another field in this form.
+    if request.url.path == "/api/workbench/stores/authorize":
+        return JSONResponse(status_code=422, content={"detail": [
+            {"loc": item.get("loc"), "msg": item.get("msg"), "type": item.get("type")}
+            for item in error.errors()
+        ]})
+    return await request_validation_exception_handler(request, error)
 
 
 def _process_ready_background(session_id: str) -> None:
@@ -321,7 +365,9 @@ def search_ozon_categories(q: str = Query(..., min_length=2), shop: str | None =
     except Exception as error:  # noqa: BLE001 - credentials/API errors belong in UI
         raise HTTPException(status_code=503, detail=f"Ozon 官方类目暂不可用：{error}") from error
     items = ozon_categories.search(tree, q)
-    return {"ok": True, "source": "ozon_seller_api", "items": items}
+    return {"ok": True, "source": "ozon_seller_api", "items": items,
+            "shop_id": tree.get("shop_id"), "fetched_at": tree.get("fetched_at"),
+            "cache_hit": tree.get("cache_hit", False)}
 
 
 class OfficialCategoryRequest(BaseModel):
@@ -334,25 +380,96 @@ class OfficialCategoryRequest(BaseModel):
 def confirm_ozon_category(product_id: str, request: OfficialCategoryRequest) -> dict[str, Any]:
     directory = _require_product(product_id)
     _require_pre_submission_edit(directory)
-    from pipeline.ozon_http import find_category_in_tree
+    from pipeline.category_form import load_form
+    from pipeline.listing_form import persist_category_form, write_json
 
     try:
-        tree = ozon_categories.load_tree(MARKET_DB_PATH.parent, shop_id=request.shop)
+        form = load_form(MARKET_DB_PATH.parent, request.category_id, request.type_id, shop_id=request.shop)
     except Exception as error:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Ozon 官方类目暂不可用：{error}") from error
-    found = find_category_in_tree(tree, category_id=request.category_id, type_id=request.type_id)
-    if not found:
-        raise HTTPException(status_code=422, detail="所选类目/类型不在当前 Ozon 店铺返回的真实类目树中")
     selected = {"category_id": request.category_id, "type_id": request.type_id,
-                "category_path_zh": " / ".join(found["path"]), "source": "ozon_seller_api",
+                "category_path_zh": " / ".join(form["category_path"]), "source": "ozon_seller_api",
+                "shop_id": form["shop_id"],
                 "confirmed_by_user": True}
     path = directory / "input" / "category-selection.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(selected, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    previous = _read_json_file(path)
+    if any(previous.get(key) != selected.get(key) for key in ("category_id", "type_id", "shop_id")):
+        confirmations_path = directory / "input/human-confirmations.json"
+        confirmations = _read_json_file(confirmations_path)
+        for key in ("attributes", "sku_attributes", "category_form_scope", "category_form_confirmed_at"):
+            confirmations.pop(key, None)
+        if confirmations_path.is_file():
+            write_json(confirmations_path, confirmations)
+        # A previous schema's inferred fill input must not survive a category change.
+        for relative in ("output/attribute-fill-input.json", "output/ozon-dictionary-lookups.json"):
+            stale = directory / relative
+            if stale.is_file():
+                stale.unlink()
+    write_json(path, selected)
+    persist_category_form(directory, form)
     from pipeline.guided_review import invalidate_from
 
     invalidate_from(directory, "product_analysis")
-    return {"ok": True, "category": selected}
+    return {"ok": True, "category": selected, "form": form, "api_writes_performed": False}
+
+
+@app.get("/api/ozon/category-values")
+def ozon_category_values(category_id: int = Query(..., gt=0), type_id: int = Query(..., gt=0),
+                         attribute_id: int = Query(..., gt=0), shop: str | None = None,
+                         q: str = Query("", max_length=200), last_value_id: int = Query(0, ge=0),
+                         limit: int = Query(50, ge=1, le=100)) -> dict[str, Any]:
+    from pipeline.category_form import dictionary_values
+    try:
+        result = dictionary_values(MARKET_DB_PATH.parent, category_id, type_id, attribute_id,
+                                   shop_id=shop, q=q, last_value_id=last_value_id, limit=limit)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=503, detail=f"官方字典暂不可用：{error}") from error
+    return {"ok": True, **result, "items": result["result"],
+            "last_value_id": result.get("next_last_value_id") or last_value_id}
+
+
+class ListingFormRequest(BaseModel):
+    shop: str | None = None
+    category_id: int = Field(gt=0)
+    type_id: int = Field(gt=0)
+    attributes: dict[str, Any] = Field(default_factory=dict)
+    per_sku_attributes: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+
+@app.get("/api/workbench/products/{product_id}/listing-form")
+def workbench_listing_form(product_id: str, shop: str | None = None, refresh: bool = False) -> dict[str, Any]:
+    from pipeline.listing_form import product_form
+    directory = _require_product(product_id)
+    try:
+        result = product_form(directory, MARKET_DB_PATH.parent,
+                              shop_id=shop, refresh=refresh)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=503, detail=f"官方类目表单暂不可用：{error}") from error
+    return {"ok": True, **result}
+
+
+@app.put("/api/workbench/products/{product_id}/listing-form")
+def save_workbench_listing_form(product_id: str, request: ListingFormRequest) -> dict[str, Any]:
+    from pipeline.listing_form import save_product_form
+    from pipeline.context import PipelineGateError
+    directory = _require_product(product_id)
+    _require_pre_submission_edit(directory)
+    try:
+        result = save_product_form(directory, MARKET_DB_PATH.parent, shop_id=request.shop,
+                                  category_id=request.category_id, type_id=request.type_id,
+                                  attributes=request.attributes, per_sku_attributes=request.per_sku_attributes)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except PipelineGateError as error:
+        raise HTTPException(status_code=409, detail=error.reason) from error
+    except Exception as error:
+        raise HTTPException(status_code=503, detail=f"保存官方表单失败：{error}") from error
+    return {"ok": True, **result}
 
 #: 远程采集入库单次请求的图片总量上限（base64 之后按解码后字节算）
 MAX_CAPTURE_BYTES = int(os.environ.get("WORKBENCH_MAX_CAPTURE_BYTES") or 40 * 1024 * 1024)
@@ -958,7 +1075,8 @@ def workbench_launch(product_id: str, request: LaunchRequest) -> dict[str, Any]:
         image_generator=image_generator,
         uploader=uploader,
         publisher=publisher,
-        ozon_client=_ozon_client_for_launch(use_fixture=request.ozon_fixture),
+        ozon_client=_ozon_client_for_launch(use_fixture=request.ozon_fixture,
+                                           shop_id=request.stores[0] if request.stores else None),
         store_ids=request.stores,
         execute_upload=bool(request.execute_upload),
         step_budget=request.step_budget,
@@ -966,7 +1084,7 @@ def workbench_launch(product_id: str, request: LaunchRequest) -> dict[str, Any]:
     return {"ok": bool(report.get("ok")), "report": report}
 
 
-def _ozon_client_for_launch(*, use_fixture: bool) -> Any | None:
+def _ozon_client_for_launch(*, use_fixture: bool, shop_id: str | None = None) -> Any | None:
     """给一键跑准备 Ozon 只读客户端：夹具优先，否则用已启用店铺的凭据；都没有就返回 None（门禁会提示）。"""
     if use_fixture:
         from pipeline.ozon_http import FixtureTransport, OzonClient
@@ -974,14 +1092,10 @@ def _ozon_client_for_launch(*, use_fixture: bool) -> Any | None:
         return OzonClient(FixtureTransport(directory=Path(__file__).resolve().parent / "contracts" / "fixtures"))
     try:
         from pipeline.ozon_http import OzonClient, OzonCredentials, UrllibTransport
-        from pipeline.stores import enabled_shop_ids, list_shops, load_registry
+        from pipeline.stores import load_registry
+        from pipeline.shop_authorization import select_read_shop
 
-        registry = load_registry()
-        shops = list_shops(registry)
-        if not shops:
-            return None
-        enabled = set(enabled_shop_ids(registry))
-        shop = next((item for item in shops if str(item.get("id")) in enabled), shops[0])
+        shop = select_read_shop(load_registry(), shop_id)
         return OzonClient(UrllibTransport(OzonCredentials.from_shop(shop)))
     except Exception:  # noqa: BLE001 - 缺凭据不在这里报错，让流水线给出可操作提示
         return None
@@ -1618,6 +1732,9 @@ def _store_for(directory: Path, requested: str | None) -> str:
     """没指定店铺时，用商品台账里第一个目标店铺，再退回注册表里第一个已启用的。"""
     if requested:
         return str(requested)
+    bound = _read_json_file(directory / "input/category-selection.json").get("shop_id")
+    if bound:
+        return str(bound)
     from pipeline.status import load_status, normalize
 
     targets = normalize(load_status(directory)).get("target_store_ids") or []
@@ -1625,7 +1742,10 @@ def _store_for(directory: Path, requested: str | None) -> str:
         return str(targets[0])
     from pipeline.stores import enabled_shop_ids, ensure_registry
 
-    enabled = enabled_shop_ids(ensure_registry(None))
+    registry = ensure_registry(None)
+    enabled = enabled_shop_ids(registry)
+    if registry.get("default_read_shop") in enabled:
+        return str(registry["default_read_shop"])
     if enabled:
         return str(enabled[0])
     raise HTTPException(status_code=400, detail="没有可用店铺：先在 config/shops.json 里启用一个（pipeline.stores --enable <id>）")
@@ -1647,12 +1767,81 @@ def advanced_console() -> Any:
 
 
 @app.get("/api/workbench/stores")
-def workbench_stores() -> dict[str, Any]:
+def workbench_stores(request: Request, response: Response) -> dict[str, Any]:
     """店铺清单（**不含密钥**，只说 enabled / 凭据是否就绪）。"""
     from pipeline.stores import ensure_registry, shop_summary
 
     shops = shop_summary(ensure_registry(None))
-    return {"ok": True, "count": len(shops), "shops": shops}
+    response.headers["Cache-Control"] = "private, no-store"
+    return {"ok": True, "count": len(shops), "shops": shops,
+            "authorization_context": _shop_authorization_context(request)}
+
+
+class ShopAuthorizationRequest(BaseModel):
+    shop_id: str = Field(pattern=r"^[A-Za-z0-9._-]{1,64}$")
+    display_name: str = Field(min_length=1, max_length=100)
+    client_id: SecretStr
+    api_key: SecretStr
+    default_currency_code: Literal["CNY", "RUB", "USD", "EUR"] = "CNY"
+
+
+class ShopSettingsRequest(BaseModel):
+    enabled: bool | None = None
+    make_default: bool | None = None
+
+
+@app.post("/api/workbench/stores/authorize")
+def authorize_workbench_shop(request: Request, payload: ShopAuthorizationRequest,
+                             response: Response) -> dict[str, Any]:
+    _require_shop_admin(request)
+    from pipeline.shop_authorization import authorize_shop
+
+    try:
+        shop = authorize_shop(shop_id=payload.shop_id, display_name=payload.display_name,
+                              client_id=payload.client_id.get_secret_value(),
+                              api_key=payload.api_key.get_secret_value(),
+                              default_currency_code=payload.default_currency_code)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    from pipeline.category_form import invalidate_shop_cache
+
+    invalidate_shop_cache(MARKET_DB_PATH.parent, payload.shop_id)
+    response.headers["Cache-Control"] = "private, no-store"
+    return {"ok": True, "shop": shop, "api_writes_performed": False}
+
+
+@app.post("/api/workbench/stores/{shop_id}/test")
+def test_workbench_shop(shop_id: str, request: Request, response: Response) -> dict[str, Any]:
+    _require_shop_admin(request)
+    from pipeline.shop_authorization import test_shop_connection
+
+    try:
+        shop = test_shop_connection(shop_id)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    response.headers["Cache-Control"] = "private, no-store"
+    return {"ok": True, "shop": shop, "api_writes_performed": False}
+
+
+@app.put("/api/workbench/stores/{shop_id}/settings")
+def settings_workbench_shop(shop_id: str, payload: ShopSettingsRequest,
+                            request: Request, response: Response) -> dict[str, Any]:
+    _require_shop_admin(request)
+    from pipeline.shop_authorization import set_default_shop, set_shop_enabled, list_authorized_shops
+
+    try:
+        if payload.enabled is not None:
+            set_shop_enabled(shop_id, payload.enabled)
+        if payload.make_default:
+            set_default_shop(shop_id)
+        shops = list_authorized_shops()
+        shop = next((item for item in shops if item["id"] == shop_id), None)
+        if shop is None:
+            raise ValueError("店铺不存在")
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    response.headers["Cache-Control"] = "private, no-store"
+    return {"ok": True, "shop": shop, "api_writes_performed": False}
 
 
 @app.post("/api/workbench/products/{product_id}/publish-images")
@@ -1855,26 +2044,19 @@ def guided_confirm_facts(product_id: str, request: HumanFactsRequest) -> dict[st
 
 @app.put("/api/workbench/products/{product_id}/guided/attributes")
 def guided_confirm_attributes(product_id: str, request: HumanAttributesRequest) -> dict[str, Any]:
-    from pipeline.catalog import handle_field_completion
-    from pipeline.context import PipelineGateError, StepContext
-
     directory = _require_product(product_id)
     _require_pre_submission_edit(directory)
-    snapshot = _read_json_file(directory / "output" / "ozon-category-attributes.json")
-    permitted = {str(item.get("attribute_id")) for item in snapshot.get("attributes") or []}
-    if not permitted:
-        raise HTTPException(status_code=409, detail="先运行准备流程，取得 Ozon 官方类目属性")
-    if any(key not in permitted or not value.strip() for key, value in request.attributes.items()):
-        raise HTTPException(status_code=422, detail="只能填写该 Ozon 类目返回的属性，且值不能为空")
-    target = directory / "input" / "human-confirmations.json"
-    current = _read_json_file(target)
-    current["attributes"] = request.attributes
-    target.write_text(json.dumps(current, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    try:
-        handle_field_completion(StepContext(directory, "field_completion"))
-    except PipelineGateError as error:
-        raise HTTPException(status_code=409, detail=error.reason) from error
-    return {"ok": True, "attributes": _read_json_file(directory / "output" / "ozon-attributes-final.json")}
+    selection = _read_json_file(directory / "input/category-selection.json")
+    if not selection.get("category_id") or not selection.get("type_id"):
+        raise HTTPException(status_code=409, detail="先确认 Ozon 官方类目并读取填写表单")
+    # Keep the legacy route, but apply the same official dictionary/type gates.
+    result = save_workbench_listing_form(product_id, ListingFormRequest(
+        shop=selection.get("shop_id"), category_id=int(selection["category_id"]),
+        type_id=int(selection["type_id"]),
+        attributes={key: [{"value": value}] for key, value in request.attributes.items()},
+        per_sku_attributes=_read_json_file(directory / "input/human-confirmations.json").get("sku_attributes") or {},
+    ))
+    return {"ok": True, "attributes": result["compiled"]}
 
 
 class GuidedGroupingRequest(BaseModel):
@@ -1911,6 +2093,9 @@ def guided_prepare(product_id: str, request: StoreActionRequest) -> dict[str, An
     """Prepare Ark copy, real Ozon attributes and image plan; never write Ozon or generate paid images."""
     directory = _require_product(product_id)
     store = _store_for(directory, request.store)
+    bound = _read_json_file(directory / "input/category-selection.json").get("shop_id")
+    if bound and bound != store:
+        raise HTTPException(status_code=409, detail="目标店铺与类目确认不一致，请为该店铺重新选择官方类目")
     return workbench_launch(product_id, LaunchRequest(provider="ark", image_generator="none",
                                                        uploader="none", oss="none", stores=[store]))
 

@@ -170,6 +170,41 @@ const els = {
     captureMarket: document.getElementById("capture-market"),
     stopMarket: document.getElementById("stop-market")
 };
+const chainEls = {
+    auto: document.getElementById('market-auto-keywords'),
+    pages: document.getElementById('market-keyword-pages'),
+    categories: document.getElementById('market-max-categories'),
+    resume: document.getElementById('resume-market-chain'),
+    status: document.getElementById('market-chain-status')
+};
+const productPeriodBox = document.getElementById('market-product-period');
+const productPeriodKind = document.getElementById('market-product-period-kind');
+productPeriodKind?.addEventListener('change', () => {
+    const rolling = productPeriodKind.value === 'rolling_30d';
+    els.marketRollingPeriod.hidden = !rolling;
+    els.marketNaturalPeriod.hidden = rolling;
+});
+let chainJob = null;
+async function chainMessage(type, extra = {}) {
+    const response = await chrome.runtime.sendMessage({ type, ...extra });
+    if (!response?.ok) throw new Error(response?.error || '后台采集连接失败，请重新加载插件');
+    return response.job;
+}
+function showChainJob(job) {
+    chainJob = job;
+    if (!job || !chainEls.status) return;
+    const running = job.status === 'running';
+    chainEls.status.textContent = `${job.message || ''} · 关键词类目 ${Math.min(job.targetIndex, job.categoryCount)}/${job.categoryCount}`
+        + (job.currentCategory && running ? ` · ${job.currentCategory}` : '')
+        + (job.skipped ? ` · ${job.skipped} 行缺少类目 ID，未自动采词` : '')
+        + (job.error ? ` · ${job.error}` : '');
+    els.captureMarket.disabled = running || marketCaptureRunning;
+    els.stopMarket.disabled = !running && !marketCaptureRunning;
+    chainEls.resume.hidden = !['error', 'stopped'].includes(job.status);
+}
+async function refreshChainJob() {
+    try { showChainJob(await chainMessage('SEERFAR_CHAIN_STATUS')); } catch { /* Older plugin needs reload. */ }
+}
 let latestCapture = null;
 let duplicateProductId = null;
 let activePageKind = "unsupported";
@@ -285,6 +320,7 @@ async function loadPreview() {
         if (isSeerfarPage) {
             activePageKind = "seerfar";
             const rolling = isRollingMarketPage(tab.url);
+            if (productPeriodBox) productPeriodBox.hidden = !/\/admin\/product-search(?:\.html)?(?:\?|\/?$)/.test(tab.url);
             els.marketRollingPeriod.hidden = !rolling;
             els.marketNaturalPeriod.hidden = rolling;
             els.marketCaptureMonth.textContent = `${marketCaptureMonth()}（按本机时间自动生成）`;
@@ -495,6 +531,23 @@ els.capture.addEventListener("click", () => captureCurrentProduct(false));
 els.captureMarket.addEventListener("click", async () => {
     if (marketCaptureRunning)
         return;
+    if (chainJob?.status === 'running') return;
+    if (chainEls.auto?.checked) {
+        els.captureMarket.disabled = true;
+        try {
+            await verifyAndSaveMarketToken();
+            const tab = await getActiveTab();
+            const job = await chainMessage('SEERFAR_CHAIN_START', { tabId: tab.id, period: els.marketPeriod.value,
+                maxPages: Number(els.marketMaxPages.value), keywordPages: Number(chainEls.pages.value),
+                maxCategories: Number(chainEls.categories.value) });
+            showChainJob(job);
+            els.progress.textContent = '类目联动采集已启动，可关闭弹窗；重开可查看进度或停止';
+        } catch (error) {
+            setResult({ error: safeMarketTokenError(error) });
+            els.captureMarket.disabled = false;
+        }
+        return;
+    }
     marketCaptureRunning = true;
     marketStopRequested = false;
     els.captureMarket.disabled = true;
@@ -514,15 +567,16 @@ els.captureMarket.addEventListener("click", async () => {
         const tab = await getActiveTab();
         if (!/^https:\/\/(?:www\.)?seerfar\.cn\//.test(tab?.url || ""))
             throw new Error("当前不是 Seerfar 页面");
-        const rolling = isRollingMarketPage(tab.url);
-        const period = rolling ? marketCaptureMonth() : els.marketPeriod.value;
-        if (!period)
-            throw new Error("请填写报表实际所属自然月");
-        els.marketCaptureMonth.textContent = `${period}（按本机时间自动生成）`;
         let snapshot = await sendToTab(tab.id, { type: "SEERFAR_MARKET_CAPTURE" });
         if (!snapshot?.records?.length)
             throw new Error(snapshot?.reason || "当前页面没有识别到类目、关键词或商品报表表格");
         const dataset = snapshot.dataset;
+        if (dataset === 'products' && !['rolling_30d', 'calendar_month'].includes(productPeriodKind?.value))
+            throw new Error('请按商品报表实际选择最近 30 天或完整自然月，不能混用销量口径');
+        const rolling = dataset === 'products' ? productPeriodKind.value === 'rolling_30d' : isRollingMarketPage(tab.url);
+        const period = rolling ? marketCaptureMonth() : els.marketPeriod.value;
+        if (!period) throw new Error("请填写报表实际所属自然月");
+        els.marketCaptureMonth.textContent = `${period}（按本机时间自动生成）`;
         const seen = new Set();
         let stopReason = "已到本次页数上限";
         for (let page = 1; page <= maxPages; page++) {
@@ -617,6 +671,11 @@ els.clearMarketToken.addEventListener("click", async () => {
     }
 });
 els.stopMarket.addEventListener("click", async () => {
+    if (chainJob?.status === 'running') {
+        try { await chainMessage('SEERFAR_CHAIN_STOP'); els.progress.textContent = '正在停止后台任务，已入库数据保留'; }
+        catch (error) { setResult({ error: safeMarketTokenError(error) }); }
+        return;
+    }
     marketStopRequested = true;
     els.stopMarket.disabled = true;
     els.progress.textContent = "正在停止；当前页提交完成后结束…";
@@ -629,6 +688,12 @@ els.stopMarket.addEventListener("click", async () => {
         // The current tab may have navigated; popup loop still stops after its pending request.
     }
 });
+chainEls.resume?.addEventListener('click', async () => {
+    try { await verifyAndSaveMarketToken(); showChainJob(await chainMessage('SEERFAR_CHAIN_RESUME')); }
+    catch (error) { setResult({ error: safeMarketTokenError(error) }); }
+});
+void refreshChainJob();
+globalThis.setInterval?.(refreshChainJob, 1800);
 els.previewToggle.addEventListener("click", () => {
     els.preview.hidden = !els.preview.hidden;
 });

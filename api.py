@@ -40,6 +40,7 @@ from market_intelligence import store as market_store
 from market_intelligence import recommend as market_recommend
 from market_intelligence import sessions as research_sessions
 from market_intelligence import ozon_categories
+from market_intelligence import product_opportunities
 
 LIBRARY_ROOT = Path(
     os.environ.get("KEYWORD_LIBRARY_ROOT")
@@ -194,6 +195,21 @@ def research_keywords(category_key: str = Query(..., min_length=1)) -> dict[str,
     return {"ok": True, **market_recommend.recommend(
         MARKET_DB_PATH, dataset="keywords", category_key=category_key,
         config=market_recommend.load_config(MARKET_DB_PATH)
+    )}
+
+
+@app.get("/api/research/product-opportunities")
+def research_product_opportunities(
+    response: Response,
+    q: str = Query(default="", max_length=120),
+    category_key: str = Query(default="", max_length=200),
+    status: Literal["all", "recommended", "pending", "watch", "excluded"] = "recommended",
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
+) -> dict[str, Any]:
+    response.headers["Cache-Control"] = "private, no-store"
+    return {"ok": True, **product_opportunities.list_opportunities(
+        MARKET_DB_PATH, q=q, category_key=category_key, status=status, limit=limit, offset=offset,
     )}
 
 

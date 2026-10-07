@@ -1,0 +1,25 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>Seerfar 联动采集测试夹具（非真实数据）</title>
+<style>body{font:14px sans-serif;padding:20px}th,td{padding:12px;border:1px solid #ddd}.el-cascader{padding:12px;border:1px solid #aaa}.el-pager{display:inline-flex;list-style:none;gap:12px}.is-active{color:blue}</style>
+<div class="el-cascader" id="category">类目选择器测试夹具</div><button id="query">查询</button>
+<div class="el-table"><table><thead id="headers"></thead></table><div class="el-table__body-wrapper"><table><tbody id="rows"></tbody></table></div></div>
+<div data-ranking-pagination><div class="sf-pagination el-pagination"><ul class="el-pager"><li class="is-active">1</li></ul><button class="btn-next">下一页</button></div></div>
+<script>
+let page=1, selected='', ready=location.pathname.includes('category-search');
+const categoryMode=ready;
+const options=[{value:'10_1',label:'测试类目A'},{value:'20_2',label:'测试类目B'}];
+const props={options,modelValue:[]};
+document.querySelector('.el-cascader').__vueParentComponent={type:{__name:'filter-category-cascader'},props,
+    emit:(event,value)=>{props.modelValue=value;selected=value[0];document.querySelector('#category').textContent=options.find(x=>x.value===selected).label}};
+function render(){
+    const header=categoryMode?['排名','类目','销售额','销量']:['排名','关键词','月搜热度','竞品数'];
+    document.querySelector('#headers').innerHTML='<tr>'+header.map(h=>'<th>'+h+'</th>').join('')+'</tr>';
+    document.querySelector('#rows').innerHTML=!ready?'':categoryMode?
+        `<tr><td>${page}</td><td><a href="https://www.seerfar.cn/admin/category-detail?categoryId=${page===1?'10_1':'20_2'}&platform=OZON">测试类目${page===1?'A':'B'}</a></td><td>10000</td><td>100</td></tr>`:
+        `<tr><td>${page}</td><td>слово-${selected}-${page}</td><td>1000</td><td>10</td></tr>`;
+    document.querySelector('.el-pager li').textContent=page;
+    document.querySelector('.btn-next').disabled=page>=2;
+}
+document.querySelector('#query').onclick=()=>{ready=true;page=1;render()};
+document.querySelector('.btn-next').onclick=()=>{page++;render()};
+render();
+</script></html>

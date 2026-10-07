@@ -119,6 +119,15 @@ test('a report with SKU plus category and revenue remains a product dataset', ()
     assert.equal(result.records[0].SKU, '123456');
 });
 
+test('combined product / SKU cell supplies the visible SKU as the ingestion identity', () => {
+    const result = captureContext(['商品 / SKU', '类目', '销量'], [
+        row([cell('Новый товар123456', 'Новый товар\n123456'), cell('床品'), cell('20')]),
+    ]);
+    assert.equal(result.dataset, 'products');
+    assert.equal(result.records[0].SKU, '123456');
+    assert.equal(result.records[0]['商品 / SKU'], 'Новый товар\n123456');
+});
+
 test('product report preserves visible image and detail link in any column', () => {
     const result = captureContext(['SKU', '商品', '销量'], [
         row([cell('123456'), cell('保温杯', '保温杯', {

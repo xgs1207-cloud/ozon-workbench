@@ -83,6 +83,14 @@ function marketRecords(headers, rows, cellSelector) {
             if (images.length)
                 record[`${header}图片`] = images;
         });
+        // Current Seerfar combines the title and the visible SKU in one
+        // "商品 / SKU" cell, rather than a standalone SKU column.
+        if (marketDataset(headers) === 'products' && !record.SKU) {
+            const skuHeader = headers.find(header => /SKU/i.test(header));
+            const sku = String(record[skuHeader] || '').split('\n').map(line => line.trim())
+                .find(line => /^\d{5,20}$/.test(line));
+            if (sku) record.SKU = sku;
+        }
         const signature = JSON.stringify(record);
         if (seen.has(signature))
             continue;
@@ -157,8 +165,31 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         advanceMarketPage().then(sendResponse).catch((error) => sendResponse({ advanced: false, error: error.message }));
         return true;
     }
+    if (message?.type === "SEERFAR_MARKET_WAIT") {
+        waitForMarketSnapshot(message.dataset).then(sendResponse).catch(error => sendResponse({ records: [], reason: error.message }));
+        return true;
+    }
     return undefined;
 });
+
+async function waitForMarketSnapshot(dataset) {
+    const deadline = Date.now() + 20000;
+    let prior = '', stable = 0;
+    while (Date.now() < deadline) {
+        if (marketPageStopRequested) return { records: [], reason: '用户已停止' };
+        if (seerfarLoginRequired()) return { records: [], reason: 'Seerfar 登录已失效，请重新登录' };
+        const snapshot = captureVisibleMarketTable();
+        const signature = marketPageSignature(snapshot);
+        const loading = [...document.querySelectorAll('.el-loading-mask')].some(e => e.getClientRects().length);
+        if (snapshot.dataset === dataset && snapshot.records?.length && !loading) {
+            stable = signature === prior ? stable + 1 : 0;
+            if (stable >= 3) return snapshot;
+        } else stable = 0;
+        prior = signature;
+        await new Promise(r => setTimeout(r, 400));
+    }
+    return { records: [], reason: '20 秒内没有返回稳定的类目关键词报表，未采集全部市场' };
+}
 
 function marketPageSignature(snapshot) {
     return JSON.stringify([snapshot?.dataset, snapshot?.records || []]);

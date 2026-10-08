@@ -72,7 +72,8 @@ class ListingDocumentTests(unittest.TestCase):
 
     def test_official_missing_and_duplicates_are_distinct(self):
         result = self.read()
-        self.assertEqual(result["official_excluded_attribute_ids"], [85, 9048, 4191, 23171])
+        self.assertEqual(result["official_excluded_attribute_ids"], [85, 4191, 23171])
+        self.assertNotIn(9048, result["official_excluded_attribute_ids"], "model name has no duplicate operational control")
         self.assertEqual(result["missing"]["required_attribute_ids"], [77, 85, 9048])
         self.assertTrue(any(row["name"] == "真实其他必填" for row in result["missing"]["required_attributes"]))
         self.assertTrue(result["operational_fields"]["product_optional"])

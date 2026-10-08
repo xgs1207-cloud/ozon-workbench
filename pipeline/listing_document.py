@@ -133,7 +133,9 @@ def read_listing_document(directory: Path | str, *, shop: str | None = None,
             positive = False
         if not positive:
             operational_missing.append({"key": "manual_price", "source_sku_id": row["source_sku_id"], "name": "逐规格售价"})
-    duplicates = {85: "brand", 9048: "model_name", 4191: "description_ru", 23171: "hashtags"}
+    # The model name is only edited in the official attributes, not the
+    # operational panel: it is not a duplicate and must stay visible there.
+    duplicates = {85: "brand", 4191: "description_ru", 23171: "hashtags"}
     operational_names = {
         "包装长度，毫米": "package_length_mm", "包装宽度，毫米": "package_width_mm", "包装高度，毫米": "package_height_mm",
         "含包装重量，克": "package_weight_g", "包装重量，克": "package_weight_g", "简介": "description_ru", "商品简介": "description_ru",

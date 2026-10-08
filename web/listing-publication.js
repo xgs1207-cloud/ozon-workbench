@@ -224,3 +224,12 @@ document.addEventListener('click',async event=>{
     }catch(error){const entry=publicationEntry(product,shop);if(action==='save-config')entry.error=error.message;else if(action.includes('history')||action==='continue-stock')publicationHistoryEntry(product,shop).error=error.message;notice(error.message,true)}
     finally{listingPublication.operations.delete(key);if(button.isConnected)button.disabled=false;publicationRedraw(product,shop)}
 });
+// The sourcing note is an operational specification, not arbitrary copy.
+const publicationSpecificationConfigHtml=publicationConfigHtml;
+publicationConfigHtml=function(){
+    const html=publicationSpecificationConfigHtml();
+    if(!publicationEntry()?.data.source_note_auto)return html;
+    return html.replace('<strong>货源备注</strong>','<strong>货源备注 · 商品规格</strong>')
+        .replace(/data-publication-input="source_note"(?: readonly)?/,'data-publication-input="source_note" readonly')
+        .replace('placeholder="选填，仅保存到内部上架记录">','placeholder="由已选商品规格自动填写"><span class="field-help">按真实规格自动记录，多规格发布后每个货号保存自己的完整规格。</span>');
+};

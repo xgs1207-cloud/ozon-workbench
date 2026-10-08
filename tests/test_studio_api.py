@@ -7,7 +7,7 @@ from pipeline.listing_form import read_json
 from pipeline.oss_cos import CosObjectStorage
 from pipeline.source_videos import store_uploaded_video
 from tests import test_listing_flow_api as flow_fixture
-from tests.test_source_videos import MP4
+from tests.test_source_videos import MP4, SIGNED, Response, remote
 from tests.test_video_publish import VideoCosClient
 
 
@@ -80,4 +80,33 @@ class StudioApiTests(unittest.TestCase):
             reused = self.client.post(self.base + "/guided/publish-videos", json=body)
             self.assertEqual(reused.json()["publication"]["reused"], 1)
             self.assertEqual(len([call for action, call in client.calls if action == "put_object"]), 1)
+        self.assert_no_write()
+
+    def test_video_route_accepts_captured_supplier_video_without_local_save(self):
+        self.collect(videos=[{"source_url": SIGNED}])
+        video = self.client.get(self.base + "/videos").json()["videos"][0]
+        self.assertTrue(video["can_publish"])
+        self.assertFalse(video["has_file"])
+        client = VideoCosClient()
+        storage = CosObjectStorage(client, bucket="fixture-1250000000", region="ap-hongkong", max_attempts=1)
+        def public_headers(url):
+            return {str(key).lower(): str(value) for key, value in client.head_object(
+                Bucket=storage.bucket, Key=unquote(urlsplit(url).path).lstrip("/")).items()}
+        with patch("pipeline.source_videos._inspect_bytes", return_value={"media_verified": True,
+                   "duration_seconds": 24, "width": 720, "height": 1280}), \
+             patch("pipeline.source_videos._open_video", side_effect=remote(Response())) as fetch, \
+             patch("pipeline.oss_cos._storage_from_env", return_value=storage), \
+             patch("pipeline.oss_cos._anonymous_video_headers", side_effect=public_headers):
+            body = {"confirm": "PUBLISH_VIDEOS", "rights_confirmed": True,
+                    "videos": [{"video_id": video["video_id"], "title": "Видео товара", "source_sku_id": "S1"}]}
+            reply = self.client.post(self.base + "/guided/publish-videos", json=body)
+            self.assertEqual(reply.status_code, 200, reply.text)
+            self.assertEqual(reply.json()["publication"]["uploaded"], 1)
+            fetch.assert_called_once_with(SIGNED)
+        self.assertFalse((self.directory / "runtime/source-videos").exists())
+        listed = self.client.get(self.base + "/videos").json()["videos"][0]
+        self.assertFalse(listed["has_file"])
+        self.assertIs(listed["local_persistence"], False)
+        self.assertEqual(listed["status"], "published")
+        self.assertTrue(listed["published_url"].startswith("https://"))
         self.assert_no_write()

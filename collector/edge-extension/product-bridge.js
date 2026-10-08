@@ -1,6 +1,6 @@
 /* Product-page connection recovery. Inspect readiness in the isolated world:
  * legacy content.js held unknown ping messages open indefinitely. */
-const PRODUCT_BRIDGE_VERSION = '0.4.34';
+const PRODUCT_BRIDGE_VERSION = '0.4.35';
 const productBridgeConnections = new Map();
 const PRODUCT_PAGE_COMMANDS = new Set(['COLLECTOR_PREVIEW', 'COLLECTOR_CAPTURE',
     'COLLECTOR_OZON_PREVIEW', 'COLLECTOR_OZON_CAPTURE', 'OPEN_SKU_SELECTOR', 'EXPORT_SKU_DEBUG']);
@@ -69,6 +69,15 @@ async function sendProductTabMessage(tabId, message) {
         try { await pending; }
         finally { if (productBridgeConnections.get(tabId) === pending) productBridgeConnections.delete(tabId); }
     } else await productBridgeConnections.get(tabId);
-    try { return await chrome.tabs.sendMessage(tabId, message); }
+    try {
+        const capture = await chrome.tabs.sendMessage(tabId, message);
+        if (message.type === 'COLLECTOR_CAPTURE' && capture?.is_collectable) {
+            const source = new URL(capture.source_url);
+            const expected = new URL(tab.url);
+            if (source.origin !== expected.origin || source.pathname !== expected.pathname)
+                throw new Error('SOURCE_CHANGED');
+        }
+        return capture;
+    }
     catch { throw new Error('商品页读取中断，请等待页面加载完成后重新打开插件；若刚升级插件，请刷新商品页'); }
 }

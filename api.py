@@ -2234,13 +2234,13 @@ def guided_product(product_id: str) -> dict[str, Any]:
     from pipeline.guided_review import status as review_status
     from pipeline.listing_draft import card_ready
     from models import image_backend_settings
-    from models.image_plan import _list_reference_images
+    from pipeline.reference_images import selected_reference_images
 
     directory = _require_product(product_id)
     return {"ok": True, "product_id": product_id, "review": review_status(directory),
             "card_ready": card_ready(directory),
             "image_backend": image_backend_settings(),
-            "captured_reference_images": _list_reference_images(directory),
+            "captured_reference_images": selected_reference_images(directory, annotate=True),
             "copy_generation_status": __import__("pipeline.guided_workflow", fromlist=["copy_generation_status"]).copy_generation_status(directory),
             "workflow": __import__("pipeline.guided_workflow", fromlist=["workflow_status"]).workflow_status(directory),
             "video_library": __import__("pipeline.source_videos", fromlist=["list_source_videos"]).list_source_videos(directory),
@@ -2404,6 +2404,18 @@ app.include_router(publication_router)
 
 from workbench_rich_content_api import router as rich_content_router
 app.include_router(rich_content_router)
+
+from workbench_keyword_library_api import register_keyword_library_routes
+register_keyword_library_routes(app, runtime_root=lambda: MARKET_DB_PATH.parent)
+
+from workbench_collection_jobs_api import create_router as create_collection_jobs_router
+app.include_router(create_collection_jobs_router(lambda: PRODUCTS_ROOT, lambda: MARKET_DB_PATH.parent / "collector-jobs.sqlite3"))
+
+
+@app.get("/assets/employee-keywords.js", include_in_schema=False)
+def employee_keyword_library_script():
+    from fastapi.responses import FileResponse
+    return FileResponse(Path(__file__).resolve().parent / "web/employee-keywords.js", media_type="text/javascript")
 
 
 @app.get("/assets/listing-rich-content.js", include_in_schema=False)

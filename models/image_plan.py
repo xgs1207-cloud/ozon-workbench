@@ -405,7 +405,11 @@ def build_image_plan(
             "图片规划需要文案提供俄文文字（core_keyword / title_ru）：先生成 output/copy-ru.json"
         )
 
-    references = _list_reference_images(product_dir)
+    if studio_mode:
+        from pipeline.reference_images import selected_reference_images
+        references = selected_reference_images(product_dir)
+    else:
+        references = _list_reference_images(product_dir)
     main_refs = [item for item in references if item["role"] == "main"]
     sku_refs = [item for item in references if item["role"] == "sku"]
     detail_refs = [item for item in references if item["role"] == "detail"]

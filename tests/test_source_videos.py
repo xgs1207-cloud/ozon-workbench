@@ -156,12 +156,16 @@ class SourceVideoTests(_VideoFixture):
         path, mime = videos.video_file(self.directory, result["video_id"])
         self.assertEqual(path.suffix, ".mov")
         self.assertEqual(mime, "video/quicktime")
-    def test_download_is_explicit_size_limited_and_reuses_stored_file(self):
+    def test_source_verification_is_explicit_memory_only_and_reuses_metadata(self):
         video_id = self.initialize()
-        with patch.object(videos, "_open_video", side_effect=remote(Response())) as fetch:
+        with patch.object(videos, "_open_video", side_effect=remote(Response())) as fetch, \
+             patch.object(videos, "_inspect_bytes", return_value={"media_verified": True,
+                         "duration_seconds": 24, "width": 720, "height": 1280}):
             result = videos.download_source_video(self.directory, video_id)
-            self.assertEqual(result["status"], "stored")
-            self.assertEqual(result["transfer_source"], "source_download")
+            self.assertEqual(result["status"], "source_ready")
+            self.assertEqual(result["transfer_source"], "source_memory_probe")
+            self.assertFalse(result["has_file"])
+            self.assertFalse((self.directory / videos.VIDEO_DIRECTORY).exists())
             videos.download_source_video(self.directory, video_id)
             fetch.assert_called_once_with(SIGNED)
     def test_failed_downloads_keep_product_and_original_video_evidence(self):
@@ -177,6 +181,28 @@ class SourceVideoTests(_VideoFixture):
             private = json.loads((self.directory / videos.MANIFEST_PATH).read_text(encoding="utf-8"))
             self.assertEqual(private["videos"][0]["source_url"], SIGNED)
             self.assertFalse(result["has_file"])
+
+    def test_memory_snapshot_is_bounded_and_failure_releases_transfer_capacity(self):
+        video_id = self.initialize()
+        with patch.object(videos, "_open_video", side_effect=remote(Response())):
+            with self.assertRaises(ValueError):
+                with videos.source_video_snapshot(self.directory, video_id, max_bytes=10):
+                    self.fail("oversize snapshot must not be yielded")
+        with patch.object(videos, "_open_video", side_effect=remote(Response())), \
+             patch.object(videos, "_inspect_bytes", return_value={"media_verified": True,
+                         "duration_seconds": 24, "width": 720, "height": 1280}):
+            with videos.source_video_snapshot(self.directory, video_id) as snapshot:
+                self.assertEqual(snapshot["body"], MP4)
+                self.assertEqual(snapshot["size_bytes"], len(MP4))
+        self.assertFalse((self.directory / videos.VIDEO_DIRECTORY).exists())
+
+    def test_source_refresh_failure_is_not_advertised_as_listing_ready(self):
+        video_id = self.initialize()
+        with patch.object(videos, "_open_video", side_effect=videos._TransferError("needs_refresh")):
+            result = videos.download_source_video(self.directory, video_id)
+        self.assertFalse(result["can_publish"])
+        self.assertTrue(result["can_prepare"])
+        self.assertTrue(result["requires_source_refresh"])
     def test_login_or_expired_signature_is_not_retried_with_browser_credentials(self):
         video_id = self.initialize()
         with patch.object(videos, "_open_video", side_effect=videos._TransferError("needs_refresh")) as fetch:

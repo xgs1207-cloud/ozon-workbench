@@ -222,6 +222,24 @@ def find_existing_capture(products_root: Path | str, source_url: str) -> dict[st
     return matches[-1]
 
 
+def find_capture_request(products_root: Path | str, request_id: str) -> dict[str, Any] | None:
+    """Recover only an already completed, exact request; never a same-offer guess."""
+    for product_id in _existing_product_ids(Path(products_root)):
+        directory = Path(products_root) / product_id
+        source = _read_json(directory / "input" / "source.json")
+        if source.get("capture_request_id") != request_id or not (directory / "status.json").is_file():
+            continue
+        return {"product_id": product_id, "status": "COLLECTED", "collection_id": source["collection_id"],
+                "capture_request_sha256": source.get("capture_request_sha256"),
+                "version": source.get("version", 1), "duplicate_of": source.get("duplicate_of"),
+                "sku_selection_required": source.get("sku_selection_required", False), "warnings": [],
+                "counts": {"skus": len(source.get("skus") or []), "videos": len(source.get("videos") or []),
+                           "main_images": source.get("images", {}).get("main", 0),
+                           "sku_images": source.get("images", {}).get("sku", 0),
+                           "detail_images": source.get("images", {}).get("detail", 0)}}
+    return None
+
+
 # --------------------------------------------------------------------- 载荷校验
 
 
@@ -334,11 +352,15 @@ def normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
                 images["sku"].append({"url": str(url), "name": sku["sku_id"], "sku_id": sku["sku_id"]})
 
     video_metadata = normalize_videos(payload.get("videos"), source_url, sku_ids={sku["sku_id"] for sku in skus})
+    request_id = str(payload.get("capture_request_id") or "")
+    if request_id and not re.fullmatch(r"[a-zA-Z0-9_-]{16,80}", request_id):
+        raise CaptureValidationError("采集请求标识无效")
     return {
         "source_url": source_url,
         "offer_id": offer_id_of(source_url),
         "title_zh": payload.get("title_zh") or payload.get("title") or payload.get("title_cn"),
         "captured_at": payload.get("captured_at") or now_iso(),
+        "capture_request_id": request_id or None,
         "skus": skus,
         "collection_mode": "all_skus" if collect_all else "selected_skus",
         "category": normalized_category,
@@ -555,6 +577,29 @@ def _write_manifest(
 
 
 def ingest_capture(
+    products_root: Path | str, payload: Mapping[str, Any], *,
+    allow_new_version: bool = False, source_kind: str = SOURCE_KIND_WORKBENCH,
+) -> dict[str, Any]:
+    """Keep different offers independent and same-offer/version checks serialized."""
+    from pipeline.product_edit_lock import product_edit_lock
+
+    root = Path(products_root)
+    normalized = normalize_payload(payload)
+    offer_key = hashlib.sha256(str(normalized["offer_id"] or normalized["source_url"]).encode("utf-8")).hexdigest()
+    with product_edit_lock(root / f".capture-offer-{offer_key}"):
+        request_id = normalized.get("capture_request_id")
+        if request_id:
+            completed = find_capture_request(root, request_id)
+            if completed:
+                digest = hashlib.sha256(json.dumps(dict(payload), ensure_ascii=False, sort_keys=True,
+                                                  separators=(",", ":")).encode("utf-8")).hexdigest()
+                if digest != completed.get("capture_request_sha256"):
+                    raise CaptureValidationError("同一采集请求不能更换商品数据")
+                return completed
+        return _ingest_capture(root, payload, allow_new_version=allow_new_version, source_kind=source_kind)
+
+
+def _ingest_capture(
     products_root: Path | str,
     payload: Mapping[str, Any],
     *,
@@ -575,10 +620,15 @@ def ingest_capture(
         duplicate_of = existing["product_id"]
         version = int(existing.get("version") or 1) + 1
 
-    product_id = allocate_product_id(root)
-    product_dir = root / product_id
-    (product_dir / "input").mkdir(parents=True, exist_ok=True)
-    (product_dir / "output").mkdir(parents=True, exist_ok=True)
+    # Reserve the ID and directory under a short cross-process lock, then let
+    # distinct offers download independently without sharing the same P number.
+    from pipeline.product_edit_lock import product_edit_lock
+    with product_edit_lock(root / ".capture-allocation"):
+        product_id = allocate_product_id(root)
+        product_dir = root / product_id
+        product_dir.mkdir(exist_ok=False)
+        (product_dir / "input").mkdir()
+        (product_dir / "output").mkdir()
 
     collection_id = new_collection_id()
     warnings: list[str] = []
@@ -603,6 +653,10 @@ def ingest_capture(
         "offer_id": normalized["offer_id"],
         "title_zh": normalized["title_zh"],
         "captured_at": normalized["captured_at"],
+        "capture_request_id": normalized.get("capture_request_id"),
+        "capture_request_sha256": hashlib.sha256(json.dumps(dict(payload), ensure_ascii=False, sort_keys=True,
+                                                           separators=(",", ":")).encode("utf-8")).hexdigest()
+            if normalized.get("capture_request_id") else None,
         "ingested_at": now_iso(),
         "version": version,
         "duplicate_of": duplicate_of,

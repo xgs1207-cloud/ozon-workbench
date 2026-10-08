@@ -32,10 +32,9 @@ def media_state(directory: Path | str) -> dict[str, Any]:
                   for state in ("queued", "running", "failed", "unknown", "stale")}
         sets.append({**entry, "slots": names, "total": len(names), "completed": completed, **counts,
                      "unstarted": sum(name not in newest and name not in indexed for name in names)})
-    from models.image_plan import _list_reference_images
+    from .reference_images import selected_reference_images
     source = read_json(directory / "input/source.json")
-    references = [{**row, "source_sku_ids": sorted(image_jobs._reference_owners(source, row["path"]))}
-                  for row in _list_reference_images(directory)]
+    references = selected_reference_images(directory, annotate=True)
     registry = [{"reference_id": row["id"], "source_path": row["path"], "source_sku_ids": row["source_sku_ids"],
                  "adoptions": [{"slot": entry.get("slot"), "path": entry.get("path"), "workspace": entry.get("workspace", "single"),
                                 "set_id": entry.get("set_id"), "sha256": entry.get("sha256")}

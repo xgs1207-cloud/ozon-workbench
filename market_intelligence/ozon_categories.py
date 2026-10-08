@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
-import os
-import tempfile
-import time
 from pathlib import Path
 from typing import Any, Mapping
 
 from pipeline.ozon_http import OzonClient, OzonCredentials, UrllibTransport
 from pipeline.stores import ensure_registry, list_shops
+from pipeline.category_cache import read_cache, shop_generation, write_cache
 
 
 def _client(shop_id: str | None) -> tuple[OzonClient, str]:
@@ -36,26 +33,20 @@ def load_tree(cache_root: Path | str, *, shop_id: str | None = None, refresh: bo
         client, resolved_id = _client(shop_id)
     scope = hashlib.sha256(f"{resolved_id}:{language}".encode("utf-8")).hexdigest()[:24]
     target = Path(cache_root) / f"ozon-category-tree-{scope}.json"
-    if not refresh and target.is_file() and time.time() - target.stat().st_mtime < 86400:
-        try:
-            cached = json.loads(target.read_text(encoding="utf-8"))
-            if (cached.get("result") and cached.get("shop_id") == resolved_id
-                    and cached.get("language") == language):
-                return {**cached, "cache_hit": True}
-        except (OSError, ValueError):
-            pass
+    generation = shop_generation(cache_root, resolved_id)
+    cached = read_cache(target, ttl=86400) if not refresh else None
+    if (cached and cached.get("result") and cached.get("shop_id") == resolved_id
+            and cached.get("language") == language):
+        return {**cached, "cache_hit": True}
     tree = client.fetch_category_tree(language=language)
     if not isinstance(tree.get("result"), list) or not tree["result"]:
         raise ValueError("Ozon 返回空类目树，无法确认真实类目")
     from datetime import datetime, timezone
     tree = {**tree, "shop_id": resolved_id, "language": language,
+            "cache_generation": generation,
             "fetched_at": datetime.now(timezone.utc).isoformat(), "cache_hit": False,
             "source": "ozon_seller_api", "api_endpoint": "/v1/description-category/tree"}
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=target.parent, delete=False) as handle:
-        json.dump(tree, handle, ensure_ascii=False)
-        temporary = handle.name
-    os.replace(temporary, target)
+    write_cache(target, tree)
     return tree
 
 

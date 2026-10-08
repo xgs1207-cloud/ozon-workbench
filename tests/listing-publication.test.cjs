@@ -44,6 +44,16 @@ test('supplier link allows only canonical collected 1688 offer URLs',()=>{
     for(const value of ['javascript:alert(1)','https://detail.1688.com.evil.test/offer/123.html','https://user:pass@detail.1688.com/offer/123.html','https://1688.com/offer/123.html'])assert.equal(h.context.publicationSourceUrl(value),'');
 });
 
+test('sourcing note displays the complete selected specification once and read-only',()=>{
+    const h=harness(),entry=h.ready();entry.data.source_note_auto=true;
+    entry.values.source_note='红色/内白 24cm/3.5L';
+    const html=h.context.publicationConfigHtml();
+    assert.match(html,/data-publication-input="source_note" readonly/);
+    assert.match(html,/红色\/内白 24cm\/3.5L/);
+    assert.equal((html.match(/data-publication-input="source_note"/g)||[]).length,1);
+    assert.match(html,/每个货号保存自己的完整规格/);
+});
+
 test('publication blocks missing, dirty, stale, ineligible and cross-shop configurations',()=>{
     const h=harness();assert.throws(()=>h.context.publicationRequireReady(),/读取仓库配置/);
     const entry=h.ready();assert.deepEqual(plain(h.context.publicationRequireReady().items).map(row=>row.stock),[100,100]);

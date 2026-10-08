@@ -19,7 +19,7 @@ from pipeline.video_publish import (
     validate_cos_video_publication,
 )
 from tests.test_oss_cos import FakeCosClient
-from tests.test_source_videos import MP4, MOV, SOURCE
+from tests.test_source_videos import MP4, MOV, SOURCE, SIGNED, Response, remote
 
 
 class VideoCosClient(FakeCosClient):
@@ -40,7 +40,7 @@ class VideoCosClient(FakeCosClient):
         return super().put_object(**kwargs)
 
 
-class VideoPublishTests(unittest.TestCase):
+class _VideoPublishFixture(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -77,6 +77,8 @@ class VideoPublishTests(unittest.TestCase):
     def puts(self):
         return [row for action, row in self.client.calls if action == "put_object"]
 
+
+class VideoPublishTests(_VideoPublishFixture):
     def test_explicit_publication_saves_canonical_selection_and_owned_proof(self):
         video_id = self.uploaded()
         original_source = (self.directory / "input/source.json").read_bytes()
@@ -303,6 +305,113 @@ class VideoPublishTests(unittest.TestCase):
             self.publish([self.choice(video_id)])
         self.assertEqual(ledger.read_text(encoding="utf-8"), "corrupt-but-preserved")
         self.assertEqual(self.client.calls, [])
+
+
+class MemoryOnlyVideoPublishTests(_VideoPublishFixture):
+    """The synthetic CDN snapshot is kept in RAM; storage and probes are mocked."""
+
+    def captured(self, url=SIGNED, **extra):
+        rows = videos.normalize_videos([{"source_url": url, **extra}], SOURCE, sku_ids={"S1", "S2"})["videos"]
+        videos.initialize_video_manifest(self.directory, rows)
+        return rows[0]["video_id"]
+
+    def inspect_memory(self, **extra):
+        return patch.object(videos, "_inspect_bytes", return_value={"media_verified": True,
+            "duration_seconds": 24, "width": 720, "height": 1280, **extra})
+
+    def test_captured_supplier_url_goes_to_cos_without_local_video_files(self):
+        video_id = self.captured()
+        with patch.object(videos, "_open_video", side_effect=remote(Response())) as fetch, self.inspect_memory():
+            result = self.publish([self.choice(video_id)])
+        self.assertEqual(result["uploaded"], 1)
+        fetch.assert_called_once_with(SIGNED)
+        self.assertFalse((self.directory / videos.VIDEO_DIRECTORY).exists())
+        private = videos._load_manifest(self.directory)["videos"][0]
+        self.assertNotIn("stored_path", private)
+        self.assertIs(private["local_persistence"], False)
+        self.assertEqual(private["status"], "published")
+        self.assertEqual(private["source_url"], SIGNED)
+        public = videos.list_source_videos(self.directory)["videos"][0]
+        self.assertFalse(public["has_file"])
+        self.assertEqual(public["published_url"], result["videos"][0]["url"])
+        self.assertNotIn("private-test-value", json.dumps(result))
+        self.assertNotIn("private-test-value", json.dumps(public))
+        self.assertEqual(videos.validate_listing_videos(self.directory, result["selection"]), result["videos"])
+        from pipeline.ozon_write import _video_entry
+        compiled = _video_entry(result["videos"][0])
+        self.assertEqual(compiled["attributes"][0]["values"], [{"value": result["videos"][0]["url"]}])
+        self.assertEqual([item["id"] for item in compiled["attributes"]], [21841, 21837])
+
+    def test_retry_of_published_remote_video_does_not_refetch_expiring_supplier_url(self):
+        video_id = self.captured()
+        with patch.object(videos, "_open_video", side_effect=remote(Response())), self.inspect_memory():
+            first = self.publish([self.choice(video_id)])
+        with patch.object(videos, "_open_video", side_effect=AssertionError("must not refetch")) as fetch:
+            second = self.publish([self.choice(video_id)])
+        fetch.assert_not_called()
+        self.assertEqual(second["reused"], 1)
+        self.assertEqual(len(self.puts()), 1)
+        self.assertEqual(first["videos"][0]["url"], second["videos"][0]["url"])
+
+    def test_remote_media_is_validated_before_storage_and_preserves_capture_on_failure(self):
+        for extra in ({"duration_seconds": 2}, {"width": 640, "height": 720}, {"media_verified": False}):
+            video_id = self.captured()
+            with patch.object(videos, "_open_video", side_effect=remote(Response())), self.inspect_memory(**extra):
+                with self.assertRaises(ValueError):
+                    self.publish([self.choice(video_id)])
+            self.assertEqual(self.client.calls, [])
+            self.assertEqual(videos._load_manifest(self.directory)["videos"][0]["source_url"], SIGNED)
+            self.assertFalse((self.directory / videos.VIDEO_DIRECTORY).exists())
+
+    def test_remote_rights_binding_title_gates_precede_network(self):
+        video_id = self.captured(sku_ids=["S1"])
+        for choices, rights in (([self.choice(video_id)], False),
+                                ([self.choice(video_id, source_sku_id="S2")], True),
+                                ([self.choice(video_id, title="")], True)):
+            with patch.object(videos, "_open_video") as fetch:
+                with self.assertRaises(ValueError):
+                    self.publish(choices, rights)
+                fetch.assert_not_called()
+        self.assertEqual(self.client.calls, [])
+
+    def test_remote_partial_failure_retries_only_unpublished_media_and_preserves_selection(self):
+        first = self.captured()
+        second_url = "https://cloud.video.taobao.com/play/second.mp4"
+        second = self.captured(second_url)
+        body = MP4 + b"second"
+        self.client.fail_key = self.storage.video_key_for(self.directory.name, second, hashlib.sha256(body).hexdigest(), ".mp4")
+        prior = {"rights_confirmed": False, "videos": []}
+        write_json(self.directory / SELECTION_FILE, prior)
+        with patch.object(videos, "_open_video", side_effect=lambda url: remote(Response(body if url == second_url else MP4))(url)), self.inspect_memory():
+            with self.assertRaises(ValueError):
+                self.publish([self.choice(first), self.choice(second)])
+        self.assertEqual(read_json(self.directory / SELECTION_FILE), prior)
+        self.assertEqual([row["video_id"] for row in read_json(self.directory / PUBLICATIONS_FILE)["entries"]], [first])
+        self.assertFalse((self.directory / videos.VIDEO_DIRECTORY).exists())
+        self.client.fail_key = None
+        with patch.object(videos, "_open_video", side_effect=remote(Response(body))) as fetch, self.inspect_memory():
+            result = self.publish([self.choice(first), self.choice(second)])
+        fetch.assert_called_once_with(second_url)
+        self.assertEqual(result["reused"], 1)
+        self.assertEqual(result["uploaded"], 1)
+
+    def test_remote_publication_rejects_manifest_metadata_tampering(self):
+        video_id = self.captured()
+        with patch.object(videos, "_open_video", side_effect=remote(Response())), self.inspect_memory():
+            result = self.publish([self.choice(video_id)])
+        manifest = videos._load_manifest(self.directory)
+        manifest["videos"][0]["width"] = 1080
+        videos._write_manifest(self.directory, manifest)
+        with self.assertRaises(ValueError):
+            videos.validate_listing_videos(self.directory, result["selection"])
+
+    def test_remote_only_asset_cannot_replace_cos_receipt_with_unrelated_share_link(self):
+        video_id = self.captured()
+        with patch.object(videos, "_open_video", side_effect=remote(Response())), self.inspect_memory():
+            result = self.publish([self.choice(video_id)])
+        selection = {"rights_confirmed": True, "videos": [{**result["videos"][0], "url": "https://vk.com/video-123_456"}]}
+        with self.assertRaises(ValueError):
+            videos.validate_listing_videos(self.directory, selection)
 
 
 class AnonymousVideoProbeTests(unittest.TestCase):

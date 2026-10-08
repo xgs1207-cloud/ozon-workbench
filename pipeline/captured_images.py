@@ -44,8 +44,11 @@ def capture_proof(directory: Path | str, source_path: str, *, source_sku_id: str
     if source_path not in (source.get("stored_images") or []):
         raise ValueError("原图不在当前商品的已封存采集清单中")
     owners = _reference_owners(source, source_path)
-    if owners - selected:
+    if owners and not owners.intersection(selected):
         raise ValueError("原图明确属于未选规格，请选择已确认的上架规格图片")
+    from .reference_images import selected_reference_images
+    if source_path not in {row["path"] for row in selected_reference_images(root)}:
+        raise ValueError("原图缺少明确规格关联，请选择已确认规格的图片")
     if source_sku_id and (source_sku_id not in selected or (owners and source_sku_id not in owners)):
         raise ValueError("原图与此图位的上架规格不一致")
     if owners and source_sku_id is None:

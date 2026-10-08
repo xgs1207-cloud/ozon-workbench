@@ -282,13 +282,14 @@ document.addEventListener('click',async e=>{const b=e.target.closest('[data-op-a
 async function startWorkbench(){await load();const productId=new URLSearchParams(location.search).get('product_id');if(productId&&/^P\d{6}$/.test(productId)){try{await fetchProduct(productId)}catch(e){notice('采集商品读取失败：'+e.message,true)}}}
 startWorkbench();
 </script>
-<link rel="stylesheet" href="/assets/listing-bench.css?v=20261008-copy3">
-<link rel="stylesheet" href="/assets/listing-rich-content.css?v=20261008-copy3">
-<script src="/assets/listing-flow.js?v=20261008-copy3"></script>
-<script src="/assets/listing-card.js?v=20261008-copy3"></script>
-<script src="/assets/listing-media.js?v=20261008-copy3"></script>
-<script src="/assets/listing-publication.js?v=20261008-copy3"></script>
-<script src="/assets/listing-rich-content.js?v=20261008-copy3"></script>
-<script src="/assets/image-preview.js?v=20261008-copy3"></script>
+<link rel="stylesheet" href="/assets/listing-bench.css?v=20261008-collector1">
+<link rel="stylesheet" href="/assets/listing-rich-content.css?v=20261008-collector1">
+<script src="/assets/listing-flow.js?v=20261008-collector1"></script>
+<script src="/assets/listing-card.js?v=20261008-collector1"></script>
+<script src="/assets/listing-media.js?v=20261008-collector1"></script>
+<script src="/assets/listing-publication.js?v=20261008-collector1"></script>
+<script src="/assets/listing-rich-content.js?v=20261008-collector1"></script>
+<script src="/assets/image-preview.js?v=20261008-collector1"></script>
+<script src="/assets/employee-keywords.js?v=20261008-collector1"></script>
 </body>
 </html>

@@ -119,6 +119,26 @@ def source_url(directory: Path) -> str:
     return ""
 
 
+def source_specifications(directory: Path | str) -> dict[str, str]:
+    """Supplier specifications, per source SKU; never translate or invent values."""
+    from .sku_selection import active_skus
+    root = Path(directory)
+    source = read_json(root / "input/source.json")
+    result = {}
+    for sku in active_skus(root, source.get("skus") or []):
+        values = []
+        for option in sku.get("option_values") or []:
+            if not isinstance(option, Mapping):
+                continue
+            value = option.get("value_cn") or option.get("value")
+            if isinstance(value, str) and value.strip():
+                values.append(value.strip())
+        specification = " ".join(values) or str(sku.get("name_cn") or sku.get("name") or "").strip()
+        if specification and specification not in {"未指定", "unknown", "未知"}:
+            result[str(sku.get("sku_id"))] = specification
+    return result
+
+
 def transport_for_shop(shop: str, *, registry=None, transport_factory=None):
     from .stores import load_registry, list_shops
     from .ozon_http import OzonCredentials, UrllibTransport
@@ -193,7 +213,7 @@ def _scope(directory: Path, shop: str) -> dict:
     skus = [str(row.get("sku_id")) for row in active_skus(directory, source.get("skus") or [])]
     offers = read_offer_ids(directory, shop).get("offers") or {}
     return {"shop": shop, "sku_ids": skus, "offers": {sku: offers.get(sku) for sku in skus},
-            "source_url": source_url(directory)}
+            "source_url": source_url(directory), "source_note_by_sku": source_specifications(directory)}
 
 
 def read_config(directory: Path | str, *, shop: str, db_path=None) -> dict:
@@ -212,7 +232,9 @@ def read_config(directory: Path | str, *, shop: str, db_path=None) -> dict:
     return {**stored, "shop": shop, "warehouse_id": stored.get("warehouse_id"),
             "warehouse_name": warehouse.get("name") if warehouse else stored.get("warehouse_name"),
             "stock": stored.get("stock", 100), "stock_by_sku": stored.get("stock_by_sku", {}),
-            "source_note": stored.get("source_note", ""), "source_url": scope["source_url"],
+            "source_note": "；".join(dict.fromkeys(scope["source_note_by_sku"].values()))[:500] or stored.get("source_note", ""),
+            "source_note_by_sku": scope["source_note_by_sku"],
+            "source_note_auto": bool(scope["source_note_by_sku"]), "source_url": scope["source_url"],
             "sku_ids": scope["sku_ids"], "saved": bool(stored) and not stale,
             "stale": stale, "eligible": bool(warehouse and warehouse.get("eligible")),
             "frozen": intent_exists or recorded_attempt or not submission_editable(directory),
@@ -244,7 +266,9 @@ def save_config(directory: Path | str, *, shop: str, warehouse_id: Any, stock: i
         if not isinstance(source_note, str) or len(source_note) > 500:
             raise ValueError("员工备注最多 500 字")
         saved = {"shop": shop, "warehouse_id": warehouse_id, "warehouse_name": warehouse["name"],
-                 "stock": stock, "stock_by_sku": overrides, "source_note": source_note,
+                 "stock": stock, "stock_by_sku": overrides,
+                 "source_note": "；".join(dict.fromkeys(scope["source_note_by_sku"].values()))[:500] or source_note,
+                 "source_note_by_sku": scope["source_note_by_sku"],
                  "input_fingerprint": _hash(scope), "saved_at": _now()}
         body = read_json(directory / CONFIG_FILE)
         body.setdefault("shops", {})[shop] = saved
@@ -315,7 +339,8 @@ def record_import_attempt(directory: Path | str, shop: str, payload: Mapping, *,
                 configured = bool(intent and intent.get("offers", {}).get(sku) == offer)
                 row = {**row, "shop": shop, "offer_id": offer, "product_id": directory.name,
                        "source_sku_id": sku, "source_url": source_url(directory),
-                       "source_note": intent.get("source_note", "") if configured else row.get("source_note", ""),
+                       "source_note": (intent.get("source_note_by_sku", {}).get(sku, "" if intent.get("source_note_auto") else intent.get("source_note", ""))
+                                       if configured else row.get("source_note") or source_specifications(directory).get(sku, "")),
                        "import_status": state, "task_id": str(task_id) if task_id else row.get("task_id"),
                        "stock_status": row.get("stock_status") or ("pending_price" if configured else "not_configured")}
                 if configured:
@@ -350,7 +375,8 @@ def record_import_observation(directory: Path | str, shop: str, *, sku_id: str, 
                 raise ValueError("回读货号与上架记录的来源绑定不一致")
             row = {**row, "shop": shop, "offer_id": str(offer_id), "product_id": directory.name,
                    "source_sku_id": str(sku_id), "source_url": source_url(directory),
-                   "source_note": row.get("source_note", ""), "import_status": status or row.get("import_status", "unknown"),
+                   "source_note": row.get("source_note") or source_specifications(directory).get(str(sku_id), ""),
+                   "import_status": status or row.get("import_status", "unknown"),
                    "stock_status": row.get("stock_status", "not_configured")}
             if task_id:
                 row["task_id"] = str(task_id)

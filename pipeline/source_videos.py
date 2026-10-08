@@ -1,7 +1,8 @@
-"""Private, bounded source-video storage. No browser credentials or Ozon writes.
+"""Private source metadata and bounded, memory-only supplier video transfers.
 
-Capture only records metadata. Downloads/uploads are explicit user actions; changing
-these assets never changes the sealed input/source.json or input/source-manifest.json.
+Capture only records metadata. Supplier media is probed in RAM and uploaded to COS
+only on explicit actions. Legacy local files and manual uploads remain compatible;
+these assets never change sealed input/source.json or input/source-manifest.json.
 Signed source URLs are private and are never returned by the public listing helper.
 """
 from __future__ import annotations
@@ -10,6 +11,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 import http.client
+import io
 import ipaddress
 import json
 import math
@@ -21,6 +23,7 @@ import socket
 import ssl
 import subprocess
 import tempfile
+import threading
 import time
 from typing import Any, BinaryIO, Mapping
 from urllib.parse import urljoin, urlsplit
@@ -31,23 +34,26 @@ from pipeline.product_edit_lock import product_edit_lock
 MAX_VIDEO_BYTES = 100 * 1024 * 1024  # Workbench limit, not Ozon's platform limit.
 MAX_PRODUCT_BYTES = 500 * 1024 * 1024
 MAX_CAPTURE_VIDEOS = 30
+_REMOTE_TRANSFER_LOCK = threading.BoundedSemaphore(1)
 MANIFEST_PATH = "runtime/source-video-manifest.json"
 VIDEO_DIRECTORY = "runtime/source-videos"
 _ID = re.compile(r"^[a-zA-Z0-9_-]{1,100}$")
 _SHA = re.compile(r"^[0-9a-f]{64}$")
 _AUTH_QUERY = re.compile(r"(?:^|[&?])[^=&]*(?:token|sign|auth|credential|expires|key)[^=&]*=", re.I)
 _MESSAGES = {
-    "metadata_only": "视频地址已采集，尚未保存视频文件",
+    "metadata_only": "视频地址已采集；上架时直接传入对象存储，不保存本地视频",
+    "source_ready": "源视频元信息已校验；上架时直接传入对象存储，不保存本地视频",
+    "published": "原视频已上传对象存储并校验；本地仅保存地址与元信息",
     "not_loaded": "页面尚未加载可读取的视频地址，请正常打开商品视频后重新采集",
     "unsupported_blob": "浏览器临时 blob 视频地址不能在服务器下载，请上传有使用权的原文件",
     "unsupported_stream": "HLS/DASH 流暂不支持；不会拼接分片或绕过保护",
     "protected_media": "受保护的视频不能自动保存，请使用有权使用的原文件",
     "unsupported_url": "视频地址不符合安全下载条件，可上传有使用权的 MP4/MOV 文件",
     "needs_refresh": "源地址已失效或要求登录，请正常刷新商品页面后重新采集，或上传原文件",
-    "download_failed": "视频保存失败，商品及视频元数据已保留，可稍后重试或上传原文件",
+    "download_failed": "源视频读取或校验失败，商品及视频元数据已保留，可稍后重试或重新采集",
     "too_large": "视频超过工作台文件大小或商品媒体总量上限",
     "invalid_media": "返回内容不是可识别的 MP4/MOV 视频文件，可能是登录页或错误页面",
-    "downloading": "正在保存视频文件",
+    "downloading": "正在以内存读取并校验源视频，不保存本地文件",
     "uploading": "正在保存上传视频",
     "stored": "原视频已私有保存；是否满足 Ozon 要求仍需上架前校验",
 }
@@ -154,6 +160,7 @@ def normalize_videos(rows: Any, source_url: str, *, sku_ids: set[str] | None = N
             "status": status, "message": _MESSAGES[status],
             "source_expires_at": None,  # Do not guess expiry from an opaque signature.
             "poster_is_ozon_video_cover": False,
+            "local_persistence": False,
         }
         if stable in seen:
             previous = videos[seen[stable]]
@@ -246,12 +253,17 @@ def _public_row(row: Mapping[str, Any]) -> dict[str, Any]:
     keys = ("video_id", "provider_video_id", "offer_id", "role", "title", "source", "network_source", "sku_ids",
             "mime_type", "duration_seconds", "width", "height", "captured_at", "status", "message",
             "sha256", "size_bytes", "media_verified", "stored_at", "transfer_source", "source_expires_at",
-            "sku_binding_unresolved")
+            "sku_binding_unresolved", "video_format", "published_url", "local_persistence")
     result = {key: row.get(key) for key in keys if key in row}
     result.update({"source_host": source_host, "poster_url": poster,
                    "poster_is_ozon_video_cover": False, "has_file": bool(row.get("stored_path")),
                    "can_download": bool(_safe_url(source)) and not row.get("stored_path") and row.get("status") not in {
-                       "unsupported_stream", "protected_media", "unsupported_blob", "downloading", "uploading"}})
+                       "unsupported_stream", "protected_media", "unsupported_blob", "downloading", "uploading"},
+                   "can_prepare": bool(_safe_url(source)) and not row.get("stored_path") and row.get("status") not in {
+                       "unsupported_stream", "protected_media", "unsupported_blob", "downloading", "uploading", "source_ready", "published"},
+                   "can_publish": bool(row.get("stored_path") or row.get("published_url") or _safe_url(source))
+                       and row.get("status") in {"metadata_only", "source_ready", "published", "stored"},
+                   "requires_source_refresh": row.get("status") == "needs_refresh"})
     return result
 
 
@@ -344,8 +356,9 @@ def validate_listing_video_url(value: Any, *, cover: bool = False,
 
 
 def validate_listing_videos(directory: Path | str, selection: Any, *,
-                            require_url: bool = True, reprobe: bool = False) -> list[dict[str, Any]]:
-    """Revalidate immutable local bytes and explicit bindings at save AND production.
+                            require_url: bool = True, reprobe: bool = False,
+                            allow_remote_pending: bool = False) -> list[dict[str, Any]]:
+    """Revalidate owned bytes/publication proofs and bindings at save AND production.
 
     Returns safe compiler rows with measured metadata. User-supplied duration,
     resolution, size, format and SHA values are never trusted or copied through.
@@ -404,36 +417,43 @@ def validate_listing_videos(directory: Path | str, selection: Any, *,
             raise ValueError("所选视频的采集规格关联与上架规格不一致，不能当作公共视频")
         if row.get("sku_binding_unresolved") and target_sku is None:
             raise ValueError("视频原始规格关联不明确，请人工选择对应规格，不能直接用于全部规格")
-        if row.get("status") != "stored" or not row.get("stored_path"):
-            raise ValueError("所选视频尚未私有保存，请先保存源视频或上传有权使用的原文件")
-        if not reprobe and row.get("media_verified") is not True:
+        local = row.get("status") == "stored" and bool(row.get("stored_path"))
+        remote_published = row.get("status") == "published" and row.get("local_persistence") is False
+        remote_pending = (not require_url and allow_remote_pending and not remote_published and not row.get("stored_path")
+                          and bool(_safe_url(row.get("source_url"))) and row.get("status") not in {
+                              "protected_media", "unsupported_stream", "unsupported_blob", "not_loaded", "unsupported_url"})
+        if not local and not remote_published and not remote_pending:
+            raise ValueError("所选视频没有可读取的供应商原地址或已核验对象存储地址，请重新采集")
+        if not remote_pending and not reprobe and row.get("media_verified") is not True:
             raise ValueError("视频真实时长和分辨率尚未验证；需本机ffprobe校验后才能用于上架")
         if item.get("sha256") is not None and item.get("sha256") != row.get("sha256"):
             raise ValueError("已选视频文件已被替换，请重新确认视频及其分享链接")
         if video_id not in verified:
-            path, mime = video_file(root, video_id, verify_hash=True)
-            if path.suffix not in {".mp4", ".mov"} or mime not in {"video/mp4", "video/quicktime"}:
-                raise ValueError("普通商品视频必须为MP4或MOV")
-            measured = _inspect_file(path) if reprobe else row
-            if measured.get("media_verified") is not True:
-                raise ValueError("视频真实时长和分辨率尚未验证；需本机ffprobe校验后才能用于上架")
-            duration, width, height = (_finite(measured.get(field)) for field in ("duration_seconds", "width", "height"))
-            if not duration or not 8 <= duration <= 300:
-                raise ValueError("普通商品视频时长必须为8–300秒")
-            if not width or not height or not 1080 <= max(width, height) <= 1920:
-                raise ValueError("普通商品视频长边分辨率必须为1080–1920像素")
-            size = row.get("size_bytes")
-            if isinstance(size, bool) or not isinstance(size, int) or not 1 <= size <= MAX_VIDEO_BYTES:
-                raise ValueError("视频文件超出工作台100MB上限")
-            verified[video_id] = {"format": path.suffix.lstrip("."), "size_bytes": size,
-                                  "duration_seconds": duration, "width": width, "height": height, "sha256": row["sha256"]}
+            if remote_pending:
+                # Preflight only. The server must replace this pending row with
+                # measured bytes before any storage write or listing selection.
+                verified[video_id] = {"remote_pending": True, "sha256": row.get("sha256")}
+            else:
+                if local:
+                    path, mime = video_file(root, video_id, verify_hash=True)
+                    if path.suffix not in {".mp4", ".mov"} or mime not in {"video/mp4", "video/quicktime"}:
+                        raise ValueError("普通商品视频必须为MP4或MOV")
+                    measured = _inspect_file(path) if reprobe else row
+                    measured = {**row, **measured, "format": path.suffix.lstrip(".")}
+                else:
+                    # Server-owned manifest + successful publication ledger are
+                    # the retained proof; original supplier signatures may expire.
+                    measured = {**row, "format": row.get("video_format")}
+                verified[video_id] = validate_measured_video(measured)
+        if remote_published and require_url and item.get("url") != row.get("published_url"):
+            raise ValueError("未落地源视频只能使用本商品已核验的对象存储地址")
         url = (validate_listing_video_url(item.get("url"), directory=root,
                video_id=video_id, sha256=verified[video_id]["sha256"]) if require_url else None)
         title = item.get("title")
         if not isinstance(title, str) or not title.strip() or len(title.strip()) > 200 or any(ord(c) < 32 for c in title):
             raise ValueError("请人工填写1–200字符的视频标题，不得含控制字符")
         for sku_id in targets:
-            identity = url if require_url else verified[video_id]["sha256"]
+            identity = url if require_url else verified[video_id].get("sha256") or video_id
             if identity in urls[sku_id]:
                 raise ValueError("同一上架规格不能重复使用同一视频分享链接")
             urls[sku_id].add(identity)
@@ -551,6 +571,113 @@ def _inspect_file(path: Path) -> dict[str, Any]:
         return {"media_verified": False}
 
 
+def validate_measured_video(row: Mapping[str, Any]) -> dict[str, Any]:
+    """The same measured-media gate for legacy files and memory-only transfers."""
+    if row.get("media_verified") is not True:
+        raise ValueError("视频真实时长和分辨率尚未验证；需要服务器 ffprobe 校验")
+    duration, width, height = (_finite(row.get(field)) for field in ("duration_seconds", "width", "height"))
+    if not duration or not 8 <= duration <= 300:
+        raise ValueError("普通商品视频时长必须为8–300秒")
+    if not width or not height or not 1080 <= max(width, height) <= 1920:
+        raise ValueError("普通商品视频长边分辨率必须为1080–1920像素")
+    size, digest, media_format = row.get("size_bytes"), row.get("sha256"), row.get("format")
+    if isinstance(size, bool) or not isinstance(size, int) or not 1 <= size <= MAX_VIDEO_BYTES:
+        raise ValueError("视频文件超出工作台100MB上限")
+    if not isinstance(digest, str) or not _SHA.fullmatch(digest) or media_format not in {"mp4", "mov"}:
+        raise ValueError("视频内容指纹或实际媒体类型无效")
+    return {"format": media_format, "size_bytes": size, "duration_seconds": duration,
+            "width": width, "height": height, "sha256": digest}
+
+
+def _inspect_bytes(body: bytes) -> dict[str, Any]:
+    """Probe seekable Linux RAM (memfd), or stdin; never create a disk file.
+
+    The server uses memfd so MP4s with a trailing moov atom remain seekable.
+    On systems without memfd, ffprobe's pipe support is used and fails closed
+    for files that require seeking. File/network protocols remain restricted.
+    """
+    executable = shutil.which("ffprobe")
+    if not executable:
+        return {"media_verified": False}
+    args = [executable, "-v", "error", "-protocol_whitelist", "file,pipe",
+            "-show_entries", "format=duration,format_name:stream=codec_type,width,height,duration", "-of", "json"]
+    descriptor = None
+    try:
+        if hasattr(os, "memfd_create"):
+            descriptor = os.memfd_create("ozon-video-probe", flags=getattr(os, "MFD_CLOEXEC", 0))
+            view, offset = memoryview(body), 0
+            while offset < len(view):
+                written = os.write(descriptor, view[offset:])
+                if written <= 0:
+                    raise OSError("RAM video probe write failed")
+                offset += written
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            response = subprocess.run(args + [f"/proc/self/fd/{descriptor}"], pass_fds=(descriptor,),
+                                      capture_output=True, timeout=15, check=True)
+        else:
+            response = subprocess.run(args + ["pipe:0"], input=body, capture_output=True,
+                                      timeout=15, check=True)
+        data = json.loads(response.stdout)
+        streams = [row for row in data.get("streams", []) if row.get("codec_type") == "video"]
+        if not streams:
+            return {"media_verified": False}
+        stream = streams[0]
+        duration = _finite(data.get("format", {}).get("duration")) or _finite(stream.get("duration"))
+        return {"media_verified": bool(duration and _finite(stream.get("width")) and _finite(stream.get("height"))),
+                "duration_seconds": duration, "width": _finite(stream.get("width")), "height": _finite(stream.get("height"))}
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        return {"media_verified": False}
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+@contextmanager
+def source_video_snapshot(directory: Path | str, video_id: str, *, max_bytes: int = MAX_VIDEO_BYTES):
+    """Fetch only the owned, supported CDN source; bounded memory, no cookies/files."""
+    row = _row(_load_manifest(directory), video_id)
+    if row.get("status") in {"protected_media", "unsupported_stream", "unsupported_blob", "not_loaded", "unsupported_url"}:
+        raise ValueError(row.get("message") or "源视频不可读取，请重新采集")
+    if not _REMOTE_TRANSFER_LOCK.acquire(timeout=10):
+        raise ValueError("其他视频正在传入对象存储，请稍后重试")
+    try:
+        limit = min(int(max_bytes), MAX_VIDEO_BYTES)
+        if limit <= 0:
+            raise ValueError("视频大小上限无效")
+        with _open_video(str(row.get("source_url") or "")) as response:
+            length = response.getheader("Content-Length")
+            if length and (not length.isdecimal() or int(length) > limit):
+                raise _TransferError("too_large")
+            mime = (response.getheader("Content-Type") or "").split(";", 1)[0].strip().lower()
+            if mime not in {"video/mp4", "video/quicktime", "application/octet-stream", "binary/octet-stream", ""}:
+                raise _TransferError("invalid_media")
+            buffer, started = io.BytesIO(), time.monotonic()
+            while True:
+                chunk = response.read(min(256 * 1024, limit - buffer.tell() + 1))
+                if not chunk:
+                    break
+                if buffer.tell() + len(chunk) > limit:
+                    raise _TransferError("too_large")
+                buffer.write(chunk)
+                if time.monotonic() - started > 120:
+                    raise _TransferError("download_failed")
+            body = buffer.getvalue()
+            buffer.close()
+        if length and len(body) != int(length):
+            raise _TransferError("invalid_media")
+        suffix, content_type = _container(body[:4096])
+        measured = {"sha256": hashlib.sha256(body).hexdigest(), "size_bytes": len(body),
+                    "format": suffix.lstrip("."), **_inspect_bytes(body)}
+        validated = validate_measured_video(measured)
+        yield {**validated, "body": body, "mime_type": content_type, "media_verified": True}
+    except _TransferError as error:
+        raise ValueError(_MESSAGES.get(error.status, _MESSAGES["download_failed"])) from None
+    except (OSError, http.client.HTTPException):
+        raise ValueError(_MESSAGES["download_failed"]) from None
+    finally:
+        _REMOTE_TRANSFER_LOCK.release()
+
+
 def _save_stream(directory: Path | str, stream: BinaryIO, max_bytes: int) -> dict[str, Any]:
     limit = min(int(max_bytes), MAX_VIDEO_BYTES)
     if limit <= 0:
@@ -606,6 +733,7 @@ def _save_stream(directory: Path | str, stream: BinaryIO, max_bytes: int) -> dic
                 temporary.chmod(0o600)
                 os.replace(temporary, target)
         return {"sha256": sha, "size_bytes": size, "stored_path": f"{VIDEO_DIRECTORY}/{sha}{suffix}",
+                "local_persistence": True,
                 "mime_type": mime, "stored_at": _now(), **_inspect_file(target)}
     finally:
         temporary.unlink(missing_ok=True)
@@ -627,12 +755,18 @@ def _finish(directory: Path | str, video_id: str, update: Mapping[str, Any], job
 
 
 def download_source_video(directory: Path | str, video_id: str, *, max_bytes: int = MAX_VIDEO_BYTES) -> dict[str, Any]:
-    """Explicit action only. Never accepts an arbitrary URL or forwards login cookies."""
+    """Legacy route now verifies source metadata in RAM, without persisting video.
+
+    Existing private files are retained for backward compatibility. New supplier
+    media is uploaded through publish_source_videos, not through a local library.
+    """
     with product_edit_lock(Path(directory)):
         data = _load_manifest(directory)
         row = _row(data, video_id)
         if row.get("stored_path"):
             video_file(directory, video_id)
+            return _public_row(row)
+        if row.get("status") in {"source_ready", "published"} and row.get("media_verified") is True:
             return _public_row(row)
         if row.get("status") in {"downloading", "uploading"}:
             started = _finite(row.get("transfer_started_at"))
@@ -640,26 +774,22 @@ def download_source_video(directory: Path | str, video_id: str, *, max_bytes: in
                 raise ValueError("视频正在保存，请稍后刷新")
         if row.get("status") in {"protected_media", "unsupported_stream", "unsupported_blob", "not_loaded"}:
             return _public_row(row)
-        source_url = row.get("source_url") or ""
         job_id = uuid.uuid4().hex
         row.update({"status": "downloading", "message": _MESSAGES["downloading"],
                     "transfer_job_id": job_id, "transfer_started_at": time.time()})
         _write_manifest(directory, data)
     try:
-        with _open_video(source_url) as response:
-            length = response.getheader("Content-Length")
-            if length and (not length.isdecimal() or int(length) > min(max_bytes, MAX_VIDEO_BYTES)):
-                raise _TransferError("too_large")
-            content_type = (response.getheader("Content-Type") or "").split(";")[0].strip().lower()
-            if content_type not in {"video/mp4", "video/quicktime", "application/octet-stream", "binary/octet-stream", ""}:
-                raise _TransferError("invalid_media")
-            result = _save_stream(directory, response, max_bytes)
-        return _finish(directory, video_id, {**result, "status": "stored", "message": _MESSAGES["stored"],
-                                            "transfer_source": "source_download"}, job_id)
+        with source_video_snapshot(directory, video_id, max_bytes=max_bytes) as snapshot:
+            result = {key: value for key, value in snapshot.items() if key != "body"}
+        result["video_format"] = result.pop("format")
+        return _finish(directory, video_id, {**result, "status": "source_ready", "message": _MESSAGES["source_ready"],
+                                            "local_persistence": False, "transfer_source": "source_memory_probe"}, job_id)
     except _TransferError as error:
         return _finish(directory, video_id, {"status": error.status, "message": _MESSAGES[error.status]}, job_id)
-    except (OSError, http.client.HTTPException, ValueError):
-        return _finish(directory, video_id, {"status": "download_failed", "message": _MESSAGES["download_failed"]}, job_id)
+    except (OSError, http.client.HTTPException, ValueError) as error:
+        # The snapshot helper exposes only sanitized messages, never signed URLs.
+        status = next((key for key, message in _MESSAGES.items() if str(error) == message), "download_failed")
+        return _finish(directory, video_id, {"status": status, "message": _MESSAGES[status]}, job_id)
 
 
 def store_uploaded_video(directory: Path | str, stream: BinaryIO, filename: str, *,

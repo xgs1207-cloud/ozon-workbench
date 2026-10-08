@@ -445,22 +445,55 @@ async function checkDuplicate(sourceUrl) {
     return response.json();
 }
 async function postCapture(capture, allowNewVersion = false) {
-    const body = { ...capture };
-    if (allowNewVersion)
-        body.allow_new_version = true;
-    const response = await factoryFetch(`/api/collector/products${allowNewVersion ? '?allow_new_version=true' : ''}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body)
-    });
-    const result = await response.json();
-    if (!response.ok) {
-        const error = new Error(result.detail ? JSON.stringify(result.detail) : `HTTP ${response.status}`);
-        error.status = response.status;
-        error.body = result;
-        throw error;
-    }
+    const requestId = crypto.randomUUID();
+    const result = await collectorBackgroundRequest('/api/collector/jobs', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ request_id: requestId, capture, allow_new_version: allowNewVersion }) });
+    // The service worker persists the ID before sending, including when the
+    // popup closes before its callback. Captures themselves stay server-side.
+    refreshCaptureJobs().catch(() => {});
     return result;
+}
+async function collectorBackgroundRequest(path, options = {}) {
+    return new Promise((resolve, reject) => chrome.runtime.sendMessage({ type: 'FACTORY_FETCH', path, options }, response => {
+        if (chrome.runtime.lastError || !response?.ok)
+            return reject(new Error('连接中断，请重新打开插件核对采集任务，勿盲目重复采集'));
+        let body;
+        try { body = JSON.parse(response.body || '{}'); }
+        catch { return reject(new Error('采集任务返回格式异常，请重新打开插件核对')); }
+        if (response.status < 200 || response.status >= 300)
+            return reject(new Error(typeof body.detail === 'string' ? body.detail : `采集任务 HTTP ${response.status}`));
+        resolve(body);
+    }));
+}
+let captureJobsTimer = null;
+async function refreshCaptureJobs() {
+    const container = document.getElementById('capture-jobs');
+    if (!container) return;
+    const stored = await chrome.storage.local.get(['collectorCaptureJobs']);
+    const jobs = Array.isArray(stored.collectorCaptureJobs) ? stored.collectorCaptureJobs : [];
+    let active = false;
+    for (const job of jobs) {
+        if (job.base_url !== factoryConfig.baseUrl) continue;
+        if (['queued', 'running', 'interrupted', 'unconfirmed'].includes(job.state)) {
+            try { Object.assign(job, await collectorBackgroundRequest(`/api/collector/jobs/${encodeURIComponent(job.request_id)}`)); }
+            catch { /* keep the last acknowledged state, never repeat the POST */ }
+        }
+        if (['queued', 'running', 'unconfirmed'].includes(job.state)) active = true;
+    }
+    // Do not rewrite browser storage from a stale poll while another popup's
+    // new capture is being acknowledged by the service worker.
+    container.textContent = '';
+    const labels = { queued: '等待保存', running: '后台保存中', completed: '采集完成',
+        duplicate: '已采集过', failed: '保存失败', interrupted: '中断，需核对', unconfirmed: '提交状态待核对' };
+    for (const job of jobs.filter(job => job.base_url === factoryConfig.baseUrl).slice(0, 5)) {
+        const row = document.createElement('div');
+        row.textContent = `${labels[job.state] || '待核对'} · ${job.result?.product_id || job.result?.duplicate_of || ''} · ${job.title}`;
+        if (job.error) row.title = job.error;
+        container.appendChild(row);
+    }
+    clearTimeout(captureJobsTimer);
+    if (active) captureJobsTimer = setTimeout(() => refreshCaptureJobs().catch(() => {}), 2500);
 }
 async function postOzonReferencePage(capture) {
     const response = await factoryFetch("/api/collector/ozon-reference-page", {
@@ -501,12 +534,12 @@ async function captureCurrentProduct(allowNewVersion = false) {
                 return;
             }
         }
-        els.progress.textContent = `正在保存全部 ${capture.skus?.length || 0} 个规格、图片和 ${capture.videos?.length || 0} 段视频资料，请保持弹窗打开…`;
+        els.progress.textContent = `正在提交全部 ${capture.skus?.length || 0} 个规格、图片和 ${capture.videos?.length || 0} 段视频资料快照…`;
         const result = await postCapture({ ...capture, collection_mode: 'all_skus' }, allowNewVersion);
-        els.progress.textContent = `采集完成：${result.counts?.skus || 0} 个规格、${result.counts?.videos || 0} 段视频资料，请到工作台选择上架规格和保存视频`;
+        els.progress.textContent = result.state === 'completed'
+            ? `采集完成：${result.result?.counts?.skus || 0} 个规格；可继续采集其他商品`
+            : `已提交全部 ${capture.skus?.length || 0} 个规格、${capture.videos?.length || 0} 段视频资料到后台，可关闭弹窗并采集其他商品；不会自动打开工作台`;
         setResult(result);
-        await loadFactoryConfig();
-        chrome.tabs.create({ url: workbenchEntryUrl('1688', { product_id: result.product_id }), active: true });
     }
     catch (error) {
         els.progress.textContent = "采集失败";
@@ -529,10 +562,8 @@ async function captureCurrentOzonReference() {
         const result = await postOzonReferencePage(capture);
         els.progress.textContent = result.status === "waiting_ai_design"
             ? "Ozon参考页已采集，已进入AI商品卡生成"
-            : "Ozon参考页已采集，正在打开工作台";
+            : "Ozon参考页已采集，可继续采集其他商品";
         setResult(result);
-        await loadFactoryConfig();
-        chrome.tabs.create({ url: workbenchEntryUrl("ozon", { task_id: result.task?.task_id }), active: true });
     }
     catch (error) {
         els.progress.textContent = "Ozon参考页采集失败";
@@ -768,6 +799,7 @@ async function initialize() {
     els.marketToken.value = marketSettings.marketIngestToken || "";
     if (marketSettings.marketIngestToken)
         els.marketTokenStatus.textContent = "已从本机浏览器读取令牌；采集前会重新验证";
+    refreshCaptureJobs().catch(() => {});
     await loadPreview();
 }
 initialize().catch((error) => {

@@ -8,6 +8,7 @@ const read = name => fs.readFileSync(path.join(__dirname, '..', name), 'utf8');
 function contentHarness(extra = '') {
     const listeners = new Set(), pageListeners = new Set();
     const context = vm.createContext({ URL,
+        document: {createElement:()=>({get value(){return this.innerHTML || '';}})},
         location: { hostname: 'detail.1688.com', pathname: '/offer/1072823232979.html',
             origin: 'https://detail.1688.com', href: 'https://detail.1688.com/offer/1072823232979.html?share_token=test-only' },
         window: { addEventListener: (_name, fn) => pageListeners.add(fn),
@@ -19,7 +20,9 @@ function contentHarness(extra = '') {
     const load = () => vm.runInContext(read('content.js').replace(/\}\)\(\);\s*$/,
         `Object.assign(globalThis, {offerImgListDetailUrls, productReadFailure, is1688OfferPage,
             normalizeImageUrl, extractMainImages, extractDetailImages, extractDomSkuGroups,
-            buildDomPropertyImageData, applyDomPropertyImage, extractVideos}); ${extra} })();`), context);
+            buildDomPropertyImageData, applyDomPropertyImage, extractVideos, extractDomComboSkus,
+            normalizeSkuListItem, findSkuInfoForCombo, extractStructuredSkus, enrichSkuDimensions,
+            buildReadyCapture, cartesian, skuFromCombo}); ${extra} })();`), context);
     load();
     return { context, listeners, pageListeners, load };
 }
@@ -302,7 +305,7 @@ test('product script reinjection keeps exactly one runtime and page-data listene
     assert.equal(h.listeners.size, 1);
     assert.equal(h.pageListeners.size, 1);
     assert.equal([...h.listeners][0], listener);
-    assert.equal(h.context.__workbenchProductBridge.version, '0.4.34');
+    assert.equal(h.context.__workbenchProductBridge.version, '0.4.35');
 });
 
 test('invalidated product context is replaced without duplicate callbacks or declarations', () => {
@@ -443,7 +446,7 @@ test('1688 capture saves all variants without opening the SKU drawer or selectin
         els:{capture:{},duplicate:{},progress:{}},
         getActiveTab:async()=>({id:1}), sendToTab:async()=>({is_collectable:true,skus,videos,source_url:'https://detail.1688.com/offer/1072823232979.html'}),
         showSkuImageWarning:()=>{},checkDuplicate:async()=>({exists:false}),
-        postCapture:async(capture,newVersion)=>{posted.push({capture,newVersion});return {product_id:'P000002',counts:{skus:56,videos:1}};},
+        postCapture:async(capture,newVersion)=>{posted.push({capture,newVersion});return {request_id:'test-immutable-request',state:'queued'};},
         waitForSkuSelection:()=>{throw new Error('must not open drawer');},
         setResult:()=>{},loadFactoryConfig:async()=>{},workbenchEntryUrl:(_kind,extra)=>`http://127.0.0.1:8766/?product_id=${extra.product_id}`,
         chrome:{tabs:{create:o=>opened.push(o)}},
@@ -455,11 +458,103 @@ test('1688 capture saves all variants without opening the SKU drawer or selectin
     assert.equal(posted[0].capture.skus.length,56);
     assert.equal(posted[0].capture.videos,videos);
     assert.equal(posted[0].capture.ozon_category_selection,undefined);
-    assert.equal(opened.length,1);
-    assert.match(context.els.progress.textContent,/56.*工作台/);
+    assert.equal(opened.length,0);
+    assert.match(context.els.progress.textContent,/56.*后台/);
     assert.match(context.els.progress.textContent,/1 段视频资料/);
     assert.ok(!context.els.progress.textContent.includes('sign=private'));
     await vm.runInContext('captureCurrentProduct(true)',context);
     assert.equal(posted[1].newVersion,true);
-    assert.match(popup,/\/api\/collector\/products\$\{allowNewVersion \? '\?allow_new_version=true'/);
+    assert.match(popup,/collectorBackgroundRequest\('\/api\/collector\/jobs'/);
+});
+
+test('real spec values containing slashes retain full colour and volume labels', () => {
+    const h = contentHarness();
+    const result = vm.runInContext(`normalizeSkuListItem({skuId:'6281570506082',
+        specAttrs:'红色/内白>24cm/3.5L'},0,'script_init_data')`, h.context);
+    assert.deepEqual(Array.from(result.option_values, option => option.value_cn), ['红色/内白','24cm/3.5L']);
+});
+
+test('SKU map matching rejects partial IDs and non-existent cartesian combinations', () => {
+    const h = contentHarness();
+    const combo = JSON.stringify([{id:'12',name:'红色/内白'},{id:'30',name:'24cm/3.5L'}]);
+    assert.equal(vm.runInContext(`findSkuInfoForCombo(${combo},{'112>300':{skuId:'6281570506082'}})`, h.context), null);
+    assert.equal(vm.runInContext(`findSkuInfoForCombo(${combo},{'12>31':{skuId:'6281570506082'}})`, h.context), null);
+    const found = vm.runInContext(`findSkuInfoForCombo(${combo},{'红色/内白>24cm/3.5L':{skuId:'6281570506082'}})`, h.context);
+    assert.equal(found.value.skuId, '6281570506082');
+});
+
+function potDom(h) {
+    h.context.Element = FakeElement;
+    const choice = (name,image) => new FakeElement({className:'image-button',textContent:name,
+        attrs:{title:name},all:{img:[fakeImage(image)]}});
+    const colour = new FakeElement({className:'feature-item',one:{
+        '.feature-item-label h3, .feature-item-label':new FakeElement({textContent:'颜色'})},
+        all:{'.image-button, .text-button, .sku-item, .value-item, .feature-value, li, button, [role="button"], [data-value], [data-name]':[
+            choice('红色/内白','https://cbu01.alicdn.com/img/ibank/RED.jpg_sum.jpg'),
+            choice('南瓜橘/内白','https://cbu01.alicdn.com/img/ibank/ORANGE.jpg_sum.jpg')]}});
+    const size = new FakeElement({className:'feature-item',one:{
+        '.feature-item-label h3, .feature-item-label':new FakeElement({textContent:'规格'})},
+        all:{'.expand-view-item':[new FakeElement({className:'expand-view-item',one:{
+            '.item-label':new FakeElement({textContent:'24cm/3.5L'})}})]}});
+    h.context.document = {createElement:()=>({get value(){return this.innerHTML || '';}}),
+        querySelectorAll:selector => selector === '#skuSelection .feature-item, .module-od-sku-selection .feature-item'
+        ? [colour,size] : []};
+}
+
+test('screenshot pot image buttons plus singleton size produce exact full SKU labels and images', () => {
+    const h = contentHarness(); potDom(h);
+    const groups = vm.runInContext('extractDomSkuGroups()', h.context);
+    assert.deepEqual(Array.from(groups, group=>group.name), ['颜色','规格']);
+    const result = vm.runInContext('extractDomComboSkus(110)', h.context);
+    assert.deepEqual(Array.from(result.skus, sku=>sku.sku_name), ['红色/内白 24cm/3.5L','南瓜橘/内白 24cm/3.5L']);
+    assert.deepEqual(Array.from(result.skus, sku=>sku.image_url),
+        ['https://cbu01.alicdn.com/img/ibank/RED.jpg','https://cbu01.alicdn.com/img/ibank/ORANGE.jpg']);
+    assert.ok(result.skus.every(sku=>sku.option_values.length===2));
+    const enriched = vm.runInContext(`enrichSkuDimensions({sku_name:'红色/内白',
+        option_values:[{name_cn:'规格1',value_cn:'红色/内白'}]},extractDomSkuGroups())`, h.context);
+    assert.equal(enriched.sku_name,'红色/内白 24cm/3.5L');
+});
+
+test('structured map combinations are preferred over incomplete same-ID summaries', () => {
+    const h = contentHarness(); potDom(h);
+    const result = vm.runInContext(`extractStructuredSkus([{data:{
+        skuProps:[{prop:'颜色',values:[{valueId:'red',name:'红色/内白'}, {valueId:'orange',name:'南瓜橘/内白'}]},
+            {prop:'规格',values:[{valueId:'size24',name:'24cm/3.5L'}]}],
+        skuMap:{'red>size24':{skuId:'6281570506082',skuName:'红色/内白',price:110},
+            'orange>size24':{skuId:'6281570506083',skuName:'南瓜橘/内白',price:110}}
+    }}])`, h.context);
+    assert.equal(result.skus[0].sku_name,'红色/内白 24cm/3.5L');
+    assert.equal(result.skus[0].option_values.length,2);
+    assert.equal(result.skus[0].image_url,'https://cbu01.alicdn.com/img/ibank/RED.jpg');
+});
+
+test('navigation during DOM warming fails before mixing another offer snapshot', async () => {
+    const h = contentHarness(`warmAllSkuImages = async () => { location.pathname='/offer/9999999999999.html'; };
+        warmProductAttributeTables = async () => {throw new Error('must not continue')};`);
+    await assert.rejects(vm.runInContext('buildReadyCapture()',h.context), /页面已切换.*尚未提交/);
+});
+
+test('product transport rejects a capture returned for a foreign offer', async () => {
+    const h=bridgeHarness();
+    h.context.chrome.tabs.sendMessage=async()=>({is_collectable:true,
+        source_url:'https://detail.1688.com/offer/9999999999999.html'});
+    await assert.rejects(h.request({type:'COLLECTOR_CAPTURE'}), /读取中断/);
+});
+
+test('collection keeps more than 300 real combinations and rejects oversize instead of truncating',()=>{
+    const h=contentHarness();
+    const result=vm.runInContext(`cartesian([{values:Array.from({length:350},(_,id)=>({id,name:String(id)}))}])`,h.context);
+    assert.equal(result.length,350);
+    assert.throws(()=>vm.runInContext(`cartesian([{values:Array(100).fill({})},{values:Array(21).fill({})}])`,h.context),/不会静默截断/);
+});
+
+test('a SKU source never includes other SKU images or repeats the full offer map',()=>{
+    const h=contentHarness();
+    const sku=vm.runInContext(`skuFromCombo([{name:'红色/内白',id:'red',image_url:'unknown',
+        option:{name_cn:'颜色',value_cn:'红色/内白'},raw:{value:'红色/内白'}}],
+        {key:'red',value:{skuId:'6281570506082',price:110}},0,
+        {skuMap:{orange:{skuId:'6281570506083',imageUrl:'https://cbu01.alicdn.com/OTHER.jpg'}}})`,h.context);
+    assert.equal(sku.image_url,'unknown');
+    assert.ok(!JSON.stringify(sku.source_data).includes('OTHER.jpg'));
+    assert.equal(sku.source_data.source_data,undefined);
 });

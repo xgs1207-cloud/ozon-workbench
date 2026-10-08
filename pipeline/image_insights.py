@@ -116,24 +116,15 @@ def _snapshot(directory: Path, image_paths: Sequence[str] | None) -> dict[str, A
     collected = {str(path).replace("\\", "/") for path in raw.get("stored_images") or [] if isinstance(path, str)}
     if not collected:
         raise ValueError("没有登记的采集原图，请先采集商品图片")
-    bindings: dict[str, set[str]] = {}
-    for sku in raw.get("skus") or []:
-        if not isinstance(sku, Mapping):
-            continue
-        paths = [sku.get("image_path"), *(sku.get("image_refs") or [])]
-        for relative in paths:
-            if isinstance(relative, str) and relative:
-                bindings.setdefault(relative.replace("\\", "/"), set()).add(str(sku.get("sku_id")))
-    for row in raw.get("image_sources") or []:
-        if isinstance(row, Mapping) and row.get("path") and row.get("source_sku_id"):
-            bindings.setdefault(str(row["path"]).replace("\\", "/"), set()).add(str(row["source_sku_id"]))
+    from .image_jobs import _reference_owners
+    bindings = {relative: _reference_owners(raw, relative) for relative in collected}
+    from .reference_images import selected_reference_images
+    references = selected_reference_images(directory)
+    eligible = {row["path"] for row in references}
     if image_paths is None:
         # Prefer identity-bound selected SKU images. Do not silently analyze an
-        # unselected variant just because it appears first in the gallery.
-        known = [path for path in sorted(collected) if bindings.get(path)
-                 and bindings[path].issubset(set(sku_ids))]
-        shared = [path for path in sorted(collected) if not bindings.get(path)]
-        chosen = (known + shared)[:MAX_IMAGES]
+        # unselected OR unassociated variant from the sku-images directory.
+        chosen = [row["path"] for row in references if row["path"] in collected][:MAX_IMAGES]
     else:
         if isinstance(image_paths, (str, bytes)) or not isinstance(image_paths, Sequence):
             raise ValueError("参考图路径必须是数组")
@@ -146,8 +137,10 @@ def _snapshot(directory: Path, image_paths: Sequence[str] | None) -> dict[str, A
     for index, relative in enumerate(chosen, 1):
         if relative not in collected:
             raise ValueError("参考图未登记在当前商品采集记录中")
+        if relative not in eligible:
+            raise ValueError("参考图属于未选规格或缺少明确规格关联，请选择当前规格的图片")
         all_bindings = bindings.get(relative, set())
-        if all_bindings - set(sku_ids):
+        if all_bindings and not all_bindings.intersection(sku_ids):
             raise ValueError("参考图属于未选规格，请选择与当前上架规格一致的图片")
         data, mime = _image_bytes(_local_path(directory, relative))
         digest = hashlib.sha256(data).hexdigest()

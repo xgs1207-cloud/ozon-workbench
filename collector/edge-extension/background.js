@@ -6,6 +6,19 @@ const LEGACY_LOCAL_FACTORY_URLS = new Set([
     "http://localhost:8765"
 ]);
 const OZON_IMAGE_HOST_SUFFIXES = ["ozone.ru", "ozon.ru", "ozonusercontent.com"];
+let captureJobStorageLock = Promise.resolve();
+function storeCaptureJob(record) {
+    const pending = captureJobStorageLock.then(async () => {
+        const stored = await chrome.storage.local.get(['collectorCaptureJobs']);
+        const jobs = Array.isArray(stored.collectorCaptureJobs) ? stored.collectorCaptureJobs : [];
+        const old = jobs.find(job => job.request_id === record.request_id);
+        const merged = { ...old, ...record };
+        await chrome.storage.local.set({ collectorCaptureJobs: [merged,
+            ...jobs.filter(job => job.request_id !== record.request_id)].slice(0, 20) });
+    });
+    captureJobStorageLock = pending.catch(() => {});
+    return pending;
+}
 async function ensureFactoryDeviceId() {
     const stored = await chrome.storage.local.get(['factoryDeviceId']);
     let deviceId = String(stored.factoryDeviceId || '').trim();
@@ -145,12 +158,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type !== 'FACTORY_FETCH')
         return undefined;
     (async () => {
+        let captureJob;
         try {
             const path = String(message.path || '');
             const allowedWorkbenchPath = path.startsWith('/api/workbench/market-intelligence/search-visibility/seerfar/');
             if (!path.startsWith('/api/collector/') && !allowedWorkbenchPath)
                 throw new Error('无效的工作台接口');
             const access = await loadFactoryAccess();
+            if (path === '/api/collector/jobs' && message.options?.method === 'POST') {
+                const payload = JSON.parse(message.options.body || '{}');
+                captureJob = { request_id: payload.request_id, title: payload.capture?.title_cn || '1688商品',
+                    source_url: payload.capture?.source_url, base_url: access.origin, state: 'unconfirmed' };
+                await storeCaptureJob(captureJob);
+            }
             const headers = { ...(message.options?.headers || {}) };
             headers['X-Factory-Device-Id'] = await ensureFactoryDeviceId();
             if (access.authHeader)
@@ -160,9 +180,26 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
                 headers,
                 body: message.options?.body
             });
-            sendResponse({ ok: true, status: response.status, body: await response.text() });
+            const body = await response.text();
+            if (captureJob) {
+                let result;
+                try { result = JSON.parse(body); } catch { /* not an acknowledged job */ }
+                await storeCaptureJob({ ...captureJob, ...(response.ok && result?.request_id === captureJob.request_id
+                    ? result : { state: response.status >= 400 ? 'failed' : 'unconfirmed',
+                        error: '后台未确认采集任务，请核对商品列表后重试' }) });
+            }
+            if (!captureJob && response.ok && /^\/api\/collector\/jobs\/[a-zA-Z0-9_-]{16,80}$/.test(path)) {
+                let result;
+                try { result = JSON.parse(body); } catch { /* not a job state */ }
+                if (result?.request_id === path.split('/').pop())
+                    await storeCaptureJob({ ...result, base_url: access.origin });
+            }
+            sendResponse({ ok: true, status: response.status, body });
         }
         catch (error) {
+            // The snapshot may already have reached the server. Never retry a
+            // POST blindly; re-open the popup and query this exact request ID.
+            if (captureJob) await storeCaptureJob({ ...captureJob, state: 'unconfirmed' }).catch(() => {});
             sendResponse({ ok: false, status: 0, error: error?.message || '工作台连接失败' });
         }
     })();

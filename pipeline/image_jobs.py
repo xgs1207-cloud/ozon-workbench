@@ -127,6 +127,8 @@ def _validate(directory: Path, slot: Mapping[str, Any]) -> dict[str, str]:
         raise ValueError("每次生图请选择 1–3 张不同的真实采集参考图，不会自动截断")
     source = read_json(directory / "input/source.json")
     allowed = set(source.get("stored_images") or [])
+    from .reference_images import selected_reference_images
+    eligible = {row["path"] for row in selected_reference_images(directory)}
     paths = ["input/source.json", "input/source-manifest.json", "input/selected-skus.json"]
     if (directory / "input/raw-snapshot.json").is_file():
         paths.append("input/raw-snapshot.json")
@@ -134,8 +136,10 @@ def _validate(directory: Path, slot: Mapping[str, Any]) -> dict[str, str]:
         path = _safe_file(directory, relative, "input")
         if relative not in allowed or path.parent.name not in {"sku-images", "main-images", "detail-images"} or not path.is_file():
             raise ValueError("参考图必须是此商品已采集的真实原图")
+        if relative not in eligible:
+            raise ValueError("参考图属于未选上架规格或缺少明确规格关联，请选择当前规格的原图")
         owners = _reference_owners(source, relative)
-        if owners - set(selected):
+        if owners and not owners.intersection(selected):
             raise ValueError("参考图明确属于未选上架规格，请改选当前规格的原图")
         if sku and owners and sku not in owners:
             raise ValueError("参考图与当前图位规格不一致，请选择同规格原图")
@@ -467,17 +471,22 @@ def add_image_slot(directory: Path | str, *, prompt: str, reference_ids: Sequenc
         sku = source_sku_id or (ids[0] if len(ids) == 1 else None)
         if sku is not None and sku not in ids:
             raise ValueError("图位规格不在已确认的上架规格中")
-        from models.image_plan import _list_reference_images
+        from .reference_images import selected_reference_images
         plan = read_json(directory / PLAN_FILE)
         if not plan:
             plan = _empty_studio(directory)
         plan["studio_mode"] = True
         plan.setdefault("selected_slots", [row["slot"] for row in _slots(plan)
                          if any(saved.get("slot") == row["slot"] for saved in read_json(directory / REPORT_FILE).get("files") or [])])
-        refs = _list_reference_images(directory)
+        refs = selected_reference_images(directory)
         plan["reference_images"] = refs
         reference_index = {row["id"]: row["path"] for row in refs}
         choices = list(reference_ids)
+        if any(choice not in reference_index for choice in choices):
+            from models.image_plan import _list_reference_images
+            all_ids = {row["id"] for row in _list_reference_images(directory)}
+            if any(choice in all_ids and choice not in reference_index for choice in choices):
+                raise ValueError("参考图属于未选上架规格或缺少明确规格关联，请选择当前规格的原图")
         if not 1 <= len(choices) <= 3 or len(set(choices)) != len(choices) or any(choice not in reference_index for choice in choices):
             raise ValueError("请选择 1–3 张不同的真实采集参考图")
         if sku is None:

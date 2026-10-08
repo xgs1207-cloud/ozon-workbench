@@ -151,7 +151,14 @@ function flowImageStudioHtml(g){
     <details class="studio-library"><summary>提示词库 · 保存与复用</summary><div class="studio-library-tools"><label class="field">保存名称<input id="flowPromptName" maxlength="80" value="${esc(listingFlow.promptNames.get(`${state.product}:${active}`)||'')}" placeholder="例如 白底主图 / 纹理特写"></label>${flowButton('保存当前提示词','save-image-prompt')}</div><div id="flowImagePromptLibrary">${flowPromptLibraryHtml()}</div><p class="field-help">载入提示词只修改编辑器，不会自动调用生图。</p></details><details class="studio-settings"><summary>模型配置与费用说明</summary>${imageBackendSummaryHtml(g)}</details></div></div>
     <div id="flowStudioQueue" class="studio-queue" aria-live="polite">${flowStudioQueueHtml(g.image_jobs||[])}</div><div id="flowStudioResults">${flowStudioResultsHtml(g)}</div></section>`;
 }
-function flowStudioReferences(g=state.guided){return g?.image_plan?.reference_images?.length?g.image_plan.reference_images:(g?.captured_reference_images||[])}
+function flowStudioReferences(g=state.guided){
+    // The server projection is authoritative and keeps IDs stable across SKU
+    // selection changes. Old plans can still contain deselected variant photos.
+    if(Array.isArray(g?.captured_reference_images))return g.captured_reference_images;
+    const selected=new Set(state.skus?.selected||[]);
+    return (g?.image_plan?.reference_images||[]).filter(row=>!row.source_sku_ids?.length||row.source_sku_ids.some(id=>selected.has(id)))
+        .sort((a,b)=>(a.role==='sku'?0:1)-(b.role==='sku'?0:1));
+}
 function flowStudioSlotLabel(spec,index){if(spec.slot==='new')return '新图片';return `${spec.role==='variant_main'||String(spec.slot).startsWith('main-')?'主图':'图片'} ${index+1}`}
 function flowStudioSlotBusy(slot,g=state.guided){return listingFlow.studioRequests.has(`${state.product}:${slot}`)||(g?.image_jobs||[]).some(x=>x.slot===slot&&['queued','running'].includes(x.status))}
 function flowStudioSlotStatus(spec,g){return flowStudioSlotBusy(spec.slot,g)?' · 生成中':(g.generated_image_paths||[]).includes(spec.output_path)?' ✓':''}
@@ -259,13 +266,13 @@ function flowVideosHtml(g) {
     <label class="checkrow" style="margin-top:20px"><input id="flowVideoRights" type="checkbox" ${selection.rights_confirmed?'checked':''}>确认有使用授权、无联系方式和误导内容，且与本次所选规格一致</label><p class="studio-video-publish-note">此操作会把勾选原视频公开到对象存储，并写入上架草稿；不会提交 Ozon 商品卡。取消所有勾选再保存，可清空视频选择。</p><div class="flow-actionrow">${flowButton('保存并发布所选原视频','save-videos',listingFlow.busy)}</div></section>`;
 }
 function flowVideoRow(g,v,chosen){
-    const ready=v.has_file===true, options=(g.source?.skus||[]).filter(x=>(state.skus.selected||[]).includes(x.sku_id));
+    const ready=v.has_file===true, selectable=v.can_publish===true||v.can_prepare===true||ready&&v.media_verified, options=(g.source?.skus||[]).filter(x=>(state.skus.selected||[]).includes(x.sku_id));
     return `<div class="flow-video" data-video="${esc(v.video_id)}"><b>${esc(v.title||v.video_id)}</b>
     <p class="flow-video-state">${esc(v.message||v.status||'已记录')}${ready?` · ${v.media_verified?'已验证技术参数':'技术参数尚未验证，暂不能上架'}`:''}</p>
     ${v.media_verified?`<p class="field-help">${n(v.duration_seconds)} 秒 · ${n(v.width)} × ${n(v.height)} · ${n(v.size_bytes/1024/1024)} MB</p>`:''}
-    ${ready?`<video controls preload="metadata" src="/api/workbench/products/${state.product}/videos/${encodeURIComponent(v.video_id)}/file"></video>`:''}
-    <div class="flow-actionrow">${flowButton('获取原视频文件','download-video',!v.can_download||listingFlow.busy,`data-video="${esc(v.video_id)}"`)}</div>
-    <label class="checkrow"><input class="flowVideoUse" type="checkbox" ${chosen&&(chosen.use??true)?'checked':''} ${!ready||!v.media_verified?'disabled':''}>将本段视频加入上架资料</label>
+    ${v.published_url?`<video controls preload="none" src="${esc(v.published_url)}"></video>`:ready?`<video controls preload="none" src="/api/workbench/products/${state.product}/videos/${encodeURIComponent(v.video_id)}/file"></video>`:'<p class="field-help">仅保存供应商原视频地址。勾选并保存时校验、上传对象存储，不在工作台保存视频文件。</p>'}
+    <div class="flow-actionrow">${flowButton('校验供应商视频地址','download-video',!(v.can_prepare||v.can_download)||listingFlow.busy,`data-video="${esc(v.video_id)}"`)}</div>
+    <label class="checkrow"><input class="flowVideoUse" type="checkbox" ${chosen&&(chosen.use??true)?'checked':''} ${!selectable?'disabled':''}>将本段视频加入上架资料</label>
     <label class="field">关联规格<select class="flowVideoSku"><option value="">适用于全部所选规格（需核对）</option>${options.map(x=>`<option value="${esc(x.sku_id)}" ${chosen?.source_sku_id===x.sku_id?'selected':''}>${esc(x.sku_name||x.name||x.spec_text||x.sku_id)}</option>`).join('')}</select></label>
     ${chosen?.url?`<label class="field">已保存的视频 HTTPS 地址<input class="flowVideoUrl" readonly value="${esc(chosen.url)}"></label>`:''}
     <label class="field">视频标题<input class="flowVideoTitle" value="${esc(chosen?.title||v.title||'')}"></label></div>`;
@@ -298,10 +305,10 @@ renderProduct = function renderStepwiseProduct() {
     if(panes.keywords){
         pane('keywords').append(panes.keywords);
         panes.keywords.querySelector('h2').textContent='关键词（可选）';
-        panes.keywords.querySelector('p').textContent='已经自行确认 Ozon 类目时，无需读取类目词库。可直接填写关键词；留空时只使用真实类目名称与商品事实生成文案。';
+        panes.keywords.querySelector('p').textContent='可直接填写关键词，也可从下方个人词库选择。与 Seerfar 词库不共用；留空时使用真实类目名称与商品事实生成文案。';
         panes.keywords.querySelector('#productPrimary').placeholder='可自行输入，也可留空';
     }
-    pane('keywords').insertAdjacentHTML('beforeend',`<details class="flow-optional-library"><summary>从已采集类目词库挑选（可选）</summary><section class="panel"><p class="flow-lead">仅在需要研究关键词时展开。搜索量帮助排序，不能证明商品具备对应功能。</p><label class="field">研究类目<select id="flowKeywordCategory"><option value="">选择已采集类目</option>${state.categories.map(x=>`<option value="${esc(x.key)}" ${(g.selected_keywords?.category_key||state.category)===x.key?'selected':''}>${esc(x.label)}</option>`).join('')}</select></label><div class="flow-actionrow">${flowButton('读取类目词库','load-words')}</div><div id="flowKeywordLibrary">${flowWordsHtml()}</div></section></details>`);
+    if(typeof keywordLibraryPickerHtml==='function')pane('keywords').insertAdjacentHTML('beforeend',keywordLibraryPickerHtml());
     pane('copy').innerHTML=flowCandidatesHtml(g);
     if(panes.copy){pane('copy').append(panes.copy);for(const button of panes.copy.querySelectorAll('[data-action="prepare"],[data-action="approve"]'))button.remove();const edit=panes.copy.querySelector('[data-action="save-copy"]');if(edit){edit.removeAttribute('data-action');edit.dataset.flowAction='save-copy'}
         const saveNote=[...panes.copy.querySelectorAll('p')].find(node=>node.textContent.includes('这会调用付费文本模型'));
@@ -381,10 +388,6 @@ document.addEventListener('click',async event=>{
             await flowRequest('guided/facts','PUT',facts);listingFlow.factDrafts.delete(id);await flowRequest('guided/analyze');await refreshProduct();
         }
         if(action==='confirm-analysis'){await flowRequest('guided/analysis/confirm','POST',{input_fingerprint:state.guided.workflow.analysis.fingerprint});listingFlow.steps.set(id,'keywords');await refreshProduct()}
-        if(action==='load-words'){
-            const category=$('#flowKeywordCategory').value;if(!category)throw Error('请选择已采集的研究类目');
-            const result=await api('/api/research/keywords?'+new URLSearchParams({category_key:category}));listingFlow.words.set(id,result.items||[]);$('#flowKeywordLibrary').innerHTML=flowWordsHtml();
-        }
         if(action==='use-primary'||action==='use-secondary'){
             const input=action==='use-primary'?$('#productPrimary'):$('#productSecondary');
             input.value=action==='use-primary'?button.dataset.word:[...new Set([...input.value.split(',').map(x=>x.trim()).filter(Boolean),button.dataset.word])].join(', ');input.dispatchEvent(new Event('input',{bubbles:true}));notice('已加入输入框，请保存商品关键词');

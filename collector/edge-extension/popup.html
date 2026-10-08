@@ -82,9 +82,11 @@
         </div>
       </section>
       <button id="capture" disabled>采集当前商品</button>
+      <small>读取页面期间请勿切换当前商品；提示“已提交后台”后可关闭弹窗、换页采集其他商品，不影响后台保存或已有上架任务。</small>
       <button id="preview-toggle" class="secondary" disabled>查看采集预览</button>
       <button id="debug-export" class="secondary" disabled>导出当前页面SKU诊断</button>
       </div>
+      <section id="capture-jobs" class="progress" aria-live="polite"></section>
       <section class="task-runner">
         <button id="open-inbox" class="secondary">打开共享工作台</button>
         <small>1688 全部规格与图片直接入库，到工作台再选择规格、类目和上架流程</small>

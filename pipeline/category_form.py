@@ -11,9 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
 import re
-import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -25,6 +23,7 @@ from pipeline.ozon_http import (
     OzonClient, PATH_ATTRIBUTES, PATH_ATTRIBUTE_VALUES, PATH_ATTRIBUTE_VALUES_SEARCH,
     build_category_snapshot,
 )
+from pipeline.category_cache import invalidate_shop, read_cache, write_cache
 
 CACHE_TTL = 86400
 LANGUAGE = "ZH_HANS"
@@ -32,23 +31,7 @@ LANGUAGE = "ZH_HANS"
 
 def invalidate_shop_cache(cache_root: Path | str, shop_id: str) -> None:
     """Drop only generated metadata/receipts after an account's key is replaced."""
-    root = Path(cache_root)
-    scopes: set[str] = set()
-    matches: list[Path] = []
-    for target in root.glob("ozon-*.json"):
-        if not target.name.startswith(("ozon-category-tree-", "ozon-category-form-", "ozon-dictionary-page-")):
-            continue
-        cached = _read(target, fresh=False)
-        if cached and cached.get("shop_id") == shop_id:
-            matches.append(target)
-            if cached.get("scope"):
-                scopes.add(str(cached["scope"]))
-    for target in root.glob("ozon-dictionary-receipts-*.json"):
-        cached = _read(target, fresh=False)
-        if cached and cached.get("scope") in scopes:
-            matches.append(target)
-    for target in matches:
-        target.unlink(missing_ok=True)
+    invalidate_shop(cache_root, shop_id)
 _RECEIPT_LOCK = threading.RLock()
 
 
@@ -73,26 +56,11 @@ def _scope(shop_id: str, category_id: int, type_id: int, language: str) -> str:
 
 
 def _read(target: Path, *, fresh: bool = True) -> dict[str, Any] | None:
-    try:
-        if fresh and time.time() - target.stat().st_mtime >= CACHE_TTL:
-            return None
-        value = json.loads(target.read_text(encoding="utf-8"))
-        return value if isinstance(value, dict) else None
-    except (OSError, ValueError):
-        return None
+    return read_cache(target, ttl=CACHE_TTL if fresh else None)
 
 
 def _write(target: Path, value: Mapping[str, Any]) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = None
-    try:
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=target.parent, delete=False) as handle:
-            temporary = handle.name
-            json.dump(dict(value), handle, ensure_ascii=False, allow_nan=False)
-        os.replace(temporary, target)
-    finally:
-        if temporary and os.path.exists(temporary):
-            os.unlink(temporary)
+    write_cache(target, value)
 
 
 def _field(raw: Mapping[str, Any]) -> dict[str, Any]:
@@ -176,6 +144,7 @@ def load_form(cache_root: Path | str, category_id: int, type_id: int, *,
     result = {
         "schema_version": "1.0.0", "source": "ozon_seller_api", "api_endpoint": PATH_ATTRIBUTES,
         "shop_id": resolved_id, "language": language, "scope": scope,
+        "cache_generation": int(tree.get("cache_generation") or 0),
         "category_id": category_id, "type_id": type_id,
         "category_name": leaf["name"], "category_path": leaf["path"],
         "fetched_at": _now(), "cache_hit": False, "cache_ttl_seconds": CACHE_TTL,
@@ -254,6 +223,7 @@ def dictionary_values(cache_root: Path | str, category_id: int, type_id: int, at
     result = {
         "source": "ozon_seller_api", "api_endpoint": PATH_ATTRIBUTE_VALUES_SEARCH if q else PATH_ATTRIBUTE_VALUES,
         "shop_id": resolved_id, "language": language, "category_id": int(category_id), "type_id": int(type_id),
+        "cache_generation": int(form.get("cache_generation") or 0),
         "attribute_id": attribute_id, "dictionary_id": field["dictionary_id"],
         "fetched_at": _now(), "cache_hit": False, "result": values, "has_next": has_next,
         "last_value_id": int(last_value_id), "next_last_value_id": values[-1]["id"] if has_next else None,
@@ -269,7 +239,9 @@ def dictionary_values(cache_root: Path | str, category_id: int, type_id: int, at
                     and time.time() - float(row.get("observed_at") or 0) < CACHE_TTL}
         for value in values:
             observed[str(value["id"])] = {"value": value["value"], "observed_at": time.time()}
-        _write(receipts_path, {"scope": form["scope"], "dictionary_id": field["dictionary_id"], "values": observed})
+        _write(receipts_path, {"scope": form["scope"], "shop_id": resolved_id,
+                               "cache_generation": int(form.get("cache_generation") or 0),
+                               "dictionary_id": field["dictionary_id"], "values": observed})
     _write(target, result)
     return result
 

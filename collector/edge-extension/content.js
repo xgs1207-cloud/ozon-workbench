@@ -1,5 +1,5 @@
 (() => {
-const PLUGIN_VERSION = "0.4.34";
+const PLUGIN_VERSION = "0.4.35";
 const previousProductBridge = globalThis.__workbenchProductBridge;
 try {
     if (previousProductBridge?.version === PLUGIN_VERSION && previousProductBridge.isCurrent?.()) return;
@@ -10,6 +10,7 @@ if (previousProductBridge) {
         window.removeEventListener('CAF_PAGE_PRODUCT_DATA_READY', previousProductBridge.pageListener);
 }
 const MAX_SELECTED_SKUS = 10;
+const MAX_CAPTURE_SKUS = 2000;
 const DEFAULT_FACTORY_URL = "http://43.132.190.110:8088";
 let latestDrawerCapture = null;
 let localCategoryTreeCachePromise = null;
@@ -1212,7 +1213,7 @@ function normalizeSkuOptionValue(raw, dimensionName, source) {
     const valueId = firstDefined(raw.valueId, raw.vid, raw.specId, raw.id, raw.value_id, raw.value);
     const valueText = firstDefined(raw.name, raw.valueName, raw.value, raw.text, raw.title, raw.label, raw.specName, valueId, "unknown");
     return {
-        id: cleanText(valueId || valueText),
+        id: cleanText(valueId ?? valueText),
         name: cleanText(valueText),
         image_url: imageUrl || "unknown",
         raw,
@@ -1220,7 +1221,8 @@ function normalizeSkuOptionValue(raw, dimensionName, source) {
             name_cn: cleanText(dimensionName || firstDefined(raw.prop, raw.propName, raw.name_cn, "规格")),
             value_cn: cleanText(valueText),
             source,
-            source_text: `${dimensionName || "规格"}: ${valueText}`
+            source_text: `${dimensionName || "规格"}: ${valueText}`,
+            value_id: cleanText(valueId ?? valueText)
         }
     };
 }
@@ -1237,6 +1239,9 @@ function normalizeSkuProp(raw, source) {
     return { name: String(dimensionName), values, raw };
 }
 function cartesian(groups) {
+    const count = groups.reduce((total, group) => total * group.values.length, 1);
+    if (count > MAX_CAPTURE_SKUS)
+        throw new Error(`商品组合规格超过 ${MAX_CAPTURE_SKUS} 个，请反馈诊断；不会静默截断规格`);
     return groups.reduce((acc, group) => {
         const next = [];
         acc.forEach((combo) => group.values.forEach((value) => next.push([...combo, value])));
@@ -1247,22 +1252,29 @@ function findSkuInfoForCombo(combo, skuMap) {
     if (!skuMap || typeof skuMap !== "object")
         return null;
     const ids = combo.map((item) => String(item.id));
+    const names = combo.map((item) => cleanText(item.name));
     const entries = Object.entries(skuMap);
-    let found = entries.find(([key]) => ids.every((id) => String(key).includes(id)));
+    // Match full axis tokens. A partial/substring ID match can silently assign
+    // another size's SKU ID, price or stock to the current colour combination.
+    const tokens = value => cleanText(value).split(/[>＞#;；|,:：]/).map(part => part.trim()).filter(Boolean);
+    let found = entries.find(([key]) => {
+        const parts = tokens(key);
+        return ids.every(id => parts.includes(id)) || names.every(name => parts.includes(name));
+    });
     if (!found) {
         found = entries.find(([, value]) => {
-            const text = JSON.stringify(value || {});
-            return ids.every((id) => text.includes(id));
+            if (!value || typeof value !== 'object') return false;
+            const parts = [value.specAttrs, value.spec, value.skuName, value.specName]
+                .filter(text => typeof text === 'string').flatMap(tokens);
+            return names.every(name => parts.includes(name));
         });
     }
-    if (!found)
-        found = entries.find(([key]) => ids.some((id) => String(key).includes(id)));
     return found ? { key: found[0], value: found[1] } : null;
 }
 function skuFromCombo(combo, skuInfo, index, sourceData) {
     const info = skuInfo?.value && typeof skuInfo.value === "object" ? skuInfo.value : {};
     const optionValues = combo.map((item) => item.option);
-    const name = optionValues.map((item) => item.value_cn).join(" / ");
+    const name = optionValues.map((item) => item.value_cn).join(" ");
     const imageUrl = imageFromStructuredValue(info) || combo.map((item) => item.image_url).find((url) => url && url !== "unknown") || "unknown";
     const stock = firstDefined(info.stock, info.stockNum, info.canBookCount, info.quantity, info.amountOnSale);
     const realSkuId = extractRealSkuId(info, skuInfo?.key);
@@ -1281,7 +1293,9 @@ function skuFromCombo(combo, skuInfo, index, sourceData) {
             sku_info_key: skuInfo?.key || null,
             sku_info: info,
             combo: combo.map((item) => item.raw),
-            source_data: sourceData,
+            // Never embed the entire offer's SKU map in every SKU: it repeats
+            // O(N²) data and nested image/price fallbacks can pick another SKU.
+            source_data_summary: { source: 'sku_props_and_map', dimensions: optionValues.length },
             has_real_sku_id: Boolean(realSkuId),
             fallback_key: fallbackKey,
             sku_image_source: imageFromStructuredValue(info) ? "sku_specific_image" : (imageUrl && imageUrl !== "unknown" ? "sku_prop_value_image" : "missing")
@@ -1340,7 +1354,9 @@ function normalizeSkuListItem(item, index, sourceName) {
     }
     const stringSpec = firstDefined(item.skuName, item.name, item.specName, item.title, item.specAttrs, item.spec);
     if (!optionValues.length && typeof stringSpec === "string") {
-        cleanText(stringSpec).split(/[;；,，/|+]/).map((part) => part.trim()).filter(Boolean).forEach((part, partIndex) => {
+        // '/' is part of real values such as 红色/内白 and 24cm/3.5L, not
+        // an axis delimiter. 1688 uses > / # between specAttrs dimensions.
+        cleanText(stringSpec).split(/[>＞#;；|]/).map((part) => part.trim()).filter(Boolean).forEach((part, partIndex) => {
             const pieces = part.split(/[:：]/);
             optionValues.push({
                 name_cn: pieces.length > 1 ? pieces[0].trim() : `规格${partIndex + 1}`,
@@ -1370,10 +1386,10 @@ function normalizeSkuListItem(item, index, sourceName) {
     };
 }
 function findStructuredSkuListItems(value, out = [], sourceName = "script_init_data") {
-    if (!value || typeof value !== "object" || out.length > 500)
+    if (!value || typeof value !== "object" || out.length > MAX_CAPTURE_SKUS)
         return out;
     if (Array.isArray(value)) {
-        value.slice(0, 500).forEach((item, index) => {
+        value.slice(0, MAX_CAPTURE_SKUS + 1).forEach((item, index) => {
             const normalized = normalizeSkuListItem(item, index, sourceName);
             if (normalized)
                 out.push(normalized);
@@ -1605,18 +1621,22 @@ function extractStructuredSkus(structured, hasProductPriceRange = false) {
         value_name: value.value_name,
         value_id: value.value_id
     }));
-    listItems.forEach((sku) => skus.push(sku));
     models.slice(0, 8).forEach((model) => {
         const groups = model.props.map((prop) => normalizeSkuProp(prop, "script_init_data")).filter(Boolean);
         if (!groups.length)
             return;
-        const combos = cartesian(groups).slice(0, 300);
+        const combos = cartesian(groups);
         combos.forEach((combo, index) => {
             const skuInfo = findSkuInfoForCombo(combo, model.map) || findSkuInfoForCombo(combo, maps.find((candidate) => findSkuInfoForCombo(combo, candidate.map))?.map);
-            skus.push(skuFromCombo(combo, skuInfo, skus.length + index, model.source));
+            if (skuInfo) skus.push(skuFromCombo(combo, skuInfo, skus.length + index, model.source));
         });
     });
-    const finalized = skus.map((sku) => applyDomPropertyImage(finalizeSkuImageAndPrice(sku, propImageLookup, hasProductPriceRange), domPropertyData.lookup));
+    // Full props+map combinations take priority over often colour-only list
+    // summaries with the same real SKU ID. Keep unmatched real map records.
+    listItems.forEach((sku) => skus.push(sku));
+    const domGroups = extractDomSkuGroups();
+    const finalized = skus.map((sku) => applyDomPropertyImage(finalizeSkuImageAndPrice(
+        enrichSkuDimensions(sku, domGroups), propImageLookup, hasProductPriceRange), domPropertyData.lookup));
     return { skus: finalized, modelCount: models.length, mapCount: maps.length, propertyGroups: domPropertyData.propertyGroups, realSkuIdCount: finalized.filter((sku) => isRealSkuId(sku.sku_id)).length };
 }
 function findSkuContainers() {
@@ -1795,21 +1815,30 @@ function extractDomSkuGroups() {
         if (root.closest('#caf-sku-drawer-root')) continue;
         const dimension = textOf(root.querySelector('.feature-item-label h3, .feature-item-label')).trim() || '规格';
         const values = [], seen = new Set();
-        for (const row of root.querySelectorAll('.expand-view-item')) {
-            const label = row.querySelector('.item-label');
-            const name = cleanText(label?.getAttribute('title') || textOf(label));
+        const optionRows = [...new Set([...root.querySelectorAll('.expand-view-item'), ...root.querySelectorAll(
+            '.image-button, .text-button, .sku-item, .value-item, .feature-value, li, button, [role="button"], [data-value], [data-name]')])];
+        for (const row of optionRows) {
+            if (row.closest('[class*="quantity"], [class*="stock"], [class*="price"], [class*="amount"], [class*="counter"]')) continue;
+            const label = row.querySelector('.item-label, .value-name, .sku-name') || row.querySelector('.item-label');
+            const imageNode = row.querySelector('img');
+            const name = cleanText(label?.getAttribute('title') || textOf(label)
+                || row.getAttribute('title') || row.getAttribute('data-value') || row.getAttribute('data-name')
+                || textOf(row) || imageNode?.getAttribute('alt'));
+            if (name.length > 80 || /库存|起批|起订|¥|￥|物流|购买数量/.test(name)
+                || /^[+－\-\d]+$/.test(name) || dimensionWords.test(name)) continue;
             if (!name || seen.has(name)) continue;
             seen.add(name);
             const image = imageUrlFromNode(row.querySelector('.item-image-icon') || row);
             values.push({ id: row.getAttribute('data-sku-id') || name, name,
                 image_url: image && !isBlockedImageUrl(image) ? image : 'unknown',
                 disabled: row.matches('[aria-disabled="true"], [disabled]'),
-                raw: { text: name, class: row.className, source: '1688_expand_view_row' },
+                raw: { text: name, class: row.className, source: '1688_sale_option' },
                 option: { name_cn: dimension, value_cn: name, source: 'dom_sale_spec_row', source_text: name } });
         }
         if (values.length) groups.push({ name: dimension, values, raw: { class: root.className, source: '1688_expand_view' } });
     }
     findSkuContainers().forEach((root) => {
+        if (modernGroups.has(root) || [...modernGroups].some(group => root.contains?.(group))) return;
         if (root.querySelector('.expand-view-item .item-label')) return;
         const rootText = textOf(root);
         if (!dimensionWords.test(rootText) && !/sku/i.test(root.className || ""))
@@ -1868,7 +1897,7 @@ function extractDomSkuGroups() {
                 return false;
             seen.add(key);
             return true;
-        }).slice(0, 80);
+        });
         if (cleanValues.length >= 1)
             groups.push({ name: dimension, values: cleanValues, raw: { text: rootText.slice(0, 500), class: root.className || "" } });
     });
@@ -1883,17 +1912,41 @@ function extractDomSkuGroups() {
     });
     return uniqueGroups.slice(0, 4);
 }
+function enrichSkuDimensions(sku, groups) {
+    const original = sku.option_values || [];
+    const rawTexts = [sku.sku_name, sku.source_data?.specAttrs, sku.source_data?.spec,
+        sku.source_data?.sku_info?.specAttrs, sku.source_data?.sku_info?.spec,
+        ...original.map(option => option.value_cn)].filter(value => typeof value === 'string');
+    const parts = rawTexts.flatMap(value => cleanText(value).split(/[>＞#;；|]/).map(part => part.trim()));
+    const options = [];
+    for (const group of groups) {
+        const matching = group.values.filter(value => parts.some(part => part === value.name
+            || part === `${group.name}:${value.name}` || part === `${group.name}：${value.name}`));
+        const value = matching.length === 1 ? matching[0] : group.values.length === 1 ? group.values[0] : null;
+        if (value) options.push({ ...value.option, value_id: value.id });
+    }
+    // Only replace a parsed spec when every visible dimension has a unique
+    // source-backed value. Never invent missing choices on a multi-size offer.
+    if (!groups.length || options.length !== groups.length) return sku;
+    return { ...sku, option_values: options, sku_name: options.map(option => option.value_cn).join(' '),
+        source_data: { ...sku.source_data, dimension_count: options.length,
+            dimension_source: 'real_sku_record_with_visible_sale_dimensions' } };
+}
 function extractDomComboSkus(fallbackPrice) {
     const groups = extractDomSkuGroups();
     if (!groups.length)
         return { skus: [], groupCount: 0 };
+    // Without a real SKU map, several multi-value axes don't prove their
+    // cartesian combinations are available. Do not fabricate those SKUs.
+    if (groups.filter(group => group.values.length > 1).length > 1)
+        return { skus: [], groupCount: groups.length, reason: 'multiple_axes_require_real_sku_map' };
     const offerId = String(location.pathname).match(/\/offer\/(\d{6,})/)?.[1] || "";
-    const combos = cartesian(groups).slice(0, 300);
+    const combos = cartesian(groups);
     const skus = combos.map((combo, index) => {
         const imageUrl = combo.map((item) => item.image_url).find((url) => url && url !== "unknown") || "unknown";
         const unavailable = combo.some((item) => item.disabled);
         const optionValues = combo.map((item) => item.option);
-        const name = optionValues.map((item) => item.value_cn).join(" / ");
+        const name = optionValues.map((item) => item.value_cn).join(" ");
         const fallbackKey = fallbackSkuKey("dom-combo-key", index, combo.map((item) => item.id || item.name));
         const hasDedicatedImage = Boolean(imageUrl && imageUrl !== "unknown");
         return {
@@ -2048,9 +2101,11 @@ function extractSkus(structured, hasProductPriceRange = false, productRangePrice
     const structuredResult = extractStructuredSkus(structured, hasProductPriceRange);
     if (structuredResult.skus.length) {
         const values = keepCollectedSkuRecords(applyVisibleSkuRowImages(structuredResult.skus));
+        if (values.length > MAX_CAPTURE_SKUS)
+            throw new Error(`商品规格超过 ${MAX_CAPTURE_SKUS} 个，请反馈诊断；不会静默截断规格`);
         if (values.length) {
             return {
-                values: applyProductRangePrice(values.slice(0, 300), productRangePrice),
+                values: applyProductRangePrice(values, productRangePrice),
                 candidateCount: structuredResult.skus.length,
                 source: "script_init_data",
                 propertyGroups: structuredResult.propertyGroups || []
@@ -2075,7 +2130,7 @@ function extractSkus(structured, hasProductPriceRange = false, productRangePrice
         collect(item.data);
     });
     const skus = [];
-    rawCandidates.flat().slice(0, 100).forEach((item, index) => {
+    rawCandidates.flat().slice(0, MAX_CAPTURE_SKUS + 1).forEach((item, index) => {
         if (!item || typeof item !== "object")
             return;
         const realSkuId = extractRealSkuId(item);
@@ -2143,7 +2198,9 @@ function extractSkus(structured, hasProductPriceRange = false, productRangePrice
         });
     }
     const values = keepCollectedSkuRecords(applyVisibleSkuRowImages(skus));
-    return { values: values.slice(0, 300), candidateCount: Math.max(rawCandidates.length, skus.length), source: values.length ? "dom_semantic" : "unknown" };
+    if (values.length > MAX_CAPTURE_SKUS)
+        throw new Error(`商品规格超过 ${MAX_CAPTURE_SKUS} 个，请反馈诊断；不会静默截断规格`);
+    return { values, candidateCount: Math.max(rawCandidates.length, skus.length), source: values.length ? "dom_semantic" : "unknown" };
 }
 function skuDisplayName(sku) {
     const optionText = (sku.option_values || [])
@@ -3388,12 +3445,22 @@ function productReadFailure(label, error) {
         capture_warnings: [`${label}读取失败`], main_images: [], detail_images: [], videos: [], skus: [] };
 }
 async function buildReadyCapture() {
+    const expectedSource = `${location.origin}${location.pathname}`;
+    const assertSource = () => {
+        if (!is1688OfferPage() || `${location.origin}${location.pathname}` !== expectedSource)
+            throw new Error('读取期间商品页面已切换，尚未提交；请在新商品页面重新采集');
+    };
+    assertSource();
     await warmAllSkuImages();
+    assertSource();
     await warmProductAttributeTables();
+    assertSource();
     await warmDetailImages();
+    assertSource();
     // Video players may be initialized after the original document_idle probe.
     // Re-read loaded page config; never play a video or contact its CDN here.
     await injectPageProbe(true);
+    assertSource();
     return buildCapture();
 }
 const productMessageListener = (message, sender, sendResponse) => {

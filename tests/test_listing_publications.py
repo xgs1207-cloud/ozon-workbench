@@ -119,6 +119,39 @@ class ListingPublicationTests(unittest.TestCase):
         self.assertFalse(self.db.exists())
         self.assertEqual(self.transport.calls, [])
 
+    def test_source_notes_are_complete_supplier_specifications_per_sku_and_offer(self):
+        source = read_json(self.directory / "input/source.json")
+        source["skus"][0].update(name_cn="红色/内白", option_values=[
+            {"name_cn": "颜色", "value_cn": "红色/内白"},
+            {"name_cn": "规格", "value_cn": "24cm/3.5L"}])
+        source["skus"][1].update(name_cn="南瓜橘/内白 24cm/3.5L", option_values=[
+            {"name_cn": "颜色", "value_cn": "南瓜橘/内白"},
+            {"name_cn": "规格", "value_cn": "24cm/3.5L"}])
+        write_json(self.directory / "input/source.json", source)
+        config = service.read_config(self.directory, shop="qa")
+        self.assertTrue(config["source_note_auto"])
+        self.assertEqual(config["source_note_by_sku"], {"S1": "红色/内白 24cm/3.5L", "S2": "南瓜橘/内白 24cm/3.5L"})
+        self.submitted()
+        records = service.list_publications(shop="qa")["items"]
+        self.assertEqual({row["source_sku_id"]: row["source_note"] for row in records}, config["source_note_by_sku"])
+        self.assertEqual({row["offer_id"] for row in records}, set(self.offers.values()))
+
+    def test_missing_source_specification_does_not_invent_one_or_erase_legacy_note(self):
+        self.assertEqual(service.source_specifications(self.directory), {})
+        self.configured()
+        config = service.read_config(self.directory, shop="qa")
+        self.assertFalse(config["source_note_auto"])
+        self.assertEqual(config["source_note"], "供应商链接已核对")
+
+    def test_sku_without_specification_does_not_inherit_another_skus_note(self):
+        source = read_json(self.directory / "input/source.json")
+        source["skus"][0]["name_cn"] = "红色/内白 24cm/3.5L"
+        write_json(self.directory / "input/source.json", source)
+        self.submitted()
+        records = {row["source_sku_id"]: row for row in service.list_publications(shop="qa")["items"]}
+        self.assertEqual(records["S1"]["source_note"], "红色/内白 24cm/3.5L")
+        self.assertEqual(records["S2"]["source_note"], "")
+
     def test_warehouse_cache_has_real_ids_and_blocks_pause_unknown(self):
         result = service.refresh_warehouses("qa", transport=self.transport)
         self.assertEqual([row["warehouse_id"] for row in result["items"] if row["eligible"]], ["11", "22"])

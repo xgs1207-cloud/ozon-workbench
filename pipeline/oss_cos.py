@@ -465,6 +465,32 @@ class CosObjectStorage:
         body = source.read_bytes()
         if len(body) != size or hashlib.sha256(body).hexdigest() != digest:
             raise CosError("视频文件 SHA-256 校验失败，请重新保存")
+        return self.publish_video_bytes(root, {**row, "format": suffix.lstrip(".")}, body)
+
+    def publish_video_bytes(self, product_dir: Path | str, row: Mapping[str, Any], body: bytes) -> dict[str, Any]:
+        """Publish the bounded exact supplier byte snapshot without a local file."""
+        from .source_videos import _container
+        root = Path(product_dir).resolve()
+        video_id, digest, size = row.get("video_id"), row.get("sha256"), row.get("size_bytes")
+        suffix = "." + str(row.get("format") or "")
+        if (not isinstance(body, bytes) or isinstance(size, bool) or not isinstance(size, int)
+                or not 1 <= size <= 100 * 1024 * 1024 or len(body) != size
+                or hashlib.sha256(body).hexdigest() != digest):
+            raise CosError("视频内存快照 SHA/大小校验失败")
+        try:
+            actual_suffix, _ = _container(body[:4096])
+        except Exception:
+            raise CosError("视频实际容器格式无法确认") from None
+        if actual_suffix != suffix:
+            raise CosError("视频实际容器格式与元信息不一致")
+        key = self.video_key_for(root.name, str(video_id), str(digest), suffix)
+        url = (f"{self.public_base_url}/{quote(key)}" if self.public_base_url else
+               f"https://{self.bucket}.cos.{self.region}.myqcloud.com/{quote(key)}")
+        parsed = urlsplit(url)
+        if (parsed.scheme != "https" or not parsed.hostname or parsed.port not in (None, 443)
+                or parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment
+                or any(ord(c) < 33 or ord(c) == 127 for c in url) or "\\" in url or self.dry_run):
+            raise CosError("视频正式发布需要稳定 HTTPS COS 地址及非 dry-run 存储")
         md5 = hashlib.md5(body, usedforsecurity=False).hexdigest()
         content_type = VIDEO_CONTENT_TYPES[suffix]
 
@@ -496,7 +522,29 @@ class CosObjectStorage:
             raise CosError("视频发布或匿名可读性核验失败；请检查 COS 对象及权限，原视频和卡片未被覆盖") from None
         return {"video_id": video_id, "status": "unchanged" if unchanged else "uploaded",
                 "key": key, "url": url, "sha256": digest, "size_bytes": size,
-                "content_type": content_type, "remote_verified": True, "anonymous_verified": True}
+                "content_type": content_type, "md5": md5, "remote_verified": True, "anonymous_verified": True}
+
+    def verify_video_publication(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        """Retry an already uploaded supplier asset without needing its expiring URL."""
+        if self.dry_run:
+            raise CosError("正式视频回读不能使用 dry-run")
+        key, url = row.get("key"), row.get("url")
+        expected_key = self.video_key_for(str(row.get("product_id")), str(row.get("video_id")),
+                                          str(row.get("sha256")), PurePosixPath(str(key)).suffix)
+        expected_url = (f"{self.public_base_url}/{quote(expected_key)}" if self.public_base_url else
+                        f"https://{self.bucket}.cos.{self.region}.myqcloud.com/{quote(expected_key)}")
+        if key != expected_key or url != expected_url or not re.fullmatch(r"[0-9a-f]{32}", str(row.get("md5"))):
+            raise CosError("已发布视频地址、对象身份或 MD5 记录不一致")
+        for raw, signed in ((self._call("head_object", Bucket=self.bucket, Key=key), True),
+                            (_anonymous_video_headers(url), False)):
+            headers = {str(name).lower(): str(value).strip() for name, value in raw.items()}
+            if (headers.get("content-length") != str(row.get("size_bytes"))
+                    or headers.get("etag", "").strip('"').lower() != row["md5"]
+                    or headers.get("content-type", "").split(";", 1)[0].strip().lower() != row.get("content_type")
+                    or (signed and headers.get("x-cos-meta-sha256") != row.get("sha256"))
+                    or (not signed and headers.get("x-cos-meta-sha256") not in (None, row.get("sha256")))):
+                raise CosError("已发布视频的 COS 与匿名回读校验不一致")
+        return {**row, "status": "unchanged", "remote_verified": True, "anonymous_verified": True}
 
     def publish_product(
         self,

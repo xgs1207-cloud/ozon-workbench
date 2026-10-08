@@ -96,6 +96,12 @@ async function benchLoadDocument(product=state.product,shop=benchShop()){
 const benchFetchProduct=fetchProduct;
 fetchProduct=async function(...args){const result=await benchFetchProduct(...args),product=state.product;if(product){await benchLoadDocument(product);if(state.product===product&&state.view==='product')renderProduct()}return result};
 const benchStepRenderer=renderProduct;
+async function benchEnsureDocument(){
+    const product=state.product,shop=benchShop(),key=benchScopeKey(product,shop);
+    if(!product||!state.guided||benchDocument()||listingBench.loading.has(key)||listingBench.errors.has(product))return;
+    await benchLoadDocument(product,shop);
+    if(state.product===product&&state.view==='product'&&benchScopeKey()===key&&benchDocument())renderProduct();
+}
 renderProduct=function(){
     benchStepRenderer();if(!state.guided||!state.product)return;
     $('#main').classList.toggle('listing-card',flowStep()==='card');
@@ -116,7 +122,7 @@ renderProduct=function(){
         const error=listingBench.errors.get(state.product);if(error)card.insertAdjacentHTML('afterbegin',`<p class="flow-error" role="alert">读取商品资料失败：${esc(error)} ${benchButton('重新读取','reload-document')}</p>`);
         const operationError=flowOperationErrorHtml('card');if(operationError)card.insertAdjacentHTML('afterbegin',operationError);
     }
-    hydrateProductFields();renderProductSupport();
+    hydrateProductFields();renderProductSupport();void benchEnsureDocument();
 };
 document.addEventListener('input',event=>{if(event.target.id==='benchOfferPrefix')listingBench.prefixDrafts.set(benchShop(),event.target.value)});
 document.addEventListener('click',async event=>{

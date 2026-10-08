@@ -262,3 +262,35 @@ test('operational save preserves new packaging and price inputs received during 
   assert.equal(h.draft.pending.has('prices'), true);
   assert.equal(calls[1].body.prices[0].price, 99, 'only the request snapshot was saved');
 });
+
+test('deep-link rendering hydrates canonical data without a second paid operation', async () => {
+  const h = harness();
+  h.context.benchScopeKey = () => `${h.context.state.product}:shop-a:100:10`;
+  h.context.benchDocument = () => h.context.listingBench.documents.get(h.context.benchScopeKey());
+  let reads = 0, renders = 0;
+  h.context.benchLoadDocument = async () => {
+    reads++;
+    h.context.listingBench.documents.set(h.context.benchScopeKey(), {summary: {display_zh: {status:'ready'}}});
+  };
+  h.context.renderProduct = () => renders++;
+  h.load(card, 'async function benchEnsureDocument(){', '\nrenderProduct=function(){');
+  await h.context.benchEnsureDocument();
+  await h.context.benchEnsureDocument();
+  assert.equal(reads, 1);
+  assert.equal(renders, 1);
+});
+
+test('late deep-link hydration never re-renders another product', async () => {
+  const h = harness(), waiting = deferred();
+  h.context.benchScopeKey = () => h.context.state.product;
+  h.context.benchDocument = () => h.context.listingBench.documents.get(h.context.state.product);
+  h.context.benchLoadDocument = () => waiting.promise;
+  let renders = 0;
+  h.context.renderProduct = () => renders++;
+  h.load(card, 'async function benchEnsureDocument(){', '\nrenderProduct=function(){');
+  const loading = h.context.benchEnsureDocument();
+  h.context.state.product = 'P2';
+  waiting.resolve();
+  await loading;
+  assert.equal(renders, 0);
+});

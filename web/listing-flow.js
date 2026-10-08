@@ -88,6 +88,7 @@ function flowScalar(value) {
 function flowOperatorPointsHtml(g,listClass='flow-summary-list',emptyText='还没有可确认的卖点。') {
     const summary=g.workflow?.analysis||{},payload=summary.payload||{};
     const doc=typeof benchDocument==='function'?benchDocument():null;
+    if(!doc&&typeof listingBench!=='undefined'&&listingBench.loading.has(benchScopeKey()))return '<p class="field-help" role="status">正在读取中文卖点…</p>';
     const display=doc?.summary?.display_zh||summary.display_zh;
     const rawPoints=payload.selling_points||payload.key_selling_points||[];
     const original=Array.isArray(rawPoints)?rawPoints:[];

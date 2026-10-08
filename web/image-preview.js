@@ -8,7 +8,7 @@ function listingPreviewUrl(value) {
     } catch { return ''; }
 }
 (function () {
-    let viewer, opener, previousOverflow, currentImage;
+    let viewer, opener, previousOverflow, currentImage, previewScope;
     const mediaRegions = '.studio-reference-grid, .studio-result, .product-source-images, .studio-slot-editor';
 
     function releasePreview() {
@@ -66,6 +66,7 @@ function listingPreviewUrl(value) {
             status.textContent = '图片暂时无法加载，请关闭后重试。';
         });
         opener = trigger;
+        previewScope = {product:state.product,step:flowStep(),view:state.view};
         previousOverflow = document.body.style.overflow;
         stage.append(img);
         img.src = url;
@@ -104,7 +105,7 @@ function listingPreviewUrl(value) {
     }, true);
     const render = renderProduct;
     renderProduct = function (...args) {
-        if (viewer?.open) closePreview();
+        if (viewer?.open && (previewScope.product !== state.product || previewScope.step !== flowStep() || previewScope.view !== state.view)) closePreview();
         const result = render(...args);
         decorateLinks();
         return result;

@@ -7,7 +7,8 @@ const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../web/listing-flow.js'), 'utf8');
 const renderer = source.slice(source.indexOf('function flowOperatorPointsHtml'), source.indexOf('function flowAnalysisHtml'));
 function render(payload, display) {
-    const context = vm.createContext({state: {product: 'P1'}, listingBench: {summaryTranslations: new Map()},
+    const context = vm.createContext({state: {product: 'P1'}, listingBench: {summaryTranslations: new Map(),loading:new Set()},
+        benchScopeKey: () => 'P1:shop',
         benchDocument: () => ({summary: {display_zh: display}}),
         esc: text => String(text).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;'),
         flowButton: label => `<button>${label}</button>`});

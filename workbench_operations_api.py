@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sqlite3
 from typing import Callable, Literal
 from urllib.parse import urlsplit
 
@@ -18,6 +19,20 @@ class ShopPayload(BaseModel):
 
 class SyncPayload(ShopPayload):
     offer_id: str = Field(min_length=1, max_length=100)
+    days: Literal[7, 30] = 7
+    include_traffic: bool = True
+
+
+class CatalogReadPayload(ShopPayload):
+    query: str = Field(default="", max_length=100)
+    limit: int = Field(default=50, ge=1, le=100)
+    previous_page_token: str | None = Field(default=None, pattern=r"^[a-f0-9-]{36}$")
+
+
+class CatalogAddPayload(ShopPayload):
+    page_token: str = Field(pattern=r"^[a-f0-9-]{36}$")
+    offer_ids: list[str] = Field(min_length=1, max_length=100)
+    analyze: bool = False
     days: Literal[7, 30] = 7
     include_traffic: bool = True
 
@@ -48,7 +63,7 @@ def register_operations_routes(
     start_worker: bool = True,
 ) -> None:
     """All paths resolve at request time, avoiding real-data reads in test apps."""
-    from pipeline import operations
+    from pipeline import operations, operations_catalog
     from pipeline.performance_access import PerformanceAccess, PerformanceAccessError
     from pipeline.operations_worker import OperationsWorker
 
@@ -119,6 +134,8 @@ def register_operations_routes(
     def safe(function, *args, **kwargs):
         try:
             return function(*args, **kwargs)
+        except operations_catalog.CatalogError as error:
+            raise HTTPException(error.http_status or 422, str(error)) from None
         except PerformanceAccessError as error:
             status = error.http_status or 422
             if status >= 500:
@@ -156,6 +173,57 @@ def register_operations_routes(
         if shop:
             known_shop(shop)
         return {"ok": True, **safe(store().list_products, shop=shop, q=q, limit=limit, offset=offset)}
+
+    @router.post("/catalog/read")
+    def read_catalog(payload: CatalogReadPayload):
+        row = known_shop(payload.shop, enabled=True)
+        if not row.get("credentials_ready"):
+            raise HTTPException(409, "店铺 Seller 授权缺失，请先在店铺授权中保存凭据")
+        cache = store()
+        arguments = {"last_id": "", "limit": payload.limit, "query": payload.query,
+                     "visibility": "ALL", "seen_cursors": ()}
+        if payload.previous_page_token:
+            previous = safe(cache.catalog_page, payload.shop, payload.previous_page_token)
+            if not previous.get("has_more") or not previous.get("next_cursor"):
+                raise HTTPException(409, "此批商品已到最后一页，请重新读取首页")
+            # Only the server-owned page determines the next official cursor and scope.
+            arguments.update(last_id=previous["next_cursor"], limit=previous["limit"],
+                             query=previous.get("query", ""), visibility=previous["visibility"],
+                             seen_cursors=previous.get("seen_cursors", ()))
+        try:
+            transport = seller_transport(payload.shop)
+        except Exception:
+            raise HTTPException(409, "店铺 Seller 授权不可用，请重新验证授权") from None
+        page = safe(operations_catalog.browse_catalog, payload.shop, transport, store=cache, **arguments)
+        public = {key: page.get(key) for key in (
+            "items", "page_token", "fetched_at", "expires_at", "has_more", "total",
+            "total_source", "filtered_count", "warning_codes")}
+        return {"ok": True, **public, "api_writes_performed": False,
+                "visibility": "ALL", "message": "仅读取非归档商品；名称筛选只作用于当前页。"}
+
+    @router.post("/catalog/add")
+    def add_catalog(payload: CatalogAddPayload):
+        known_shop(payload.shop, enabled=True)
+        cache = store()
+        result = safe(cache.import_catalog_rows, payload.shop, payload.page_token, payload.offer_ids)
+        queued, deduplicated, queue_errors = 0, 0, []
+        if payload.analyze:
+            # An import succeeds independently of queue capacity. Never hide a partial enqueue.
+            for item in result["items"]:
+                try:
+                    job = cache.enqueue(payload.shop, item["offer_id"], days=payload.days,
+                                        include_traffic=payload.include_traffic)
+                    if job.get("deduplicated"):
+                        deduplicated += 1
+                    else:
+                        queued += 1
+                except (ValueError, KeyError, sqlite3.Error):
+                    queue_errors.append({"offer_id": item["offer_id"], "code": "queue_unavailable"})
+            if queued or deduplicated:
+                worker.wake()
+        return {"ok": True, **result, "jobs_enqueued": queued, "queued": queued, "deduplicated": deduplicated,
+                "queue_errors": queue_errors, "api_writes_performed": False,
+                "message": "已加入只读商品运营记录；未重新上架或修改店铺商品。"}
 
     @router.get("/product")
     def product(shop: str = Query(pattern=SHOP_PATTERN), offer_id: str = Query(min_length=1, max_length=100)):

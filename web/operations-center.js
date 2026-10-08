@@ -15,6 +15,8 @@
     const metric = (value, digits = 0) => {const n = number(value); return n === null ? '暂无数据' : new Intl.NumberFormat('zh-CN', {maximumFractionDigits:digits}).format(n)};
     const finiteRatio = (top, bottom) => {const a=number(top), b=number(bottom);return a !== null && b !== null && b > 0 ? a / b : null};
     const safeSource = value => {try {const u=new URL(String(value));return u.protocol==='https:' && u.hostname==='detail.1688.com' && !u.username && !u.password && /^\/offer\/\d+\.html$/.test(u.pathname) ? u.origin+u.pathname : ''} catch (_) {return ''}};
+    const safeThumbnail = value => {try {const u=new URL(String(value));const privateKeys=new Set(['authorization','auth','api-key','api_key','apikey','client_secret','access_token','password','token']);return u.protocol==='https:' && !u.username && !u.password && ![...u.searchParams.keys()].some(key=>privateKeys.has(key.toLowerCase())) ? u.href : ''} catch (_) {return ''}};
+    const ozonLink = value => /^[1-9]\d{0,19}$/.test(String(value || '')) ? 'https://www.ozon.ru/product/'+encodeURIComponent(value)+'/' : '';
     const date = value => {if (!value) return '未同步'; const parsed=new Date(value);return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleString('zh-CN', {hour12:false})};
     const statusLabels = {queued:'排队中',running:'处理中',retrying:'等待重试',retry_wait:'等待重试',partial:'部分完成',failed:'同步失败',completed:'已完成',succeeded:'已完成',ready:'可用',pending:'处理中',submitting:'正在提交',submission_uncertain:'提交结果不确定',unavailable:'暂无权限',not_configured:'未授权',enabled:'已启用',disabled:'未启用',imported:'已导入',processed:'已处理',ok:'正常',success:'成功',cancelled:'已取消',expired:'已过期',error:'失败',no_data:'暂无数据',permission_required:'需要数据权限',available:'已取得数据',deferred:'等待接口配额'};
     const normalizedStatus = value => ({NOT_STARTED:'pending',IN_PROGRESS:'running',OK:'ready',ERROR:'error',SUBMISSION_UNCERTAIN:'submission_uncertain',SUBMITTING:'submitting'}[String(value)] || String(value || '').toLowerCase());
@@ -32,24 +34,26 @@
     const historyBlocksReport = rows => array(rows).some(row=>!canCreateReport({status:row.status || row.state}));
     const pendingJob = row => ['queued','running','retrying','retry_wait'].includes(normalizedStatus(row.status));
     const jobError = row => row.last_error || row.error || ({permission_required:'需要开通对应数据权限',quota_deferred:'等待接口调用配额恢复',seller_rate_limit:'官方接口限流，将按队列重试',credentials_missing:'店铺授权缺失，请重新授权',no_credentials:'店铺授权缺失，请重新授权',shop_disabled:'店铺已停用，未访问官方接口',sku_not_found:'还没有回读到 Ozon SKU',network_error:'网络请求失败，可重新同步',network_unavailable:'网络暂不可用，将按队列重试'}[row.error_code] || (row.error_code?'接口说明：'+row.error_code:''));
-    let host=null, state=null, generation=0, detailGeneration=0, productsGeneration=0, reportHistoryGeneration=0, controllers=new Set(), pendingChannels=new Map(), jobsTimer=null, reportTimer=null;
+    let host=null, state=null, generation=0, detailGeneration=0, productsGeneration=0, reportHistoryGeneration=0, catalogGeneration=0, controllers=new Set(), pendingChannels=new Map(), channelControllers=new Map(), jobsTimer=null, reportTimer=null;
+    const newCatalog = () => ({open:false,loading:false,importing:false,pages:[],index:0,selected:new Set(),query:'',analyze:true});
     const live = () => Boolean(host && host.isConnected !== false && state);
     const current = revision => live() && generation===revision;
     function stopTimers() {if(jobsTimer)clearTimeout(jobsTimer);if(reportTimer)clearTimeout(reportTimer);jobsTimer=reportTimer=null}
-    function cancelRequests() {for(const c of controllers)c.abort();controllers.clear();pendingChannels.clear()}
+    function cancelRequests() {for(const c of controllers)c.abort();controllers.clear();pendingChannels.clear();channelControllers.clear()}
     function unmount() {generation++;detailGeneration++;stopTimers();cancelRequests();if(host){host.removeEventListener('click',onClick);host.removeEventListener('change',onChange);host.removeEventListener('submit',onSubmit);host.classList.remove('operations-center')}host=null;state=null}
     function requestError(response, data) {if(response.status===401 || response.status===403)return new Error(data?.detail?.message || (typeof data?.detail==='string'?data.detail:'当前店铺尚未开通此数据权限，请检查授权和分析套餐。'));return new Error(typeof data?.detail==='string'?data.detail: data?.error?.message || data?.message || `请求失败（${response.status}），请稍后重试。`)}
-    async function request(path, options={}, channel='') {
+    async function request(path, options={}, channel='', timeoutMs=25000) {
         if(channel && pendingChannels.has(channel))return pendingChannels.get(channel);
         const controller=new AbortController();controllers.add(controller);
-        const timer=setTimeout(()=>controller.abort(),25000);
+        if(channel)channelControllers.set(channel,controller);
+        const timer=setTimeout(()=>controller.abort(),timeoutMs);
         const running=(async()=>{
             const response=await global.fetch(path, {...options,signal:controller.signal,credentials:'same-origin',headers:{Accept:'application/json',...(options.body?{'Content-Type':'application/json'}:{}),...options.headers}});
             let data;try{data=await response.json()}catch(_){throw new Error('服务未返回可读取的数据，请检查工作台连接。')}
             if(!response.ok)throw requestError(response,data);return data;
         })();
         if(channel)pendingChannels.set(channel,running);
-        try{return await running}finally{clearTimeout(timer);controllers.delete(controller);if(channel && pendingChannels.get(channel)===running)pendingChannels.delete(channel)}
+        try{return await running}finally{clearTimeout(timer);controllers.delete(controller);if(channel && pendingChannels.get(channel)===running){pendingChannels.delete(channel);channelControllers.delete(channel)}}
     }
     const json = value => ({method:'POST',body:JSON.stringify(value)});
     const qs = values => new URLSearchParams(Object.entries(values).filter(([,v])=>v!==null && v!==undefined && v!=='')).toString();
@@ -57,17 +61,55 @@
     function region(name, html) {const target=host?.querySelector(`[data-ops-region="${name}"]`);if(target)target.innerHTML=html}
     function controls() {
         const options=state.shops.map(shop=>`<option value="${escape(shop.id)}" ${state.shop===shop.id?'selected':''}>${escape(shop.name || shop.display_name || shop.id)}</option>`).join('');
-        region('toolbar', `<label>店铺<select data-ops-input="shop">${options || '<option value="">先添加店铺授权</option>'}</select></label><label class="ops-search">搜索货号 / 规格<input type="search" data-ops-input="query" value="${escape(state.query)}" placeholder="货号、商品编号或货源备注" maxlength="100"></label><label>观察周期<select data-ops-input="days"><option value="7" ${state.days===7?'selected':''}>最近 7 天</option><option value="30" ${state.days===30?'selected':''}>最近 30 天</option></select></label>${button('搜索 / 刷新记录','search','',!state.shop)}${button('读取新上架记录','discover','',!state.shop)}${button('任务与定时监测','settings','',!state.shop)}${button('广告授权与报表','advertising','',!state.shop)}<label class="ops-check ops-traffic-choice"><input type="checkbox" data-ops-input="include-traffic" ${state.includeTraffic?'checked':''}>同步时读取曝光 / 展示指标（需对应权限）</label>`);
+        region('toolbar', `<label>店铺<select data-ops-input="shop" ${state.catalog.importing?'disabled':''}>${options || '<option value="">先添加店铺授权</option>'}</select></label><label class="ops-search">搜索货号 / 名称 / 规格<input type="search" data-ops-input="query" value="${escape(state.query)}" placeholder="货号、商品名称或货源备注" maxlength="100"></label><label>观察周期<select data-ops-input="days"><option value="7" ${state.days===7?'selected':''}>最近 7 天</option><option value="30" ${state.days===30?'selected':''}>最近 30 天</option></select></label>${button('搜索 / 刷新记录','search','',!state.shop)}${button('添加店铺已有商品','catalog-open','',!state.shop || state.catalog.importing)}${button('读取新上架记录','discover','',!state.shop)}${button('任务与定时监测','settings','',!state.shop)}${button('广告授权与报表','advertising','',!state.shop)}<label class="ops-check ops-traffic-choice"><input type="checkbox" data-ops-input="include-traffic" ${state.includeTraffic?'checked':''}>同步时读取曝光 / 展示指标（需对应权限）</label>`);
     }
     function productRows(items) {
         return array(items).map(row=>{
-            const source=safeSource(row.source_url), offer=String(row.offer_id || ''), identifier=row.ozon_sku || row.sku || '待回读';
-            return `<tr><td><button class="ops-offer" type="button" data-ops-action="detail" data-offer="${escape(offer)}">${escape(offer || '货号未提供')}</button><small>${escape(row.product_id || '本地商品未绑定')}</small></td><td>${escape(row.source_note || row.sku_name || '规格未记录')}<small>${source?`<a href="${escape(source)}" target="_blank" rel="noopener noreferrer">查看 1688 货源</a>`:'无有效货源链接'}</small></td><td>${badge(row.import_status || row.status)}<small>${escape(row.stock_status?status(row.stock_status):'库存尚未核对')}</small></td><td>${escape(row.warehouse_name || '未记录仓库')}<small>${escape(row.warehouse_id || '')}</small></td><td>${escape(identifier)}<small>${escape(row.ozon_product_id?`商品 ID ${row.ozon_product_id}`:'商品 ID 待回读')}</small></td><td>${escape(date(row.last_synced_at || row.updated_at))}${button('同步此商品','sync',` data-offer="${escape(offer)}"`,!offer)}</td></tr>`;
+            const source=safeSource(row.source_url), offer=String(row.offer_id || ''), identifier=row.ozon_sku || row.sku || '待回读', card=ozonLink(identifier);
+            return `<tr><td><button class="ops-offer" type="button" data-ops-action="detail" data-offer="${escape(offer)}">${escape(offer || '货号未提供')}</button><small>${escape(row.name || row.product_id || (row.source==='shop_readonly_import'?'店铺已有商品':'本地商品未绑定'))}</small></td><td>${escape(row.source_note || row.sku_name || '规格未记录')}<small>${source?`<a href="${escape(source)}" target="_blank" rel="noopener noreferrer">查看 1688 货源</a>`:'未记录货源，不自动补造'}</small></td><td>${badge(row.import_status || row.status)}<small>${escape(row.stock_status?status(row.stock_status):'库存尚未核对')}</small></td><td>${escape(row.warehouse_name || '未记录仓库')}<small>${escape(row.warehouse_id || '')}</small></td><td>${card?`<a href="${escape(card)}" target="_blank" rel="noopener noreferrer">${escape(identifier)}</a>`:escape(identifier)}<small>${escape(row.ozon_product_id?`商品 ID ${row.ozon_product_id}`:'商品 ID 待回读')}</small></td><td>${escape(date(row.last_synced_at || row.updated_at))}${button('同步此商品','sync',` data-offer="${escape(offer)}"`,!offer)}</td></tr>`;
         }).join('');
     }
     function products() {
         const s=state;
-        region('products', `<div class="ops-section-title"><h2>按货号监测</h2><span>${s.total} 条记录 · 仅当前店铺</span></div>${s.loading?empty('正在读取已保存记录…'):s.items.length?`<div class="ops-table-scroll"><table class="ops-table"><thead><tr><th>货号 / 本地商品</th><th>规格 / 货源</th><th>上架 / 库存状态</th><th>仓库</th><th>Ozon SKU</th><th>最近记录 / 操作</th></tr></thead><tbody>${productRows(s.items)}</tbody></table></div>`:empty('还没有匹配的上架记录。确认店铺后点击“读取新上架记录”；此操作只整理工作台已有记录，不会创建商品或开启广告。')}<div class="ops-pagination"><span>${s.total?s.offset+1:0}–${Math.min(s.offset+s.items.length,s.total)} / ${s.total}</span>${button('上一页','previous','',s.loading || !s.offset)}${button('下一页','next','',s.loading || s.offset+s.limit>=s.total)}</div>`);
+        region('products', `<div class="ops-section-title"><h2>按货号监测</h2><span>${s.total} 条记录 · 仅当前店铺</span></div>${s.loading?empty('正在读取已保存记录…'):s.items.length?`<div class="ops-table-scroll"><table class="ops-table"><thead><tr><th>货号 / 商品名称</th><th>规格 / 货源</th><th>上架 / 库存状态</th><th>仓库</th><th>Ozon SKU</th><th>最近记录 / 操作</th></tr></thead><tbody>${productRows(s.items)}</tbody></table></div>`:empty('还没有匹配记录。点击“添加店铺已有商品”从 Ozon 读取并选择，或“读取新上架记录”整理本工作台的上架记录。两者均不会重新上架。')}<div class="ops-pagination"><span>${s.total?s.offset+1:0}–${Math.min(s.offset+s.items.length,s.total)} / ${s.total}</span>${button('上一页','previous','',s.loading || !s.offset)}${button('下一页','next','',s.loading || s.offset+s.limit>=s.total)}</div>`);
+    }
+    function catalogItems(page, query='') {
+        const term=String(query).trim().toLocaleLowerCase();
+        return array(page?.items).filter(row=>!term || [row.offer_id,row.name,row.ozon_sku].some(value=>String(value || '').toLocaleLowerCase().includes(term)));
+    }
+    function catalogRows(items, selected, disabled=false) {
+        return array(items).map(row=>{const offer=String(row.offer_id || ''),image=safeThumbnail(row.thumbnail),price=number(row.price);
+            return `<tr><td><input type="checkbox" data-ops-catalog-offer="${escape(offer)}" aria-label="选择商品 ${escape(offer)}" ${selected.has(offer)?'checked':''} ${disabled?'disabled':''}></td><td class="ops-catalog-product">${image?`<img src="${escape(image)}" alt="" loading="lazy" referrerpolicy="no-referrer">`:''}<div><strong>${escape(row.name || '名称暂未取得')}</strong><small>${escape(offer)}</small></div></td><td>${escape(row.ozon_sku || '待回读')}<small>${escape('商品 ID '+(row.ozon_product_id || '待回读'))}</small></td><td>${escape(row.status || '待回读')}<small>${escape(row.moderate_status || '审核状态未取得')}</small></td><td>${price===null?'待回读':escape(metric(price,2))}<small>${escape(row.currency || '币种未取得')}</small></td></tr>`;
+        }).join('');
+    }
+    function catalog() {
+        const c=state.catalog;if(!c.open){region('catalog','');return}
+        const page=c.pages[c.index],items=catalogItems(page,c.query),shop=state.shops.find(s=>s.id===state.shop),busy=c.loading || c.importing;
+        const initialMessage=shop?.enabled===false?'店铺已停用，请先在店铺授权中启用并验证；停用时不会读取或导入新商品。':shop?.credentials_ready===false?'请先到店铺授权中保存并验证 Seller 凭据。':'点击“从 Ozon 读取商品”，读取后自由选择要分析的商品。进入本页不会自动扫描店铺。';
+        const warnings={details_missing:'部分商品详情暂未取得；可先导入，之后单独同步。',details_unavailable:'商品详情接口暂不可用，保留已核验的货号与商品 ID。',total_missing:'官方接口未提供总数，按分页游标读取，不估算数量。',cursor_loop:'官方返回重复分页游标，已停止继续读取；不能视为全部读取完毕，请稍后重新读取首页。',page_limit:'已达到单次 200 页读取上限；本次尚未覆盖全部商品，请重新读取。',search_current_page_only:'名称和货号筛选只作用于当前页，不代表全店搜索结果。'};
+        const warning=array(page?.warning_codes).map(code=>warnings[code] || '本页存在未取得的详情；未知字段不会用 0 替代。').filter((value,index,self)=>self.indexOf(value)===index).join(' ');
+        region('catalog',`<section class="ops-catalog" aria-label="添加店铺已有商品"><div class="ops-section-title"><div><h2>添加店铺已有商品</h2><p>${escape(shop?.name || state.shop)} · 仅读取非归档商品 · 每页最多 50 个</p></div>${button('关闭商品选择','catalog-close','',c.importing)}</div><p class="ops-muted">直接读取店铺货号、名称、SKU、状态与价格。勾选加入运营中心，不改商品卡、不设置库存，也不补造 1688 货源。分析权限不足会显示原因。</p><div class="ops-catalog-controls">${button(c.loading?'正在读取…':page?'重新读取首页':'从 Ozon 读取商品','catalog-read','',busy || shop?.credentials_ready===false || shop?.enabled===false)}<label class="ops-search">筛选本页货号 / 名称<input type="search" data-ops-input="catalog-query" value="${escape(c.query)}" maxlength="100" placeholder="仅筛选当前页，不是全店搜索" ${busy?'disabled':''}></label>${button('筛选本页','catalog-filter','',busy || !page)}${button('选择本页显示商品','catalog-select','',busy || !items.length)}${button('清空选择','catalog-clear','',busy || !c.selected.size)}</div>${c.loading?empty('正在读取 Ozon 商品，页面关闭或切换店铺不会修改线上数据。'):page?`${warning?`<p class="ops-muted">${escape(warning)}</p>`:''}${items.length?`<div class="ops-table-scroll"><table class="ops-table"><thead><tr><th>选择</th><th>商品名称 / 货号</th><th>Ozon SKU</th><th>平台状态</th><th>平台价格</th></tr></thead><tbody>${catalogRows(items,c.selected,c.importing)}</tbody></table></div>`:empty(c.query?'本页没有匹配商品，清空筛选或读取下一页。':'此批次没有可读取的非归档商品。')}<div class="ops-pagination"><span>第 ${c.index+1} 页 · 本页 ${items.length} 个${number(page.total)!==null?' · 官方非归档总数 '+escape(metric(page.total)):''} · 读取于 ${escape(date(page.fetched_at))}</span>${button('上一页商品','catalog-previous','',busy || !c.index)}${button('下一页商品','catalog-next','',busy || !page.has_more)}</div>`:empty(initialMessage)}<div class="ops-catalog-footer"><label class="ops-check"><input type="checkbox" data-ops-input="catalog-analyze" ${c.analyze?'checked':''} ${busy?'disabled':''}>同时排队分析所选商品最近 ${state.days} 天</label><span>本页已选 ${c.selected.size} / 100</span>${button(c.importing?'正在加入…':'加入运营中心','catalog-add','',busy || !page || !c.selected.size)}</div><p class="ops-muted">翻页会清空勾选。读取批次保留 1 小时；已有货号不会重复增加，历史货源和监测记录不会被覆盖。分析受官方权限与配额限制，可继续操作其他商品。</p></section>`);
+    }
+    async function readCatalog(next=false) {
+        const c=state.catalog;if(!c.open || c.loading || c.importing)return;
+        const revision=generation,catalogRevision=++catalogGeneration,previous=c.pages[c.index];
+        if(next && !previous?.has_more)return;
+        c.loading=true;c.selected.clear();catalog();
+        try{const page=await request('/api/operations/catalog/read',json({shop:state.shop,limit:50,...(next?{previous_page_token:previous.page_token}:{})}),`catalog-read-${catalogRevision}`,90000);
+            if(!current(revision) || catalogGeneration!==catalogRevision || !state.catalog.open)return;
+            if(!page.page_token || !Array.isArray(page.items))throw new Error('商品批次不完整，请重新读取首页。');
+            if(next){c.pages=c.pages.slice(0,c.index+1);c.pages.push(page);c.index++}else{c.pages=[page];c.index=0;c.query=''}
+        }catch(error){if(current(revision) && catalogGeneration===catalogRevision)announce(error.name==='AbortError'?'读取商品超时，请稍后重新读取；没有导入或修改线上商品。':error.message,true)}
+        finally{if(current(revision) && catalogGeneration===catalogRevision){c.loading=false;catalog()}}
+    }
+    async function addCatalog() {
+        const c=state.catalog,page=c.pages[c.index];if(c.loading || c.importing || !page || !c.selected.size)return;
+        const revision=generation; c.importing=true;catalog();controls();
+        try{const data=await request('/api/operations/catalog/add',json({shop:state.shop,page_token:page.page_token,offer_ids:[...c.selected],analyze:c.analyze,days:state.days,include_traffic:state.includeTraffic}),'catalog-add');
+            if(!current(revision))return;c.selected.clear();announce(`新增 ${data.imported || 0} 个，已有 ${data.existing || 0} 个；分析新排队 ${data.queued || 0} 个，已有任务 ${data.deduplicated || 0} 个。${array(data.queue_errors).length?'部分分析未能排队，请稍后单独同步。':'未修改线上商品。'}`,array(data.queue_errors).length>0);
+            await Promise.all([loadProducts(),loadJobs()]);
+        }catch(error){if(current(revision)){announce(error.name==='AbortError'?'加入请求超时，保存和排队结果暂不确定。请刷新运营记录及任务核对，再决定是否重试；不会修改线上商品。':error.message,true);if(error.name==='AbortError')await Promise.all([loadProducts(),loadJobs()])}}
+        finally{if(current(revision)){c.importing=false;catalog();controls()}}
     }
     function trendSvg(rows, keys, label) {
         const source=array(rows).map(row=>({date:row.date || row.day || row.date_to || row.collected_at,value:number(pick(row,keys))})).filter(row=>row.value!==null).sort((a,b)=>String(a.date).localeCompare(String(b.date)));
@@ -141,7 +183,7 @@
         if(!state.adOpen){region('advertising','');return}
         region('advertising', `<section class="ops-advertising"><div class="ops-section-title"><h2>广告授权与报表</h2>${button('收起','advertising')}</div>${adStatusHtml()}<div class="ops-section-title"><h3>广告活动（只读）</h3>${button(state.campaignsLoading?'读取中…':'从 Ozon 读取活动','campaigns','',!state.ad?.ready || state.campaignsLoading)}</div>${state.campaignsLoaded && !state.campaigns.length?empty('当前账号没有可读活动，或未获得对应店铺的广告权限。'):state.campaigns.length?`<div class="ops-table-scroll"><table class="ops-table"><thead><tr><th>选择</th><th>活动 / ID</th><th>官方状态</th><th>计费类型</th><th>投放位置</th></tr></thead><tbody>${campaignRows(state.campaigns)}</tbody></table></div>`:empty('验证独立广告授权后，手动读取活动。进入本页不会请求广告数据或开启广告。')}${campaignPager()}<form data-ops-form="report"><label>报表起始日期<input type="date" name="date_from" value="${escape(state.reportFrom)}" required></label><label>截止日期<input type="date" name="date_to" value="${escape(state.reportTo)}" required></label><span>已选择 ${state.campaignsSelected.size} / 10 个活动</span><button type="submit" ${!state.ad?.ready || !state.campaignsSelected.size || state.reportCreating || !canCreateReport(state.report) || historyBlocksReport(state.savedReports)?'disabled':''}>${state.reportCreating?'提交中…':'生成只读广告报表'}</button></form>${reportHtml()}<div class="ops-section-title"><h3>已保存报表任务</h3>${button('刷新任务记录','report-history')}</div>${reportHistoryHtml()}${historyBlocksReport(state.savedReports)?'<p class="ops-muted">当前店铺有未完成或结果不确定的报表，请先继续读取该任务或按恢复说明处理，不重复创建报表。</p>':''}<p class="ops-ad-guard">首版仅验证授权和读取报表。不会创建、开启广告，调整出价、预算，或修改线上商品。</p></section>`);
     }
-    function render() {if(!live())return;controls();products();detail();settings();advertising()}
+    function render() {if(!live())return;controls();catalog();products();detail();settings();advertising()}
     async function loadProducts() {
         const revision=generation,listRevision=++productsGeneration;state.loading=true;products();
         try{const data=await request('/api/operations/products?'+qs({shop:state.shop,q:state.query,limit:state.limit,offset:state.offset}));if(!current(revision) || productsGeneration!==listRevision)return;state.items=array(data.items);state.total=Number(data.total) || 0}
@@ -176,8 +218,9 @@
     }
     async function refresh() {if(!live() || !state.shop)return;await Promise.all([loadProducts(),loadJobs(),loadAdStatus(),loadSchedule(),loadReportHistory()]);if(state.offer)await loadDetail(state.offer)}
     function switchShop(shop) {
+        if(state.catalog.importing){controls();return}
         generation++;detailGeneration++;stopTimers();cancelRequests();const old=state;
-        state={...old,shop,items:[],total:0,offset:0,detail:null,offer:'',ad:null,jobs:[],schedule:null,scheduleDraft:null,campaigns:[],campaignsSelected:new Set(),campaignsLoaded:false,campaignsLoading:false,campaignPage:1,campaignHasMore:false,report:null,savedReports:[],reportCreating:false,reportPolling:false,authorizing:false,scheduleSaving:false};announce('');render();refresh();
+        state={...old,shop,catalog:newCatalog(),items:[],total:0,offset:0,detail:null,offer:'',ad:null,jobs:[],schedule:null,scheduleDraft:null,campaigns:[],campaignsSelected:new Set(),campaignsLoaded:false,campaignsLoading:false,campaignPage:1,campaignHasMore:false,report:null,savedReports:[],reportCreating:false,reportPolling:false,authorizing:false,scheduleSaving:false};announce('');render();refresh();
     }
     async function sync(offer) {
         if(!offer || !state.shop)return;const revision=generation,shop=state.shop,days=state.days,include_traffic=state.includeTraffic;
@@ -197,6 +240,18 @@
     async function onClick(event) {
         const target=event.target.closest('[data-ops-action]');if(!target || target.disabled || !live())return;
         const action=target.dataset.opsAction;const revision=generation;
+        if(action==='catalog-open'){state.catalog.open=true;catalog();return}
+        if(action==='catalog-close'){if(state.catalog.importing)return;const key='catalog-read-'+catalogGeneration;channelControllers.get(key)?.abort();catalogGeneration++;state.catalog=newCatalog();catalog();return}
+        if(action==='catalog-read'){await readCatalog();return}
+        if(action==='catalog-next'){
+            const c=state.catalog;if(c.loading || c.importing)return;
+            if(c.index+1<c.pages.length){c.index++;c.selected.clear();catalog()}else await readCatalog(true);return;
+        }
+        if(action==='catalog-previous'){const c=state.catalog;if(!c.loading && !c.importing && c.index){c.index--;c.selected.clear();catalog()}return}
+        if(action==='catalog-filter'){state.catalog.query=host.querySelector('[data-ops-input="catalog-query"]').value.trim();catalog();return}
+        if(action==='catalog-select'){const c=state.catalog;if(c.loading || c.importing)return;for(const row of catalogItems(c.pages[c.index],c.query)){if(c.selected.size>=100)break;c.selected.add(row.offer_id)}catalog();return}
+        if(action==='catalog-clear'){if(!state.catalog.importing){state.catalog.selected.clear();catalog()}return}
+        if(action==='catalog-add'){await addCatalog();return}
         if(action==='settings'){state.settingsOpen=!state.settingsOpen;settings();return}
         if(action==='advertising'){state.adOpen=!state.adOpen;advertising();return}
         if(action==='detail'){await loadDetail(target.dataset.offer);return}
@@ -218,8 +273,12 @@
     function onChange(event) {
         if(!live())return;const input=event.target;
         if(input.dataset.opsInput==='shop'){switchShop(input.value);return}
-        if(input.dataset.opsInput==='days'){state.days=Number(input.value)===30?30:7;detail();return}
+        if(input.dataset.opsInput==='days'){state.days=Number(input.value)===30?30:7;detail();catalog();return}
         if(input.dataset.opsInput==='include-traffic'){state.includeTraffic=input.checked;return}
+        if(input.dataset.opsInput==='catalog-query'){state.catalog.query=input.value.trim();return}
+        if(input.dataset.opsInput==='catalog-analyze'){state.catalog.analyze=input.checked;return}
+        if(input.dataset.opsCatalogOffer!==undefined){const c=state.catalog,offer=input.dataset.opsCatalogOffer;if(c.loading || c.importing || !array(c.pages[c.index]?.items).some(row=>row.offer_id===offer))return;
+            if(input.checked){if(c.selected.size>=100){input.checked=false;announce('单次最多导入 100 个商品。',true);return}c.selected.add(offer)}else c.selected.delete(offer);catalog();return}
         if(input.dataset.opsInput==='schedule-enabled' || input.dataset.opsInput==='schedule-days'){state.scheduleDraft={...(state.scheduleDraft || state.schedule || {}),[input.dataset.opsInput==='schedule-enabled'?'enabled':'days']:input.dataset.opsInput==='schedule-enabled'?input.checked:Number(input.value)};return}
         if(input.dataset.opsCampaign!==undefined){const id=input.dataset.opsCampaign;if(input.checked){if(state.campaignsSelected.size>=10){input.checked=false;announce('单次报表最多选择 10 个广告活动。',true);return}state.campaignsSelected.add(id)}else state.campaignsSelected.delete(id);advertising()}
         if(input.name==='date_from')state.reportFrom=input.value;
@@ -255,12 +314,12 @@
     async function mount(container) {
         unmount();host=typeof container==='string'?global.document.querySelector(container):container;if(!host)return;
         const today=new Date(),end=today.toISOString().slice(0,10),start=new Date(today.getTime()-6*86400000).toISOString().slice(0,10);
-        state={shops:[],shop:'',security:null,days:7,includeTraffic:true,query:'',offset:0,limit:30,items:[],total:0,loading:false,offer:'',detail:null,jobs:[],settingsOpen:false,schedule:null,scheduleDraft:null,scheduleSaving:false,ad:null,adOpen:false,authorizing:false,campaigns:[],campaignsSelected:new Set(),campaignsLoaded:false,campaignsLoading:false,campaignPage:1,campaignHasMore:false,reportFrom:start,reportTo:end,report:null,savedReports:[],reportCreating:false,reportPolling:false};
-        host.classList.add('operations-center');host.innerHTML='<header class="ops-heading"><h1>商品运营中心</h1><p>按店铺与货号追踪上架状态、搜索词和广告数据，先诊断，再优化。</p></header><p class="ops-stage-note">当前阶段：只读监测与广告报表。不会自动修改链接、开启广告或消耗广告预算。</p><p data-ops-notice class="ops-notice" role="status" aria-live="polite" hidden></p><div class="ops-toolbar" data-ops-region="toolbar"></div><div data-ops-region="products"></div><div data-ops-region="detail"></div><div data-ops-region="settings"></div><div data-ops-region="advertising"></div>';
+        state={shops:[],shop:'',catalog:newCatalog(),security:null,days:7,includeTraffic:true,query:'',offset:0,limit:30,items:[],total:0,loading:false,offer:'',detail:null,jobs:[],settingsOpen:false,schedule:null,scheduleDraft:null,scheduleSaving:false,ad:null,adOpen:false,authorizing:false,campaigns:[],campaignsSelected:new Set(),campaignsLoaded:false,campaignsLoading:false,campaignPage:1,campaignHasMore:false,reportFrom:start,reportTo:end,report:null,savedReports:[],reportCreating:false,reportPolling:false};
+        host.classList.add('operations-center');host.innerHTML='<header class="ops-heading"><h1>商品运营中心</h1><p>按店铺与货号追踪上架状态、搜索词和广告数据，先诊断，再优化。</p></header><p class="ops-stage-note">当前阶段：只读监测与广告报表。不会自动修改链接、开启广告或消耗广告预算。</p><p data-ops-notice class="ops-notice" role="status" aria-live="polite" hidden></p><div class="ops-toolbar" data-ops-region="toolbar"></div><div data-ops-region="catalog"></div><div data-ops-region="products"></div><div data-ops-region="detail"></div><div data-ops-region="settings"></div><div data-ops-region="advertising"></div>';
         host.addEventListener('click',onClick);host.addEventListener('change',onChange);host.addEventListener('submit',onSubmit);render();const revision=generation;
         try{const config=await request('/api/operations/config',{},'config');if(!current(revision))return;state.shops=array(config.shops);state.security=config.credential_security;state.shop=initialShopId(state.shops);render();if(state.shop)await refresh();else announce('先在“店铺授权”添加 Ozon 店铺，再读取上架记录。')}
         catch(error){if(current(revision) && error.name!=='AbortError')announce(error.message,true)}
     }
     const api=Object.freeze({mount,refresh,unmount});global.OperationsCenter=api;
-    if(typeof module!=='undefined' && module.exports)module.exports={escape,initialShopId,metric,finiteRatio,safeSource,status,productRows,queryRows,snapshotRows,reportRows,trendSvg,diagnostics,healthHtml,latestSnapshot,metricObservations,queryObservations,normalizedStatus,terminal,canCreateReport,historyBlocksReport,mount,refresh,unmount};
+    if(typeof module!=='undefined' && module.exports)module.exports={escape,initialShopId,metric,finiteRatio,safeSource,safeThumbnail,ozonLink,catalogItems,catalogRows,status,productRows,queryRows,snapshotRows,reportRows,trendSvg,diagnostics,healthHtml,latestSnapshot,metricObservations,queryObservations,normalizedStatus,terminal,canCreateReport,historyBlocksReport,mount,refresh,unmount};
 })(typeof window!=='undefined'?window:globalThis);

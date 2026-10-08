@@ -111,7 +111,7 @@ def _require_shop_admin(request: Request) -> None:
 async def _validation_error_without_credentials(request: Request, error: RequestValidationError) -> Response:
     # FastAPI normally echoes the failing input. A malformed credential must never
     # be copied into a response, including failures in another field in this form.
-    if request.url.path in {"/api/workbench/stores/authorize", "/api/operations/advertising/authorize"}:
+    if request.url.path in {"/api/workbench/stores/authorize", "/api/workbench/shop-management", "/api/operations/advertising/authorize"}:
         return JSONResponse(status_code=422, content={"detail": [
             {"loc": item.get("loc"), "msg": item.get("msg"), "type": item.get("type")}
             for item in error.errors()
@@ -1896,7 +1896,8 @@ def authorize_workbench_shop(request: Request, payload: ShopAuthorizationRequest
         shop = authorize_shop(shop_id=payload.shop_id, display_name=payload.display_name,
                               client_id=payload.client_id.get_secret_value(),
                               api_key=payload.api_key.get_secret_value(),
-                              default_currency_code=payload.default_currency_code)
+                              default_currency_code=payload.default_currency_code,
+                              require_same_client=True)
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     from pipeline.category_form import invalidate_shop_cache
@@ -2420,6 +2421,31 @@ register_operations_routes(app, runtime_root=lambda: MARKET_DB_PATH.parent,
                           seller_transport=_seller_transport, shop_rows=_operations_shop_rows,
                           credential_context=_shop_authorization_context,
                           require_credentials=_require_shop_admin)
+
+from workbench_shop_management_api import register_shop_management_routes
+
+
+def _invalidate_managed_shop_cache(shop_id):
+    from pipeline.category_form import invalidate_shop_cache
+    invalidate_shop_cache(MARKET_DB_PATH.parent, shop_id)
+
+
+register_shop_management_routes(app, runtime_root=lambda: MARKET_DB_PATH.parent,
+                                credential_context=_shop_authorization_context,
+                                require_credentials=_require_shop_admin,
+                                invalidate_shop_cache=_invalidate_managed_shop_cache)
+
+
+@app.get("/assets/shop-manager.js")
+def shop_manager_script():
+    from fastapi.responses import FileResponse
+    return FileResponse(Path(__file__).resolve().parent / "web/shop-manager.js", media_type="text/javascript")
+
+
+@app.get("/assets/shop-manager.css")
+def shop_manager_styles():
+    from fastapi.responses import FileResponse
+    return FileResponse(Path(__file__).resolve().parent / "web/shop-manager.css", media_type="text/css")
 
 
 @app.get("/assets/operations-center.js")

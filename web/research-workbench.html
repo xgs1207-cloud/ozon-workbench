@@ -291,12 +291,27 @@ startWorkbench();
 <script src="/assets/listing-rich-content.js?v=20261008-collector1"></script>
 <script src="/assets/image-preview.js?v=20261008-collector1"></script>
 <script src="/assets/employee-keywords.js?v=20261008-collector1"></script>
-<link rel="stylesheet" href="/assets/operations-center.css?v=20261008-operations1">
-<script src="/assets/operations-center.js?v=20261008-operations1"></script>
+<link rel="stylesheet" href="/assets/operations-center.css?v=20261008-shopcatalog1">
+<script src="/assets/operations-center.js?v=20261008-shopcatalog1"></script>
+<link rel="stylesheet" href="/assets/shop-manager.css?v=20261008-shopcatalog1">
+<script src="/assets/shop-manager.js?v=20261008-shopcatalog1"></script>
 <script>
 // One editing workbench, plus a separate read-only operations surface.
 const beforeOperationsRender=render;
 render=function(){
+  if(window.ShopManager?.isBusy?.() && state.view!=='stores'){
+    state.view='stores';activate();window.ShopManager.canLeave();return;
+  }
+  if(state.view!=='stores')window.ShopManager?.unmount?.();
+  if(state.view==='stores'){
+    window.OperationsCenter?.unmount?.();
+    document.body.classList.remove('operations-mode','product-mode');
+    $('#main').classList.remove('operations-page','source-page','product-page');
+    activate();
+    if($('#main').classList.contains('shop-manager'))return;
+    window.ShopManager.mount($('#main'),{onSaved:()=>refreshStores()});
+    return;
+  }
   if(state.view!=='operations'){
     window.OperationsCenter?.unmount?.();
     document.body.classList.remove('operations-mode');

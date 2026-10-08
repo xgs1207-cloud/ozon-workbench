@@ -5,7 +5,7 @@ const pure=require('../web/operations-center.js');
 const deferred=()=>{let resolve;const promise=new Promise(yes=>resolve=yes);return{resolve,promise}};
 function harness(respond) {
     const calls=[],timers=new Map();let timerId=0;
-    const regions=new Map(['toolbar','products','detail','settings','advertising'].map(name=>[name,{innerHTML:''}]));
+    const regions=new Map(['toolbar','catalog','products','detail','settings','advertising'].map(name=>[name,{innerHTML:''}]));
     const notice={hidden:true,textContent:'',classList:{toggle(){}}},inputs=new Map(),handlers=new Map();
     const host={isConnected:true,innerHTML:'',classList:{add(value){this[value]=true},remove(value){delete this[value]},contains(value){return this[value]===true}},addEventListener:(type,fn)=>handlers.set(type,fn),removeEventListener:type=>handlers.delete(type),querySelector:selector=>selector==='[data-ops-notice]'?notice:regions.get(/data-ops-region="([^"]+)/.exec(selector)?.[1]) || inputs.get(selector) || null};
     const win={document:{querySelector:()=>host},fetch:async(url,options)=>{calls.push({url,options});const value=respond?await respond(url,options):fixtures(url);return {ok:true,status:200,json:async()=>value}}};
@@ -24,6 +24,59 @@ function fixtures(url) {
     if(url.startsWith('/api/operations/product?'))return{product:{offer_id:'xzj.jp.10.8.1'},snapshots:[],queries:{items:[]},diagnostics:[],jobs:[]};
     return{items:[]};
 }
+
+const catalogPage=(offers=['old-offer','new-offer'],next=true)=>({items:offers.map((offer,i)=>({offer_id:offer,name:'离线商品 '+offer,ozon_product_id:String(100+i),ozon_sku:String(900+i),price:i===0?null:0,currency:'RUB',status:'processed'})),page_token:offers.includes('new-offer')?'11111111-1111-4111-8111-111111111111':'22222222-2222-4222-8222-222222222222',has_more:next,total:3,fetched_at:'2026-10-08T01:00:00Z',warning_codes:[]});
+
+test('catalog import is explicit; cached next/back clears selection and cannot submit raw remote identity',async()=>{
+    const h=harness((url,options)=>url==='/api/operations/catalog/read'?(JSON.parse(options.body).previous_page_token?catalogPage(['last-offer'],false):catalogPage()):url==='/api/operations/catalog/add'?{imported:1,existing:0,queued:1,deduplicated:0,queue_errors:[]}:fixtures(url));
+    await h.win.OperationsCenter.mount(h.host);await h.click('catalog-open');
+    assert.ok(!h.calls.some(c=>c.url==='/api/operations/catalog/read'));
+    await h.click('catalog-read');h.change({opsCatalogOffer:'new-offer'},{checked:true});await h.click('catalog-add');
+    const body=JSON.parse(h.calls.find(c=>c.url==='/api/operations/catalog/add').options.body);
+    assert.deepEqual(body,{shop:'a',page_token:'11111111-1111-4111-8111-111111111111',offer_ids:['new-offer'],analyze:true,days:7,include_traffic:true});
+    assert.match(h.notice.textContent,/新增 1 个/);assert.match(h.regions.get('catalog').innerHTML,/本页已选 0/);
+    await h.click('catalog-next');assert.match(h.regions.get('catalog').innerHTML,/last-offer/);
+    assert.deepEqual(JSON.parse(h.calls.filter(c=>c.url==='/api/operations/catalog/read')[1].options.body),{shop:'a',limit:50,previous_page_token:body.page_token});
+    h.change({opsCatalogOffer:'last-offer'},{checked:true});await h.click('catalog-previous');
+    assert.match(h.regions.get('catalog').innerHTML,/new-offer/);assert.match(h.regions.get('catalog').innerHTML,/本页已选 0/);
+    h.win.OperationsCenter.unmount();
+});
+
+test('catalog current-page filter is literal, selection caps at 100, and no-analysis choice is respected',async()=>{
+    const page=catalogPage(Array.from({length:110},(_,i)=>'offer-'+i),false);const h=harness((url,opts)=>url==='/api/operations/catalog/read'?page:url==='/api/operations/catalog/add'?{imported:1,existing:0,queued:0,deduplicated:0}:fixtures(url));
+    await h.win.OperationsCenter.mount(h.host);await h.click('catalog-open');await h.click('catalog-read');await h.click('catalog-select');
+    assert.match(h.regions.get('catalog').innerHTML,/本页已选 100/);await h.click('catalog-clear');
+    h.inputs.set('[data-ops-input="catalog-query"]',{value:'offer-109'});await h.click('catalog-filter');await h.click('catalog-select');
+    h.change({opsInput:'catalog-analyze'},{checked:false});await h.click('catalog-add');
+    const body=JSON.parse(h.calls.find(c=>c.url==='/api/operations/catalog/add').options.body);assert.deepEqual(body.offer_ids,['offer-109']);assert.equal(body.analyze,false);
+    assert.deepEqual(pure.catalogItems(catalogPage(),'<script>'),[]);h.win.OperationsCenter.unmount();
+});
+
+test('catalog close and shop-switch suppress late page results, without stopping persisted jobs',async()=>{
+    const waiting=deferred();const h=harness((url)=>url==='/api/operations/catalog/read'?waiting.promise:fixtures(url));
+    await h.win.OperationsCenter.mount(h.host);await h.click('catalog-open');const running=h.click('catalog-read');
+    const call=h.calls.find(c=>c.url==='/api/operations/catalog/read');await h.click('catalog-close');assert.equal(call.options.signal.aborted,true);
+    await h.click('catalog-open');h.change({opsInput:'shop'},{value:'b'});waiting.resolve(catalogPage(['A-stale'],false));await running;
+    assert.equal(h.regions.get('catalog').innerHTML,'');assert.doesNotMatch(h.regions.get('products').innerHTML,/A-stale/);h.win.OperationsCenter.unmount();
+});
+
+test('import locks scope and duplicate clicks; partial queue failure remains an honest saved import',async()=>{
+    const waiting=deferred();const h=harness(url=>url==='/api/operations/catalog/read'?catalogPage():url==='/api/operations/catalog/add'?waiting.promise:fixtures(url));
+    await h.win.OperationsCenter.mount(h.host);await h.click('catalog-open');await h.click('catalog-read');h.change({opsCatalogOffer:'new-offer'},{checked:true});
+    const pending=h.click('catalog-add');await h.click('catalog-add');h.change({opsInput:'shop'},{value:'b'});await h.click('catalog-close');
+    assert.match(h.regions.get('toolbar').innerHTML,/<option value="a" selected>/);assert.match(h.regions.get('catalog').innerHTML,/正在加入/);
+    waiting.resolve({imported:1,existing:0,queued:0,queue_errors:[{offer_id:'new-offer',code:'queue_unavailable'}]});await pending;
+    assert.equal(h.calls.filter(c=>c.url==='/api/operations/catalog/add').length,1);assert.match(h.notice.textContent,/部分分析未能排队/);h.win.OperationsCenter.unmount();
+});
+
+test('catalog warns incomplete pagination, escapes source strings, and does not fabricate missing price',async()=>{
+    const page={...catalogPage(),warning_codes:['cursor_loop','page_limit'],has_more:false};const h=harness(url=>url==='/api/operations/catalog/read'?page:fixtures(url));
+    await h.win.OperationsCenter.mount(h.host);await h.click('catalog-open');await h.click('catalog-read');
+    assert.match(h.regions.get('catalog').innerHTML,/不能视为全部读取完毕/);assert.match(h.regions.get('catalog').innerHTML,/200 页读取上限/);assert.match(h.regions.get('catalog').innerHTML,/待回读/);assert.match(h.regions.get('catalog').innerHTML,/>0</);
+    const html=pure.catalogRows([{offer_id:'<script>',name:'<img onerror=bad>',thumbnail:'javascript:bad'}],new Set());assert.doesNotMatch(html,/<script>|<img/);assert.match(html,/&lt;img/);
+    for(const url of ['javascript:bad','http://x.test/a','https://user:secret@x.test/a'])assert.equal(pure.safeThumbnail(url),'');
+    assert.equal(pure.ozonLink('9001'),'https://www.ozon.ru/product/9001/');assert.equal(pure.ozonLink('" onclick=bad'),'');h.win.OperationsCenter.unmount();
+});
 test('numeric absence remains unavailable and ratios reject zero denominators',()=>{
     for(const value of [null,undefined,'','  ',false,true,[],NaN,Infinity])assert.equal(pure.metric(value),'暂无数据');
     assert.equal(pure.metric(0),'0');assert.equal(pure.finiteRatio(10,0),null);assert.equal(pure.finiteRatio(0,20),0);

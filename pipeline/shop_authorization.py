@@ -287,15 +287,20 @@ def authorize_shop(
     vault_root: Path | str | None = None,
     transport_factory: TransportFactory | None = None,
     make_default: bool | None = None,
+    expected_mode: str | None = None,
+    require_same_client: bool = False,
+    forbidden_values: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """验证新凭据后才替换密文及启用店铺，验证失败不覆盖原来的可用授权。"""
     valid_id = _validate_shop_id(shop_id)
     client, key = _validate_credentials(client_id, api_key)
-    if key in valid_id or client in valid_id:
+    if key in valid_id or client in valid_id or any(value and value in valid_id for value in forbidden_values):
         raise ShopAuthorizationError("店铺 ID 不能包含 Client-Id 或 API Key，请填写自定义代号")
     name = str(display_name or "").strip()
-    if not name or len(name) > 100 or key in name or client in name:
+    if not name or len(name) > 100 or key in name or client in name or any(value and value in name for value in forbidden_values):
         raise ShopAuthorizationError("请输入 1–100 字的店铺名称，名称不能包含凭据")
+    if expected_mode not in (None, "create", "update"):
+        raise ShopAuthorizationError("请选择新增或修改店铺")
     currency = currency or default_currency_code
     if currency not in ("CNY", "RUB", "USD", "EUR", "KZT", "BYN"):
         raise ShopAuthorizationError("不支持该默认币种，请选择 CNY、RUB、USD、EUR、KZT 或 BYN")
@@ -305,6 +310,19 @@ def authorize_shop(
     with stores.registry_lock(registry_path):
         registry = _read_registry(registry_path, vault_root)
         existing = next((row for row in stores.list_shops(registry) if row.get("id") == valid_id), {})
+        if expected_mode == "create" and existing:
+            raise ShopAuthorizationError("店铺 ID 已存在，请选择修改或使用新的店铺 ID")
+        if expected_mode == "update" and not existing:
+            raise ShopAuthorizationError("要修改的店铺不存在，请重新读取店铺列表")
+        if require_same_client and existing:
+            previous_client, previous_key = stores.credential_values(existing)
+            if not previous_client and (existing.get("enabled") or existing.get("checked_at") or
+                                        existing.get("credential_ref")):
+                raise ShopAuthorizationError("无法确认原店铺 Seller Client-Id，请恢复原凭据或新增店铺，未替换现有授权")
+            if previous_client and previous_client != client:
+                raise ShopAuthorizationError("Seller Client-Id 与原店铺不一致，请新增店铺，不能替换已有店铺账户")
+            if any(value and value in name for value in (previous_client, previous_key)):
+                raise ShopAuthorizationError("店铺名称不能包含原有店铺凭据")
         # 随机密文引用同时充当环境变量名后缀，避免不同合法 ID 规范化后发生冲突。
         reference = _write_vault_credentials(root, valid_id, client, key)
         prefix = "OZON_VAULT_" + reference.upper()
@@ -338,6 +356,34 @@ def authorize_shop(
             except OSError:
                 pass  # 未被任何店铺引用的孤立密文不影响原授权，避免覆盖真正的保存错误。
             raise ShopAuthorizationError("店铺授权验证成功，但无法保存配置，请检查服务器目录权限") from None
+        return _public_shop(registry, valid_id)
+
+
+def update_shop_metadata(
+    shop_id: str, display_name: str, *, default_currency_code: str = "CNY",
+    registry_path: Path | str | None = None, vault_root: Path | str | None = None,
+    forbidden_values: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """只修改名称和默认币种，不替换密文、不启用店铺、不访问 Ozon。"""
+    valid_id = _validate_shop_id(shop_id)
+    name = str(display_name or "").strip()
+    if not name or len(name) > 100 or any(ord(char) < 32 for char in name):
+        raise ShopAuthorizationError("请输入 1–100 字的店铺名称，不能包含控制字符")
+    if default_currency_code not in ("CNY", "RUB", "USD", "EUR"):
+        raise ShopAuthorizationError("请选择 CNY、RUB、USD 或 EUR 默认币种")
+    with stores.registry_lock(registry_path):
+        registry = _read_registry(registry_path, vault_root)
+        shop = _shop(registry, valid_id)
+        client, key = stores.credential_values(shop)
+        secrets = (client, key, *forbidden_values)
+        if any(value and (value in name or value in valid_id) for value in secrets):
+            raise ShopAuthorizationError("店铺 ID 和名称不能包含 Seller 或广告凭据")
+        stores.upsert_shop(registry, {"id": valid_id, "display_name": name,
+                                     "default_currency_code": default_currency_code})
+        try:
+            stores.save_registry(registry, registry_path)
+        except (OSError, ValueError):
+            raise ShopAuthorizationError("无法保存店铺资料，请检查服务器目录权限；原授权未替换") from None
         return _public_shop(registry, valid_id)
 
 

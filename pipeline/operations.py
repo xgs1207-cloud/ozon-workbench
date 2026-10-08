@@ -134,6 +134,10 @@ class Store:
                 CREATE TABLE IF NOT EXISTS analytics_budget (
                     account_hash TEXT PRIMARY KEY, utc_day TEXT NOT NULL,
                     calls INTEGER NOT NULL, last_call_at REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS catalog_pages (
+                    token TEXT PRIMARY KEY, shop TEXT NOT NULL,
+                    expires_at REAL NOT NULL, payload TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS catalog_pages_expiry ON catalog_pages(shop,expires_at);
                 PRAGMA user_version=1;
             """)
 
@@ -164,6 +168,10 @@ class Store:
                 if old and any(old.get(k) and row.get(k) and old[k] != row[k] for k in ("product_id", "source_sku_id")):
                     conflicts += 1
                     continue
+                remote_id = _identifier(row.get("ozon_product_id"))
+                if old.get("ozon_product_id") and remote_id and old["ozon_product_id"] != remote_id:
+                    conflicts += 1
+                    continue
                 product = dict(old)
                 for field in ("product_id", "source_sku_id", "source_url", "source_note", "import_status", "stock_status", "warehouse_name"):
                     if field in row:
@@ -173,10 +181,20 @@ class Store:
                     if candidate:
                         product[field] = candidate
                 product.update(shop=shop, offer_id=offer, discovered_at=old.get("discovered_at", _iso(now)), ledger_updated_at=_text(row.get("updated_at")), monitoring="read_only")
+                if product.get("product_id"):
+                    product["source"] = "local_listing"
                 db.execute("INSERT INTO products VALUES(?,?,?,?) ON CONFLICT(shop,offer_id) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at", (shop, offer, _json(product), now))
                 discovered += not bool(old)
                 updated += bool(old)
         return {"discovered": discovered, "updated": updated, "conflicts": conflicts}
+
+    def catalog_page(self, shop, page_token) -> dict:
+        from .operations_catalog import read_page
+        return read_page(self, shop, page_token)
+
+    def import_catalog_rows(self, shop, page_token, offer_ids) -> dict:
+        from .operations_catalog import import_selected
+        return import_selected(self, shop, page_token, offer_ids)
 
     def list_products(self, shop=None, q="", limit=30, offset=0) -> dict:
         if shop is not None:

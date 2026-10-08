@@ -10,3 +10,308 @@ body.shop-manager-mode .shell{grid-template-columns:208px minmax(0,1fr)}body.sho
 .shop-manager fieldset{border:0;padding:0;margin:0;min-width:0}.shop-manager fieldset:disabled :is(input,select){opacity:.7;cursor:not-allowed}.shop-manager .sm-form-section{padding:20px 0 26px;border-bottom:1px solid var(--sm-line)}.shop-manager .sm-form-section:first-child{padding-top:6px}.shop-manager h3{font-size:15px;font-weight:700;margin:0 0 18px}.shop-manager .sm-group-title{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:8px}.shop-manager .sm-group-title h3{margin:0}.shop-manager .sm-group-title span{font-size:11px;color:var(--sm-muted)}.shop-manager .sm-field-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px 22px}.shop-manager .sm-help{font-size:12px;color:var(--sm-muted);line-height:1.9;margin:10px 0 17px;max-width:740px}.shop-manager .sm-help a{color:var(--sm-blue);text-decoration:none}.shop-manager .sm-help a:hover{text-decoration:underline}
 .shop-manager .sm-form-footer{display:flex;align-items:center;gap:17px;padding-top:24px}.shop-manager button.sm-primary{background:#1557e8;border-color:#1557e8;color:white;font-weight:650;padding:9px 17px;min-height:42px;white-space:nowrap}.shop-manager button.sm-primary:disabled{background:#b3c7ee;border-color:#b3c7ee}.shop-manager .sm-form-footer span{color:var(--sm-muted);font-size:11px;line-height:1.9}.shop-manager .sm-notice{padding:11px 14px;border:1px solid #dce6fb;border-radius:7px;background:#edf3ff;font-size:13px;color:#244988;line-height:1.85;overflow-wrap:anywhere}.shop-manager .sm-notice.is-error{background:#fff4ec;border-color:#f0d7bf;color:#885620}
 @media(min-width:1000px) and (max-width:1390px){.shop-manager .sm-layout{grid-template-columns:245px minmax(0,1fr);gap:25px}.shop-manager .sm-list-pane{padding:15px}.shop-manager .sm-field-grid{gap:17px}.shop-manager .sm-form-footer{align-items:flex-start}}
+
+/* The studio skin keeps authorization a work surface, not a dashboard of cards. */
+body.studio-theme.shop-manager-mode .shell {
+    grid-template-columns:196px minmax(0,1fr);
+}
+body.studio-theme.shop-manager-mode .main {
+    max-width:1440px;
+}
+body.studio-theme .shop-manager {
+    --sm-blue:var(--studio-accent,#a93667);
+    --sm-muted:var(--studio-muted,#6c6672);
+    --sm-ink:var(--studio-ink,#26232b);
+    --sm-line:var(--studio-line,#e9e5eb);
+    min-width:0;
+}
+body.studio-theme .shop-manager .sm-heading h1 {
+    font-size:30px;
+    line-height:1.3;
+    font-weight:750;
+    letter-spacing:-.7px;
+    margin-bottom:9px;
+}
+body.studio-theme .shop-manager .sm-heading p {
+    font-size:13px;
+    margin-bottom:14px;
+    max-width:76ch;
+}
+body.studio-theme .shop-manager .sm-shared-note {
+    border-left:2px solid #d8bdd0;
+    padding-left:12px;
+    margin:0 0 25px;
+    font-size:12px;
+    line-height:1.8;
+}
+body.studio-theme .shop-manager .sm-layout {
+    grid-template-columns:240px minmax(0,1fr);
+    gap:28px;
+}
+body.studio-theme .shop-manager .sm-list-pane {
+    top:84px;
+    background:var(--studio-surface,#fff);
+    border:1px solid var(--sm-line);
+    border-radius:14px;
+    padding:17px 13px;
+}
+body.studio-theme .shop-manager .sm-list-heading {
+    margin-bottom:15px;
+    padding:0 3px;
+    gap:8px;
+}
+body.studio-theme .shop-manager .sm-list-heading h2 {
+    font-size:15px;
+}
+body.studio-theme .shop-manager .sm-list-heading h2 span {
+    color:var(--sm-muted);
+    margin-left:5px;
+    font-size:11px;
+}
+body.studio-theme .shop-manager button {
+    color:var(--sm-ink);
+    border-color:var(--sm-line);
+    border-radius:8px;
+    background:var(--studio-surface,#fff);
+    font-size:12px;
+    min-height:36px;
+    padding:7px 11px;
+    font-weight:600;
+}
+body.studio-theme .shop-manager button:hover:not(:disabled) {
+    border-color:#d3abc0;
+    color:var(--sm-blue);
+    background:var(--studio-soft,#faf0f5);
+}
+body.studio-theme .shop-manager button:disabled {
+    border-color:var(--sm-line);
+    color:#938a97;
+    background:#f5f3f6;
+}
+body.studio-theme .shop-manager label {
+    font-size:12px;
+    font-weight:700;
+    gap:7px;
+}
+body.studio-theme .shop-manager label small {
+    color:var(--sm-muted);
+    font-size:11px;
+    max-width:58ch;
+}
+body.studio-theme .shop-manager :is(input,select) {
+    min-height:44px;
+    border:1px solid #e9e5eb;
+    background:#f8f6f9;
+    border-radius:9px;
+    padding:11px 13px;
+    color:var(--sm-ink);
+    font-size:13px;
+}
+body.studio-theme .shop-manager :is(input,select):focus {
+    border-color:#bd7494;
+    background:#fff;
+}
+body.studio-theme .shop-manager input::placeholder {
+    color:var(--studio-muted,#6c6672);
+}
+body.studio-theme .shop-manager input[readonly] {
+    background:#f0edf2;
+    color:var(--sm-muted);
+}
+body.studio-theme .shop-manager input[type=checkbox] {
+    width:16px;
+    height:16px;
+    min-height:0;
+    padding:0;
+    flex-shrink:0;
+    accent-color:var(--sm-blue);
+}
+body.studio-theme .shop-manager .sm-check {
+    font-weight:400;
+}
+body.studio-theme .shop-manager .sm-search {
+    padding:0 3px;
+    margin-bottom:12px;
+}
+body.studio-theme .shop-manager .sm-search input {
+    min-height:39px;
+    background:#f8f6f9;
+    border-color:var(--sm-line);
+    font-size:12px;
+}
+body.studio-theme .shop-manager .sm-list {
+    min-height:130px;
+    max-height:calc(100vh - 360px);
+    scrollbar-color:#d2c7d3 transparent;
+    scrollbar-width:thin;
+}
+body.studio-theme .shop-manager button.sm-shop {
+    padding:13px 11px;
+    border-radius:9px;
+    margin-bottom:6px;
+    background:transparent;
+    border:1px solid transparent;
+    border-left:2px solid transparent;
+}
+body.studio-theme .shop-manager button.sm-shop:hover:not(:disabled) {
+    background:#f8f4f7;
+    border-color:#e8d9e2;
+    color:var(--sm-ink);
+}
+body.studio-theme .shop-manager button.sm-shop.is-selected {
+    background:var(--studio-soft,#faf0f5);
+    border-color:#ead5e1;
+    border-left-color:var(--sm-blue);
+    padding-left:11px;
+    color:var(--sm-ink);
+}
+body.studio-theme .shop-manager .sm-shop-name {
+    font-size:13px;
+    gap:5px;
+}
+body.studio-theme .shop-manager .sm-shop-id {
+    font-size:11px;
+    margin:5px 0 7px;
+}
+body.studio-theme .shop-manager .sm-shop-status {
+    color:#866023;
+    gap:3px;
+    font-size:11px;
+    font-weight:400;
+}
+body.studio-theme .shop-manager .sm-shop-status .is-ready {
+    color:#28725c;
+}
+body.studio-theme .shop-manager .sm-default {
+    color:var(--sm-blue);
+    background:#f1dfe9;
+    font-size:10px;
+    font-weight:600;
+    border-radius:5px;
+}
+body.studio-theme .shop-manager .sm-refresh {
+    background:#faf9fb;
+    margin-top:12px;
+}
+body.studio-theme .shop-manager .sm-editor {
+    padding:21px 25px 24px;
+    border:1px solid var(--sm-line);
+    border-radius:14px;
+    background:var(--studio-surface,#fff);
+}
+body.studio-theme .shop-manager .sm-editor-heading {
+    margin-bottom:16px;
+    padding-bottom:16px;
+}
+body.studio-theme .shop-manager .sm-editor-heading h2 {
+    font-size:19px;
+    letter-spacing:-.25px;
+}
+body.studio-theme .shop-manager .sm-editor-heading p {
+    margin-top:7px;
+    font-size:12px;
+}
+body.studio-theme .shop-manager .sm-status-line {
+    color:var(--sm-muted);
+    gap:8px 16px;
+    font-size:12px;
+}
+body.studio-theme .shop-manager .sm-meta {
+    margin:10px 0;
+    font-size:11px;
+    line-height:1.85;
+}
+body.studio-theme .shop-manager .sm-shop-actions {
+    gap:8px;
+    margin:12px 0 17px;
+}
+body.studio-theme .shop-manager .sm-security {
+    margin:16px 0;
+    background:#f6f3f7;
+    border-left:2px solid #d5c6d8;
+    color:var(--sm-muted);
+    border-radius:0 6px 6px 0;
+    padding:10px 12px;
+}
+body.studio-theme .shop-manager .sm-security.is-warning {
+    background:#fff8eb;
+    border-left-color:#d2a454;
+    color:#7c5922;
+}
+body.studio-theme .shop-manager .sm-form-section {
+    padding:21px 0 24px;
+}
+body.studio-theme .shop-manager .sm-form-section:first-child {
+    padding-top:4px;
+}
+body.studio-theme .shop-manager h3 {
+    font-size:14px;
+    margin-bottom:16px;
+    font-weight:700;
+}
+body.studio-theme .shop-manager .sm-group-title {
+    gap:12px;
+}
+body.studio-theme .shop-manager .sm-group-title span {
+    text-align:right;
+    line-height:1.7;
+    font-size:11px;
+}
+body.studio-theme .shop-manager .sm-help {
+    margin:10px 0 16px;
+    line-height:1.85;
+    max-width:76ch;
+}
+body.studio-theme .shop-manager .sm-field-grid {
+    gap:18px 20px;
+}
+body.studio-theme .shop-manager .sm-form-footer {
+    padding-top:22px;
+    gap:14px;
+}
+body.studio-theme .shop-manager button.sm-primary {
+    color:#fff;
+    background:var(--sm-blue);
+    border-color:var(--sm-blue);
+    min-height:44px;
+    padding:10px 18px;
+    font-weight:700;
+}
+body.studio-theme .shop-manager button.sm-primary:hover:not(:disabled) {
+    background:#902951;
+    border-color:#902951;
+    color:#fff;
+}
+body.studio-theme .shop-manager button.sm-primary:disabled {
+    background:#d9b7c9;
+    border-color:#d9b7c9;
+    color:#fff;
+}
+body.studio-theme .shop-manager .sm-notice {
+    background:var(--studio-soft,#faf0f5);
+    border-color:#ebd1df;
+    color:#873456;
+    border-radius:9px;
+    font-size:12px;
+    margin-bottom:18px;
+}
+body.studio-theme .shop-manager .sm-notice.is-error {
+    background:#fff2f3;
+    border-color:#edcbd1;
+    color:#9c3345;
+}
+@media (min-width:1000px) and (max-width:1390px) {
+    body.studio-theme .shop-manager .sm-layout {
+        grid-template-columns:224px minmax(0,1fr);
+        gap:22px;
+    }
+    body.studio-theme .shop-manager .sm-list-pane {
+        padding:15px 11px;
+    }
+    body.studio-theme .shop-manager .sm-editor {
+        padding:20px;
+    }
+    body.studio-theme .shop-manager .sm-field-grid {
+        gap:17px;
+    }
+}

@@ -775,6 +775,25 @@ def _read_json_file(path: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _product_thumbnail(directory: Path, product_id: str) -> str | None:
+    """Reuse a collected local cover without downloading media or generating images."""
+    from urllib.parse import quote
+
+    root = directory.resolve()
+    if not root.is_relative_to(PRODUCTS_ROOT.resolve()):
+        return None
+    try:
+        for folder in ("main-images", "sku-images"):
+            for candidate in sorted((directory / "input" / folder).glob("*")):
+                if (candidate.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".avif"}
+                        and candidate.is_file() and candidate.resolve().is_relative_to(root)):
+                    relative = candidate.relative_to(directory).as_posix()
+                    return f"/api/workbench/products/{quote(product_id, safe='')}/media/{quote(relative, safe='/')}"
+    except OSError:
+        return None
+    return None
+
+
 def _product_summary(product_id: str) -> dict[str, Any]:
     directory = PRODUCTS_ROOT / product_id
     status = _read_json_file(directory / "status.json")
@@ -794,6 +813,7 @@ def _product_summary(product_id: str) -> dict[str, Any]:
         "captured_at": source.get("captured_at"),
         "sku_count": len(source.get("skus") or []),
         "image_counts": source.get("images") or {},
+        "thumbnail_url": _product_thumbnail(directory, product_id),
     }
 
 
@@ -2440,6 +2460,12 @@ register_shop_management_routes(app, runtime_root=lambda: MARKET_DB_PATH.parent,
 def shop_manager_script():
     from fastapi.responses import FileResponse
     return FileResponse(Path(__file__).resolve().parent / "web/shop-manager.js", media_type="text/javascript")
+
+
+@app.get("/assets/studio-theme.css", include_in_schema=False)
+def studio_theme_styles():
+    from fastapi.responses import FileResponse
+    return FileResponse(Path(__file__).resolve().parent / "web/studio-theme.css", media_type="text/css")
 
 
 @app.get("/assets/shop-manager.css")

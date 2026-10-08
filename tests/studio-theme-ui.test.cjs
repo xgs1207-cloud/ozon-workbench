@@ -1,0 +1,13 @@
+'use strict';
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');
+const html=fs.readFileSync(path.join(__dirname,'../web/research-workbench.html'),'utf8');
+const css=fs.readFileSync(path.join(__dirname,'../web/studio-theme.css'),'utf8');
+const render=html.match(/function renderCollectedProducts\(\)\{[^\n]+/)[0];
+const status=html.match(/function studioProductStatus\(x\)\{[^\n]+/)[0];
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function renderList(items){const ctx=vm.createContext({state:{products:items},esc,n:v=>Number(v).toLocaleString('zh-CN'),sourceSafeUrl:v=>{try{const u=new URL(v);return ['http:','https:'].includes(u.protocol)?u.href:null}catch{return null}}});vm.runInContext(status+'\n'+render,ctx);return ctx.renderCollectedProducts()}
+test('studio theme is opt-in and assets retain module order',()=>{assert.match(html,/<body class="studio-theme">/);assert.ok(html.indexOf('/assets/studio-theme.css')<html.indexOf('/assets/listing-bench.css'));assert.match(css,/prefers-reduced-motion/);assert.match(css,/:focus-visible/)});
+test('product list preserves editor target and safely renders collected metadata',()=>{const result=renderList([{product_id:'P000007',title_zh:'<img onerror=x>',source_url:'https://detail.1688.com/offer/123.html',sku_count:2,thumbnail_url:'/api/workbench/products/P000007/media/input/main-images/a.png'}]);assert.match(result,/data-action="product" data-id="P000007"/);assert.match(result,/&lt;img onerror=x&gt;/);assert.match(result,/loading="lazy"/);assert.match(result,/1688 货源/);assert.match(result,/商品草稿/);assert.doesNotMatch(result,/<img onerror=/)});
+test('empty data gives next action without fabricated images or completed status',()=>{const result=renderList([]);assert.match(result,/请先用插件采集/);assert.doesNotMatch(result,/<img /);assert.doesNotMatch(result,/已完成/)});
+test('unsafe thumbnail/source links are not rendered',()=>{const result=renderList([{product_id:'P000007',sku_count:1,thumbnail_url:'javascript:alert(1)',source_url:'javascript:alert(1)',attention_required:true,error_message:'<unsafe>'}]);assert.doesNotMatch(result,/javascript:/);assert.match(result,/需处理/);assert.match(result,/&lt;unsafe&gt;/)});
+test('submitted or pending platform states never falsely appear as active listings',()=>{const result=renderList([{product_id:'P000007',sku_count:1,status:'UPLOADED'},{product_id:'P000008',sku_count:1,status:'PENDING_REMOTE'}]);assert.match(result,/已提交/);assert.match(result,/等待平台结果/);assert.doesNotMatch(result,/开售中/);assert.doesNotMatch(result,/商品草稿/)});

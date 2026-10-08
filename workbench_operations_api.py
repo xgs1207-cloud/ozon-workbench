@@ -134,7 +134,8 @@ def register_operations_routes(
     def config(request: Request):
         return {"ok": True, "shops": [
             {"id": row["id"], "name": row.get("display_name") or row.get("name") or row["id"],
-             "enabled": bool(row.get("enabled")), "credentials_ready": bool(row.get("credentials_ready"))}
+             "enabled": bool(row.get("enabled")), "credentials_ready": bool(row.get("credentials_ready")),
+             "is_default": bool(row.get("is_default"))}
             for row in shop_rows()
         ], "credential_security": credential_context(request), "advertising_write_enabled": False,
             "automatic_card_updates_enabled": False,

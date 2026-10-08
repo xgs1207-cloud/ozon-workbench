@@ -28,6 +28,30 @@ test('numeric absence remains unavailable and ratios reject zero denominators',(
     for(const value of [null,undefined,'','  ',false,true,[],NaN,Infinity])assert.equal(pure.metric(value),'暂无数据');
     assert.equal(pure.metric(0),'0');assert.equal(pure.finiteRatio(10,0),null);assert.equal(pure.finiteRatio(0,20),0);
 });
+test('initial shop prefers authorized enabled default, then authorized, enabled, and first record',()=>{
+    const sample={id:'sample',enabled:true,credentials_ready:false,is_default:false};
+    const authorized={id:'authorized',enabled:true,credentials_ready:true,is_default:false};
+    const preferred={id:'preferred',enabled:true,credentials_ready:true,is_default:true};
+    assert.equal(pure.initialShopId([sample,authorized,preferred]),'preferred');
+    assert.equal(pure.initialShopId([{...preferred,enabled:false},sample,authorized]),'authorized');
+    assert.equal(pure.initialShopId([{...preferred,credentials_ready:false},authorized]),'authorized');
+    assert.equal(pure.initialShopId([{id:'disabled',enabled:false},sample]),'sample');
+    assert.equal(pure.initialShopId([{id:'first',enabled:false},{id:'second',enabled:false}]),'first');
+    assert.equal(pure.initialShopId([{id:'first',enabled:'false',credentials_ready:'true',is_default:'true'},sample]),'sample');
+    assert.equal(pure.initialShopId([]),'');assert.equal(pure.initialShopId(null),'');
+});
+test('mount skips stale sample default and manual selection still switches isolated cached reads',async()=>{
+    const shops=[{id:'sample',name:'示例店',enabled:true,credentials_ready:false,is_default:false},{id:'actual',name:'当前默认店',enabled:true,credentials_ready:true,is_default:true}];
+    const h=harness(url=>url==='/api/operations/config'?{shops,credential_security:{can_submit_credentials:true}}:fixtures(url));
+    await h.win.OperationsCenter.mount(h.host);
+    assert.match(h.regions.get('toolbar').innerHTML,/<option value="actual" selected>/);
+    assert.ok(h.calls.some(call=>call.url.startsWith('/api/operations/products?shop=actual')));
+    assert.ok(!h.calls.some(call=>call.url.startsWith('/api/operations/products?shop=sample')));
+    h.change({opsInput:'shop'},{value:'sample'});await new Promise(resolve=>setImmediate(resolve));
+    assert.match(h.regions.get('toolbar').innerHTML,/<option value="sample" selected>/);
+    assert.ok(h.calls.some(call=>call.url.startsWith('/api/operations/products?shop=sample')));
+    h.win.OperationsCenter.unmount();
+});
 test('source URLs are canonical 1688 links with no credential or tracking leak',()=>{
     assert.equal(pure.safeSource('https://detail.1688.com/offer/123.html?share_token=private'),'https://detail.1688.com/offer/123.html');
     for(const url of ['javascript:alert(1)','https://detail.1688.com.evil.test/offer/123.html','https://user:pass@detail.1688.com/offer/123.html','http://detail.1688.com/offer/123.html'])assert.equal(pure.safeSource(url),'');

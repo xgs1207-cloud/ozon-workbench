@@ -3,6 +3,14 @@
     'use strict';
     const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const array = value => Array.isArray(value) ? value : [];
+    function initialShopId(value) {
+        const shops=array(value);
+        const chosen=shops.find(shop=>shop?.enabled===true && shop.credentials_ready===true && shop.is_default===true)
+            || shops.find(shop=>shop?.enabled===true && shop.credentials_ready===true)
+            || shops.find(shop=>shop?.enabled===true)
+            || shops[0];
+        return chosen?.id || '';
+    }
     const number = value => (typeof value==='number' || (typeof value==='string' && value.trim()!=='')) && Number.isFinite(Number(value)) ? Number(value) : null;
     const metric = (value, digits = 0) => {const n = number(value); return n === null ? '暂无数据' : new Intl.NumberFormat('zh-CN', {maximumFractionDigits:digits}).format(n)};
     const finiteRatio = (top, bottom) => {const a=number(top), b=number(bottom);return a !== null && b !== null && b > 0 ? a / b : null};
@@ -250,9 +258,9 @@
         state={shops:[],shop:'',security:null,days:7,includeTraffic:true,query:'',offset:0,limit:30,items:[],total:0,loading:false,offer:'',detail:null,jobs:[],settingsOpen:false,schedule:null,scheduleDraft:null,scheduleSaving:false,ad:null,adOpen:false,authorizing:false,campaigns:[],campaignsSelected:new Set(),campaignsLoaded:false,campaignsLoading:false,campaignPage:1,campaignHasMore:false,reportFrom:start,reportTo:end,report:null,savedReports:[],reportCreating:false,reportPolling:false};
         host.classList.add('operations-center');host.innerHTML='<header class="ops-heading"><h1>商品运营中心</h1><p>按店铺与货号追踪上架状态、搜索词和广告数据，先诊断，再优化。</p></header><p class="ops-stage-note">当前阶段：只读监测与广告报表。不会自动修改链接、开启广告或消耗广告预算。</p><p data-ops-notice class="ops-notice" role="status" aria-live="polite" hidden></p><div class="ops-toolbar" data-ops-region="toolbar"></div><div data-ops-region="products"></div><div data-ops-region="detail"></div><div data-ops-region="settings"></div><div data-ops-region="advertising"></div>';
         host.addEventListener('click',onClick);host.addEventListener('change',onChange);host.addEventListener('submit',onSubmit);render();const revision=generation;
-        try{const config=await request('/api/operations/config',{},'config');if(!current(revision))return;state.shops=array(config.shops);state.security=config.credential_security;state.shop=state.shops[0]?.id || '';render();if(state.shop)await refresh();else announce('先在“店铺授权”添加 Ozon 店铺，再读取上架记录。')}
+        try{const config=await request('/api/operations/config',{},'config');if(!current(revision))return;state.shops=array(config.shops);state.security=config.credential_security;state.shop=initialShopId(state.shops);render();if(state.shop)await refresh();else announce('先在“店铺授权”添加 Ozon 店铺，再读取上架记录。')}
         catch(error){if(current(revision) && error.name!=='AbortError')announce(error.message,true)}
     }
     const api=Object.freeze({mount,refresh,unmount});global.OperationsCenter=api;
-    if(typeof module!=='undefined' && module.exports)module.exports={escape,metric,finiteRatio,safeSource,status,productRows,queryRows,snapshotRows,reportRows,trendSvg,diagnostics,healthHtml,latestSnapshot,metricObservations,queryObservations,normalizedStatus,terminal,canCreateReport,historyBlocksReport,mount,refresh,unmount};
+    if(typeof module!=='undefined' && module.exports)module.exports={escape,initialShopId,metric,finiteRatio,safeSource,status,productRows,queryRows,snapshotRows,reportRows,trendSvg,diagnostics,healthHtml,latestSnapshot,metricObservations,queryObservations,normalizedStatus,terminal,canCreateReport,historyBlocksReport,mount,refresh,unmount};
 })(typeof window!=='undefined'?window:globalThis);

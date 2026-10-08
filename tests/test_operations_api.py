@@ -61,7 +61,7 @@ class OperationsApiTests(unittest.TestCase):
                 raise HTTPException(403, "请通过 HTTPS 授权")
 
         register_operations_routes(self.app, runtime_root=lambda: self.root, seller_transport=transport,
-                                   shop_rows=lambda: [{"id": "a", "name": "A", "enabled": True},
+                                   shop_rows=lambda: [{"id": "a", "name": "A", "enabled": True, "is_default": True},
                                                       {"id": "b", "name": "B", "enabled": False}],
                                    credential_context=lambda req: {"can_submit_credentials": req.url.scheme == "https"},
                                    require_credentials=secure, publication_rows=lambda: rows,
@@ -76,6 +76,7 @@ class OperationsApiTests(unittest.TestCase):
         result = self.client.get("/api/operations/config")
         self.assertEqual(result.status_code, 200)
         self.assertFalse(result.json()["advertising_write_enabled"])
+        self.assertTrue(result.json()["shops"][0]["is_default"])
         self.assertEqual(result.headers["cache-control"], "private, no-store")
         self.assertEqual(self.client.post("/api/operations/discover", json={}).status_code, 200)
         first = self.client.get("/api/operations/products", params={"shop": "a"}).json()

@@ -1987,9 +1987,12 @@ def submit_product(product_id: str, request: StoreActionRequest) -> dict[str, An
     if (directory / "input/guided-workflow.json").is_file():
         from workbench_listing_api import run_service
         from pipeline.listing_draft import submit_listing
+        from pipeline.listing_publications import registry_path as publication_registry_path
         store = _store_for(directory, request.store)
         report = run_service(submit_listing, directory, shop=store,
-                             retry_rejected=request.retry_rejected)
+                             retry_rejected=request.retry_rejected,
+                             publication_config_required=True,
+                             publication_db_path=publication_registry_path(directory))
         return {"ok": bool(report.get("ok")), "store": store, "report": report}
     if research_sessions.session_for_product(MARKET_DB_PATH, product_id):
         raise HTTPException(status_code=409, detail="选词批次商品须走逐项审核与批次自动发布，不可用旧入口绕过审核")
@@ -2227,11 +2230,13 @@ def guided_prepare(product_id: str, request: StoreActionRequest) -> dict[str, An
 @app.get("/api/workbench/products/{product_id}/guided")
 def guided_product(product_id: str) -> dict[str, Any]:
     from pipeline.guided_review import status as review_status
+    from pipeline.listing_draft import card_ready
     from models import image_backend_settings
     from models.image_plan import _list_reference_images
 
     directory = _require_product(product_id)
     return {"ok": True, "product_id": product_id, "review": review_status(directory),
+            "card_ready": card_ready(directory),
             "image_backend": image_backend_settings(),
             "captured_reference_images": _list_reference_images(directory),
             "copy_generation_status": __import__("pipeline.guided_workflow", fromlist=["copy_generation_status"]).copy_generation_status(directory),
@@ -2392,6 +2397,9 @@ app.include_router(card_document_router)
 from workbench_media_api import router as media_workspace_router
 app.include_router(media_workspace_router)
 
+from workbench_publication_api import router as publication_router
+app.include_router(publication_router)
+
 
 @app.get("/assets/listing-flow.js", include_in_schema=False)
 def listing_flow_script():
@@ -2403,6 +2411,12 @@ def listing_flow_script():
 def listing_card_script():
     from fastapi.responses import FileResponse
     return FileResponse(Path(__file__).resolve().parent / "web/listing-card.js", media_type="text/javascript")
+
+
+@app.get("/assets/listing-publication.js", include_in_schema=False)
+def listing_publication_script():
+    from fastapi.responses import FileResponse
+    return FileResponse(Path(__file__).resolve().parent / "web/listing-publication.js", media_type="text/javascript")
 
 
 @app.get("/assets/listing-media.js", include_in_schema=False)

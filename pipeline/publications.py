@@ -89,6 +89,7 @@ def record_publication(
     ozon_product_id: str | None = None,
     status: str | None = None,
     errors: Sequence[Any] = (),
+    publication_db_path: Path | str | None = None,
 ) -> dict[str, Any]:
     """登记一次（或一条 SKU 的）发布结果；同一 store+sku 覆盖更新。
 
@@ -116,7 +117,13 @@ def record_publication(
         entry["status"] = status
     else:
         entry["status"] = "submitted" if any(item.get("task_id") for item in rows) else entry["status"]
-    return save_publications(product_dir, payload)
+    saved = save_publications(product_dir, payload)
+    # Observation only: this hook never writes stock or imports a product.
+    from .listing_publications import record_import_observation
+    record_import_observation(product_dir, store_id, sku_id=sku_id, offer_id=offer_id,
+        task_id=task_id, ozon_product_id=ozon_product_id, status=status, errors=errors,
+        db_path=publication_db_path)
+    return saved
 
 
 def store_has_task(product_dir: Path | str, store_id: str) -> bool:

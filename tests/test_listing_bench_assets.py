@@ -13,6 +13,7 @@ class ListingBenchAssetsTests(unittest.TestCase):
 
     def test_new_desktop_assets_are_served_and_loaded_after_flow(self):
         for name, content_type in (("listing-card.js", "javascript"), ("listing-media.js", "javascript"),
+                                   ("listing-publication.js", "javascript"),
                                    ("image-preview.js", "javascript"),
                                    ("listing-bench.css", "text/css")):
             response = self.client.get("/assets/" + name)
@@ -21,7 +22,8 @@ class ListingBenchAssetsTests(unittest.TestCase):
         html = (Path(__file__).resolve().parents[1] / "web/research-workbench.html").read_text(encoding="utf-8")
         self.assertLess(html.index('src="/assets/listing-flow.js'), html.index('src="/assets/listing-card.js'))
         self.assertLess(html.index('src="/assets/listing-card.js'), html.index('src="/assets/listing-media.js'))
-        self.assertLess(html.index('src="/assets/listing-media.js'), html.index('src="/assets/image-preview.js'))
+        self.assertLess(html.index('src="/assets/listing-media.js'), html.index('src="/assets/listing-publication.js'))
+        self.assertLess(html.index('src="/assets/listing-publication.js'), html.index('src="/assets/image-preview.js'))
 
     def test_package_only_measurements_keep_unknown_body_unknown(self):
         self.authorize()

@@ -158,6 +158,7 @@ class ListingFlowApiTests(unittest.TestCase):
         self.assertEqual(prepared.status_code, 200, prepared.text)
         self.assertFalse(prepared.json()["report"]["ok"], prepared.text)
         self.assertTrue(prepared.json()["report"]["blockers"])
+        self.assertFalse(self.client.get(self.base + "/guided").json()["card_ready"])
         self.assertFalse(self.client.get(self.base + "/guided").json()["review"]["ready_to_preflight"])
         self.assert_no_write()
 
@@ -179,6 +180,11 @@ class ListingFlowApiTests(unittest.TestCase):
         document = self.client.get(self.base + "/listing-document?shop=qa-store").json()["document"]
         self.assertTrue(document["operational_fields"]["product_optional"])
         self.assertEqual(set(document["operational_fields"]["product"].values()), {None})
+        self.assertTrue(self.client.get(self.base + "/guided").json()["card_ready"])
+        changed = self.client.put(self.base + "/prices", json={"prices": [
+            {"sku_id": sku_id, "price": 59, "currency": "CNY"} for sku_id in self.selected_ids]})
+        self.assertEqual(changed.status_code, 200, changed.text)
+        self.assertFalse(self.client.get(self.base + "/guided").json()["card_ready"])
         self.assert_no_write()
 
     def test_missing_confirmation_and_unreviewed_modern_submit_do_not_write_or_legacy_bypass(self):

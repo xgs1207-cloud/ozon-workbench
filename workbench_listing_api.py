@@ -217,6 +217,7 @@ def readback_cached(product_id: str, store: str | None = None):
 
 @router.post("/guided/submit")
 def submit(product_id: str, request: StoreRequest):
+    from pipeline.listing_publications import registry_path as publication_registry_path
     import api
     from pipeline.listing_draft import submit_listing
     directory = directory_for(product_id, edit=False)
@@ -224,7 +225,9 @@ def submit(product_id: str, request: StoreRequest):
         raise HTTPException(400, "提交会写入真实 Ozon 店铺，需要确认 SUBMIT")
     report = run_service(submit_listing, directory,
                          shop=api._store_for(directory, request.store),
-                         retry_rejected=request.retry_rejected)
+                         retry_rejected=request.retry_rejected,
+                         publication_config_required=True,
+                         publication_db_path=publication_registry_path(directory))
     return {"ok": bool(report.get("ok")), "report": report}
 
 

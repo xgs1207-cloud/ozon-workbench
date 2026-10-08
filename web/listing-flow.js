@@ -310,7 +310,7 @@ renderProduct = function renderStepwiseProduct() {
     if(w.publication_blockers?.length)pane('preview').insertAdjacentHTML('afterbegin',`<section class="panel"><h2>发布前合规待核对</h2><div class="flow-error" role="alert">这些问题不会阻止准备文案与图片，但解决之前不能提交 Ozon 商品卡。<ul class="flow-summary-list">${w.publication_blockers.map(item=>`<li>${esc(typeof item==='string'?item:item.message||flowScalar(item))}</li>`).join('')}</ul></div><p class="field-help">补充有依据的合规资料并重新核对商品摘要，不能用默认值替代认证或安全证明。</p></section>`);
     if(g.copy?.hashtags?.length)pane('preview').insertAdjacentHTML('beforeend',`<section class="panel"><h2>主题标签</h2>${flowTags(g.copy.hashtags)}</section>`);
     pane('preview').querySelector('[data-action="product-step"]')?.remove();
-    pane('preview').insertAdjacentHTML('beforeend',`<section class="panel"><h2>提交官方 API / 导出 Excel</h2><p class="flow-lead">两种输出使用同一份已确认资料。接口受理不等于审核通过或可售，不自动填写库存。</p><div class="flow-actionrow">${flowButton('公开已确认图片的 HTTPS 地址','publish-media',!g.review?.sections.images.approved||listingFlow.busy)}${flowButton('刷新 Ozon 提交结果','verify')}</div><p class="field-help">图片发布到你配置的存储，只有公开可访问的地址才能用于上架。</p><div class="flow-actionrow">${flowButton('确认并提交到 Ozon','submit',!g.review?.ready_to_preflight||listingFlow.busy)}</div><h3>最新类目模板</h3><p class="field-help">从 Ozon 下载当前类目的最新模板。类目编号不一致时会阻止导出，不修改模板的隐藏配置。</p><input id="flowTemplateFile" type="file" accept=".xlsx"><div class="flow-actionrow">${flowButton('上传模板','upload-template',listingFlow.busy)}${flowButton('导出已确认商品 Excel','export',listingFlow.busy)}</div><div id="flowPublishResult" class="flow-publish-result"></div></section>`);
+    pane('preview').insertAdjacentHTML('beforeend',`<section class="panel"><h2>提交官方 API / 导出 Excel</h2><p class="flow-lead">两种输出使用同一份已确认资料。API 发布使用已保存的仓库和库存配置；商品导入、库存写入与审核结果分别记录。</p><div class="flow-actionrow">${flowButton('公开已确认图片的 HTTPS 地址','publish-media',!g.review?.sections.images.approved||listingFlow.busy)}${flowButton('刷新 Ozon 提交结果','verify')}</div><p class="field-help">图片发布到你配置的存储，只有公开可访问的地址才能用于上架。</p><div class="flow-actionrow">${flowButton('确认并提交到 Ozon','submit',!g.review?.ready_to_preflight||listingFlow.busy)}</div><h3>最新类目模板</h3><p class="field-help">从 Ozon 下载当前类目的最新模板。类目编号不一致时会阻止导出，不修改模板的隐藏配置。</p><input id="flowTemplateFile" type="file" accept=".xlsx"><div class="flow-actionrow">${flowButton('上传模板','upload-template',listingFlow.busy)}${flowButton('导出已确认商品 Excel','export',listingFlow.busy)}</div><div id="flowPublishResult" class="flow-publish-result"></div></section>`);
     const i=listingFlowSteps.findIndex(x=>x[0]===active);
     pane(active).insertAdjacentHTML('beforeend',`<div class="flow-footer">${i?flowButton('上一步','step',false,`data-step="${listingFlowSteps[i-1][0]}"`):'<span></span>'}${i<listingFlowSteps.length-1&&active!=='media'?flowButton('下一步','step',false,`data-step="${listingFlowSteps[i+1][0]}"`):'<span></span>'}</div>`);
     pane(active).insertAdjacentHTML('afterbegin',flowOperationErrorHtml(active));
@@ -437,11 +437,19 @@ document.addEventListener('click',async event=>{
         if(action==='submit'){
             if(productDraft()?.dirty||listingDraft()?.dirty||productDraft()?.pending?.size)throw Error('请先保存所有未保存的修改');
             const shop=selectedReadStore();if(!shop)throw Error('请选择已授权店铺');
-            if(!confirm(`确认向店铺「${shop.display_name||shop.id}」提交已审核商品？会真实创建商品卡；不提交库存、不启用付费集评。`))return;
-            const result=await flowRequest('guided/submit','POST',{store:shop.id,confirm:'SUBMIT'});flowShowResult(result);
+            if(typeof publicationRequireReady!=='function')throw Error('发布配置尚未加载，请刷新页面后选择仓库');
+            const target=await publicationRequireReady();
+            if(state.product!==id||selectedReadStore()?.id!==shop.id)throw Error('商品或店铺已切换，请重新确认发布目标');
+            const stockLines=target.items.map(item=>`${item.offer_id}：${item.stock} 件`).join('\n');
+            if(!confirm(`确认向店铺「${shop.display_name||shop.id}」提交已审核商品？\n仓库：${target.warehouse.name}（${target.warehouse.warehouse_id}）\n${stockLines}\n商品导入且价格处理完成后，会写入上述库存；未就绪时保存记录等待继续处理。不启用付费集评。`))return;
+            const result=await api(`/api/workbench/products/${encodeURIComponent(id)}/guided/submit`,json('POST',{store:shop.id,confirm:'SUBMIT'}));
+            if(state.product===id)flowShowResult(result);
+            if(typeof publicationRefreshAfterSubmit==='function')await publicationRefreshAfterSubmit(id,shop.id);
             const report=result.report||{},outcome=report.state||report.outcome;
-            if(!result.ok)notice(outcome==='rejected'?'Ozon 明确拒绝，请查看错误并修正资料后确认重试':'提交未确认成功，请回读现有任务；不要重复提交',true);
-            else notice(outcome==='imported'?'商品已导入，请继续核对审核状态；未填写库存':'Ozon 已受理现有任务，正在处理；受理不等于审核通过或可售');
+            const stockResult=report.stock_update||result.stock_update;
+            if(stockResult?.pending)notice('商品导入已保存记录，库存仍待完成或回读。请从上架记录继续库存处理，不要重复导入商品',true);
+            else if(!result.ok)notice(outcome==='rejected'?'Ozon 明确拒绝，请查看错误并修正资料后确认重试':'提交未确认成功，请回读现有任务；不要重复提交',true);
+            else notice('已保存上架记录，请核对导入、库存与审核状态；接口受理不等于审核通过或可售');
         }
         if(action==='verify'){const result=await flowRequest('verify','POST',{store:selectedReadStore()?.id});flowShowResult(result)}
     } catch(error) {

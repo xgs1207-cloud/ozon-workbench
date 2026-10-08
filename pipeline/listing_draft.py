@@ -165,7 +165,9 @@ def submission_editable(directory: Path | str) -> bool:
         for row in entry.get("sku_publications") or []) for entry in entries.values())
 
 
-def submit_listing(directory: Path, *, shop: str, retry_rejected: bool = False) -> dict[str, Any]:
+def submit_listing(directory: Path, *, shop: str, retry_rejected: bool = False,
+                   publication_config_required: bool = False,
+                   publication_db_path: Path | str | None = None) -> dict[str, Any]:
     from .guided_review import status as review_status
     from .preflight import preflight
     from .upload import upload_product
@@ -209,11 +211,14 @@ def submit_listing(directory: Path, *, shop: str, retry_rejected: bool = False) 
             old_hash = hashlib.sha256(json.dumps(previous_attempt, sort_keys=True,
                 ensure_ascii=False).encode()).hexdigest()
             write_json(directory / "runtime/listing-submit-history" / f"{old_hash}.json", previous_attempt)
+        if publication_config_required:
+            from .listing_publications import seal_config
+            seal_config(directory, shop=shop, payload=payload, db_path=publication_db_path)
         write_json(attempt, {"shop": shop, "state": "started", "request_sha256": fingerprint,
                              "safe_to_retry": False, "no_automatic_retry": True})
         try:
             result = upload_product(directory, [shop], OzonWriteUploader(), upload_mode="production",
-                                    enabled_store_ids=[shop])
+                                    enabled_store_ids=[shop], publication_db_path=publication_db_path)
         except Exception:
             write_json(attempt, {"shop": shop, "state": "unknown_requires_readback",
                 "request_sha256": fingerprint, "safe_to_retry": False, "no_automatic_retry": True})
@@ -237,4 +242,21 @@ def submit_listing(directory: Path, *, shop: str, retry_rejected: bool = False) 
         write_json(directory / "output/upload-summary.json", result)
         write_json(attempt, {"shop": shop, "state": outcome, "request_sha256": fingerprint,
             "safe_to_retry": safe_to_retry, "report": result, "no_automatic_retry": True})
+        if publication_config_required and store_result.get("task_id"):
+            # The SUBMIT confirmation covers this one bounded stock action.
+            # Polling GETs and legacy import workflows never enter this branch.
+            from .listing_publications import continue_stocks
+            try:
+                stock_update = continue_stocks(directory, shop=shop, confirm="UPDATE_STOCK",
+                                               db_path=publication_db_path)
+            except Exception:
+                stock_update = {"ok": False, "status": "stock_pending", "pending": True,
+                    "api_writes": 0, "warning": "导入已记录，库存尚未完成；请查看台账并明确继续库存流程",
+                    "automatic_retry": False}
+            result["stock_update"] = stock_update
+            result["api_writes"] = int(result.get("api_writes") or 0) + int(stock_update.get("api_writes") or 0)
+            result["ok"] = result["ok"] and stock_update.get("ok", False)
+            write_json(directory / "output/upload-summary.json", result)
+            write_json(attempt, {"shop": shop, "state": outcome, "request_sha256": fingerprint,
+                "safe_to_retry": safe_to_retry, "report": result, "no_automatic_retry": True})
         return result

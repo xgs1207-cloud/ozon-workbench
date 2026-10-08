@@ -661,6 +661,7 @@ def upload_product(
     *,
     upload_mode: str = UPLOAD_MODE_DRY_RUN,
     enabled_store_ids: Sequence[str] | None = None,
+    publication_db_path: Path | str | None = None,
 ) -> dict[str, Any]:
     """按店铺分发：构建载荷 → 门禁 → 提交 → 记账。单店失败不影响其他店。"""
     directory = Path(product_dir)
@@ -742,6 +743,9 @@ def upload_product(
             continue
 
         if upload_mode == UPLOAD_MODE_PRODUCTION:
+            from .listing_publications import record_import_attempt
+            # Durable shop+offer intent must succeed before an external write.
+            record_import_attempt(directory, store_id, payload, state="started", db_path=publication_db_path)
             # Persist in-flight intent before crossing the network boundary.
             # A process crash after Ozon receives the body must not make a
             # future CLI run look like a never-submitted product.
@@ -771,6 +775,7 @@ def upload_product(
             )
             record_publication(directory, store_id, sku_id="*", status="failed", errors=[{"message": str(error)}])
             if upload_mode == UPLOAD_MODE_PRODUCTION:
+                record_import_attempt(directory, store_id, payload, state="unknown", error_codes=["UPLOADER_ERROR"], db_path=publication_db_path)
                 ledger = load_publications(directory)
                 ledger["stores"][store_id]["submission_outcome"] = "unknown_requires_readback"
                 ledger["stores"][store_id]["safe_to_retry"] = False
@@ -780,6 +785,10 @@ def upload_product(
 
         task_id = receipt.get("task_id")
         outcome = _receipt_outcome(receipt)
+        if upload_mode == UPLOAD_MODE_PRODUCTION:
+            record_import_attempt(directory, store_id, payload, state=outcome,
+                task_id=task_id, error_codes=[str(item.get("code") or "IMPORT_ERROR")
+                    for item in receipt.get("errors") or [] if isinstance(item, Mapping)], db_path=publication_db_path)
         status = str(receipt.get("status") or "submitted")
         if upload_mode == UPLOAD_MODE_PRODUCTION and not receipt.get("api_writes_performed"):
             # 危险配置保护：production 模式下 uploader 必须声明发生了写请求
@@ -823,6 +832,7 @@ def upload_product(
                 ozon_product_id=item.get("product_id"),
                 status="submitted" if task_id else status,
                 errors=item.get("errors") or [],
+                publication_db_path=publication_db_path,
             )
         if not items and not task_id:
             record_publication(
@@ -888,7 +898,8 @@ def upload_product(
             from .ozon_status import apply_confirmation
 
             applied = apply_confirmation(
-                directory, store_id=store_id, confirmation=confirmation, task_id=str(task_id)
+                directory, store_id=store_id, confirmation=confirmation, task_id=str(task_id),
+                publication_db_path=publication_db_path,
             )
             results[store_id]["confirmation"] = {
                 "status": applied["status"],

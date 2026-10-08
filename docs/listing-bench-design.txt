@@ -65,3 +65,61 @@ Additional QA inventory:
   - 2K request setting remains unchanged; no paid generation in this task.
   - Inspect media, card and opened preview at 1600 and 1280 desktop widths;
     check viewport bounds, aspect ratio, console errors, and zero write calls.
+
+Warehouse and publication records, 2026-10-08
+  Brief: match the supplied Ozon field reference, not a new dashboard skin.
+  Palette: white #ffffff, field fill #edf1f6, ink #111820,
+  secondary #637389, action #1557e8, focus line #b7cbef.
+  Type: existing Microsoft YaHei / system desktop stack, 13px field labels
+  in 700 weight, 13px input values, 11px quiet evidence and help.
+  Layout: left-aligned single-column official attributes, shallow gray
+  rounded controls, compact weight/dimensions and 2x2 fulfillment rows.
+    Offer ID                     Sale price
+    Package weight | Length | Width | Height
+    Source 1688 URL               Source note (optional, internal)
+    Real authorized warehouse    Stock per SKU (default 100)
+    Official characteristics with bold names
+    Preview: immutable target summary + publish confirmation + offer ledger
+  Review: retain field names above inputs for filled values and accessibility;
+  remove generic placeholder prose in blank attributes. No inert AI/translate
+  icons copied from the reference, and no second edit form on the preview.
+  Keep source URLs internal, separate from buyer descriptions and attributes.
+  Warehouse choices must come from the selected shop, never fabricated.
+  Saving a stock default is a local draft action, not an inventory write.
+
+Additional verification inventory:
+  - Read warehouse cache / explicit refresh, empty, forbidden and unavailable
+    warehouses. Changing shops cannot reuse another shop's warehouse.
+  - Stock initially 100; zero supported; reject negative, fractional and
+    malformed values; save and reload preserve selected warehouse and quantity.
+  - Source link is the captured 1688 URL, and is not added to buyer content.
+  - Unsaved inputs survive async refresh; publish requires saved configuration.
+  - Confirmation names shop, warehouse, offer IDs and intended stock.
+  - Isolated full flow: import receipt -> imported item -> price ready -> stock
+    update -> local ledger; queued, rejected and missing items never get stock.
+  - Repeat import click cannot create duplicate imports; stock continuation
+    never imports; ambiguous writes require explicit readback/retry confirmation.
+  - Partial stock failures are recorded by offer ID; success is not moderation
+    approval or storefront availability. GET routes never write Ozon inventory.
+  - Records searchable by offer ID, isolated by shop, with source link, warehouse,
+    requested/acknowledged stock, timestamps, tasks and errors visible.
+  - Inspect the filled field layout and warehouse form at 1600 and 1280 widths,
+    including keyboard focus, long warehouse names and input/error states.
+  - Live verification is read-only; no new paid model or real inventory writes.
+
+Observed verification and repairs:
+  - Live read-only Ozon checks found 7 real rFBS warehouses. A price_sent
+    existing product returned products:[] before its first stock assignment.
+    Keep complete absence as no_entry, never invent present/reserved = 0.
+  - Stock acknowledgment alone is not completion: require an actual matching
+    free_stock observation; retain an explicit readback action when delayed.
+  - Browser flow exposed false dirty flags on unchanged packaging/price values,
+    and a removed single-SKU grouping/field approval entry. Both were repaired;
+    the compiled-card fingerprint is now returned as read-only card_ready.
+  - Keep the legacy product /publications response untouched. The new product
+    ledger uses /listing-publications, with real-app routing regression checks.
+  - Offline browser full flow passed with one adopted image, one mock import,
+    one mock stock write of 100 and matching stock readback. Repeating submit
+    did not repeat import. No paid generation, real COS or Ozon writes occurred.
+  - Inspected 1600/1280 desktop views: quiet filled fields, persistent bold names,
+    one source/warehouse editor, internal record details and no page overflow.

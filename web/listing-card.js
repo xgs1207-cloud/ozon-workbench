@@ -70,6 +70,11 @@ renderListingForm=function(){
         const text=[...label.childNodes].find(node=>node.nodeType===Node.TEXT_NODE&&node.textContent.trim());
         if(text){const name=document.createElement('strong');name.className='official-field-title';name.textContent=text.textContent;text.replaceWith(name)}
     }
+    for(const field of template.content.querySelectorAll('.official-field')){
+        const name=field.querySelector('.official-field-title')?.textContent.trim();
+        const input=field.querySelector('[data-listing-input]:not([data-collection])');
+        if(name&&input?.tagName==='INPUT')input.placeholder=name;
+    }
     const excluded=new Set((doc?.official_excluded_attribute_ids||doc?.card?.official_excluded_attribute_ids||[4191,23171]).map(String));
     for(const field of template.content.querySelectorAll('[data-official-field]')){
         const id=field.dataset.officialField;
@@ -96,6 +101,23 @@ async function benchLoadDocument(product=state.product,shop=benchShop()){
 const benchFetchProduct=fetchProduct;
 fetchProduct=async function(...args){const result=await benchFetchProduct(...args),product=state.product;if(product){await benchLoadDocument(product);if(state.product===product&&state.view==='product')renderProduct()}return result};
 const benchStepRenderer=renderProduct;
+function benchCardConfirmationState(g=state.guided){
+    const sections=g?.review?.sections||{},basic=productDraft(),official=listingDraft(),reasons=[];
+    if(g?.card_ready!==true)reasons.push('请先点击「填充并检查上架卡片」，成功编译当前资料后才能确认。');
+    if(g?.category_selection?.shop_id&&g.category_selection.shop_id!==benchShop())reasons.push('当前店铺与已确认类目不一致，请重新确认类目并编译卡片。');
+    if(basic?.dirty||basic?.pending?.size||official?.dirty)reasons.push('有未保存的商品资料、价格或官方属性，请先保存再重新编译。');
+    if(listingFlow.skuDrafts?.has(state.product)||listingFlow.factDrafts?.has(state.product)||listingFlow.videoDrafts?.has(state.product))reasons.push('规格、补充事实或视频选择有未保存的修改。');
+    for(const section of ['grouping','fields']){
+        if(!sections[section])reasons.push(section==='grouping'?'尚未生成规格分组结果。':'尚未生成上架字段结果。');
+        else reasons.push(...(sections[section].problems||[]));
+    }
+    const approved=sections.grouping?.approved===true&&sections.fields?.approved===true;
+    return {ready:reasons.length===0,approved,reasons:[...new Set(reasons)]};
+}
+function benchCardConfirmationHtml(){
+    const check=benchCardConfirmationState();
+    return `<div class="bench-card-confirmation"><div class="flow-actionrow">${benchButton(check.approved?'规格分组与上架字段已确认':'确认规格分组与上架字段','confirm-card','',!check.ready||check.approved||listingFlow.busy)}</div>${check.reasons.length?`<ul class="field-help">${check.reasons.map(reason=>`<li>${esc(reason)}</li>`).join('')}</ul>`:'<p class="field-help">请核对当前规格、分组和上架字段后确认。这一步只保存人工审核，不向 Ozon 发布。</p>'}</div>`;
+}
 async function benchEnsureDocument(){
     const product=state.product,shop=benchShop(),key=benchScopeKey(product,shop);
     if(!product||!state.guided||benchDocument()||listingBench.loading.has(key)||listingBench.errors.has(product))return;
@@ -117,7 +139,7 @@ renderProduct=function(){
         }else if(prefix?.querySelector('button'))prefix.querySelector('button').textContent='保存前缀并分配货号';
         if(official)card.append(official);
         if(group&&(state.skus?.active_count||0)>1)card.append(group);
-        card.insertAdjacentHTML('beforeend',`<section class="panel bench-card-check"><h3>检查卡片</h3><p class="field-help">摘要、已确认文案与官方属性使用同一份商品资料。保存修改后，自动填充已知内容并核对缺项。</p><div class="row"><button class="btn secondary" data-action="listing-autofill">补齐有依据的官方选项</button>${flowButton('填充并检查上架卡片','prepare-card',!state.guided.workflow?.copy?.confirmed||listingFlow.busy)}</div></section>`);
+        card.insertAdjacentHTML('beforeend',`<section class="panel bench-card-check"><h3>检查卡片</h3><p class="field-help">摘要、已确认文案与官方属性使用同一份商品资料。保存修改后，自动填充已知内容并核对缺项。</p><div class="row"><button class="btn secondary" data-action="listing-autofill">补齐有依据的官方选项</button>${flowButton('填充并检查上架卡片','prepare-card',!state.guided.workflow?.copy?.confirmed||listingFlow.busy)}</div>${benchCardConfirmationHtml()}</section>`);
         if(footer)card.append(footer);
         const error=listingBench.errors.get(state.product);if(error)card.insertAdjacentHTML('afterbegin',`<p class="flow-error" role="alert">读取商品资料失败：${esc(error)} ${benchButton('重新读取','reload-document')}</p>`);
         const operationError=flowOperationErrorHtml('card');if(operationError)card.insertAdjacentHTML('afterbegin',operationError);
@@ -126,9 +148,27 @@ renderProduct=function(){
 };
 document.addEventListener('input',event=>{if(event.target.id==='benchOfferPrefix')listingBench.prefixDrafts.set(benchShop(),event.target.value)});
 document.addEventListener('click',async event=>{
-    const button=event.target.closest('[data-bench-action]');if(!button||!['reserve-offers','save-operational','reload-document'].includes(button.dataset.benchAction))return;
-    const product=state.product,shop=benchShop(),action=button.dataset.benchAction;button.disabled=true;
+    const button=event.target.closest('[data-bench-action]');if(!button||!['reserve-offers','save-operational','reload-document','confirm-card'].includes(button.dataset.benchAction))return;
+    const product=state.product,shop=benchShop(),action=button.dataset.benchAction;let ownsBusy=false;button.disabled=true;
     try{
+        if(action==='confirm-card'){
+            if(listingFlow.busy)throw Error('当前操作仍在处理中，请稍后确认');
+            captureProductFields();const check=benchCardConfirmationState();if(!check.ready)throw Error(check.reasons.join('；'));
+            if(!confirm('确认已人工核对当前上架规格、分组及卡片字段？只保存本地审核结果，不会提交 Ozon 或修改线上库存。'))return;
+            listingFlow.busy=true;ownsBusy=true;
+            const sections=state.guided.review.sections;
+            for(const section of ['grouping','fields']){
+                if(sections[section]?.approved)continue;
+                if(product===state.product&&shop===benchShop()){
+                    captureProductFields();const latest=benchCardConfirmationState();if(!latest.ready)throw Error(latest.reasons.join('；'));
+                }
+                const result=await api(`/api/workbench/products/${encodeURIComponent(product)}/guided/approve`,json('POST',{section}));
+                if(result.review){Object.assign(sections,result.review.sections||{});if(product===state.product&&shop===benchShop())state.guided.review=result.review}
+            }
+            notice('规格分组与上架字段已人工确认；尚未提交 Ozon');
+            if(product===state.product&&shop===benchShop())await refreshProduct();
+            return;
+        }
         if(action==='reserve-offers'){
             const prefix=$('#benchOfferPrefix').value.trim(),profile_id=benchProfileId();if(!shop)throw Error('请选择已授权店铺');if(!prefix)throw Error('请填写固定货号前缀，例如 xzj.jp');
             const result=await api('/api/workbench/offer-prefix',json('PUT',{shop,prefix,profile_id}));listingBench.profiles.set(shop,result.profile);
@@ -149,6 +189,24 @@ document.addEventListener('click',async event=>{
             if(product===state.product)await refreshProduct();else await benchLoadDocument(product,shop);
         }else await benchLoadDocument(product,shop);
         if(state.product===product&&state.view==='product')renderProduct();
-    }catch(error){notice(error.message,true);const host=product===state.product?$('#listingDetailsError'):null;if(host){host.hidden=false;host.textContent=error.message}}finally{if(button.isConnected)button.disabled=false}
+    }catch(error){notice(error.message,true);const host=product===state.product?$('#listingDetailsError'):null;if(host){host.hidden=false;host.textContent=error.message}}finally{if(action==='confirm-card'){if(ownsBusy)listingFlow.busy=false;if(!listingFlow.busy&&product===state.product&&shop===benchShop()&&state.view==='product')renderProduct();else if(button.isConnected)button.disabled=false}else if(button.isConnected)button.disabled=false}
 });
-function captureProductFields(){document.querySelectorAll('[data-pane="card"] .dim,[data-pane="card"] .skuPrice').forEach(captureProductInput)}
+function benchEqualNumeric(left,right){
+    const a=String(left??'').trim(),b=String(right??'').trim();
+    if(!a||!b)return a===b;
+    const x=Number(a),y=Number(b);return Number.isFinite(x)&&Number.isFinite(y)?x===y:a===b;
+}
+function captureProductFields(){
+    const draft=productDraft();if(!draft)return;
+    document.querySelectorAll('[data-pane="card"] .dim,[data-pane="card"] .skuPrice').forEach(input=>{
+        if(input.classList.contains('dim')){
+            const key=`${input.dataset.kind}_${input.dataset.key}`;
+            if(!benchEqualNumeric(input.value,draft.details[key]))captureProductInput(input);
+        }else if(input.classList.contains('skuPrice')){
+            const saved=draft.prices[input.dataset.sku]||state.guided?.manual_prices?.prices?.[input.dataset.sku]||{};
+            const currency=input.parentElement.querySelector('.priceCurrency')?.value||input.parentElement.querySelector('select')?.value||'CNY';
+            const savedCurrency=saved.currency||selectedReadStore()?.default_currency_code||'CNY';
+            if(!benchEqualNumeric(input.value,saved.price)||currency!==savedCurrency)captureProductInput(input);
+        }
+    });
+}

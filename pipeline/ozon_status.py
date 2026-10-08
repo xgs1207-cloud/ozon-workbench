@@ -240,6 +240,7 @@ def apply_confirmation(
     store_id: str,
     confirmation: Mapping[str, Any],
     task_id: str | None = None,
+    publication_db_path: Path | str | None = None,
 ) -> dict[str, Any]:
     """把确认结果写进台账、店铺运行目录与 ozon-result.json。"""
     directory = Path(product_dir)
@@ -284,6 +285,7 @@ def apply_confirmation(
             ozon_product_id=str(item["product_id"]) if item.get("product_id") else None,
             status=str(item.get("status") or "unknown"),
             errors=item.get("errors") or [],
+            publication_db_path=publication_db_path,
         )
 
     # 店铺级状态：全部成功 → created；有失败且无成功 → failed；否则保持 submitted/processing
@@ -384,6 +386,7 @@ def confirm_product(
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     interval_seconds: float = DEFAULT_INTERVAL_SECONDS,
     sleep: Callable[[float], None] = time.sleep,
+    publication_db_path: Path | str | None = None,
 ) -> dict[str, Any]:
     """对已提交的店铺做一次（或多次）状态确认，并回写台账。"""
     directory = Path(product_dir)
@@ -430,7 +433,8 @@ def confirm_product(
             sleep=sleep,
         )
         results[target] = apply_confirmation(
-            directory, store_id=target, confirmation=confirmation, task_id=resolved
+            directory, store_id=target, confirmation=confirmation, task_id=resolved,
+            publication_db_path=publication_db_path,
         )
     return {
         "ok": bool(results) and all(row.get("ok", False) for row in results.values()),

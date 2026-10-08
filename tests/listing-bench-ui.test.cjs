@@ -11,6 +11,7 @@ const vm = require('node:vm');
 const root = path.resolve(__dirname, '..');
 const media = fs.readFileSync(path.join(root, 'web/listing-media.js'), 'utf8');
 const card = fs.readFileSync(path.join(root, 'web/listing-card.js'), 'utf8');
+const legacy = fs.readFileSync(path.join(root, 'web/research-workbench.html'), 'utf8');
 const plain = value => JSON.parse(JSON.stringify(value));
 
 function section(source, first, next) {
@@ -293,4 +294,100 @@ test('late deep-link hydration never re-renders another product', async () => {
   waiting.resolve();
   await loading;
   assert.equal(renders, 0);
+});
+
+function loadCardCapture(h, inputs) {
+  h.context.document.querySelectorAll = () => inputs;
+  h.context.renderProductSupport = () => {};
+  h.context.detailSource = () => '';
+  h.context.selectedReadStore = () => ({default_currency_code:'CNY'});
+  h.load(legacy, 'function captureProductInput(input){', "\ndocument.addEventListener('input',e=>captureProductInput(e.target));");
+  vm.runInContext(card.slice(card.indexOf('function benchEqualNumeric(')), h.context);
+}
+function dimension(value, key='weight_g') {return {value,dataset:{kind:'package',key},classList:{contains:name=>name==='dim'}}}
+function priceInput(value,currency='CNY') {
+  const input={value,dataset:{sku:'S1'},classList:{contains:name=>name==='skuPrice'}};
+  input.parentElement={querySelector:selector=>selector==='.skuPrice'?input:{value:currency}};
+  return input;
+}
+
+test('repainting saved dimensions and prices does not mark an unchanged form dirty',()=>{
+  const h=harness();h.draft.pending.clear();h.draft.dirty=false;
+  h.draft.details={package_weight_g:120,package_length_mm:null};h.draft.prices={S1:{price:19.9,currency:'CNY'}};
+  loadCardCapture(h,[dimension('120.0'),dimension('','length_mm'),priceInput('19.90')]);
+  h.context.captureProductFields();h.context.captureProductFields();
+  assert.equal(h.draft.dirty,false);assert.equal(h.draft.pending.size,0);assert.equal(h.draft.touched.size,0);
+});
+
+test('unpopulated price drafts compare against persisted manual prices without false edits',()=>{
+  const h=harness();h.draft.pending.clear();h.draft.dirty=false;h.draft.prices={};
+  h.context.state.guided.manual_prices={prices:{S1:{price:19.9,currency:'CNY'}}};
+  loadCardCapture(h,[priceInput('19.90')]);h.context.captureProductFields();
+  assert.equal(h.draft.pending.size,0);assert.deepEqual(plain(h.draft.prices),{});
+});
+
+test('actual new packaging and currency edits are still captured and retained',()=>{
+  const h=harness();h.draft.pending.clear();h.draft.dirty=false;h.draft.details={package_weight_g:120};h.draft.prices={S1:{price:19.9,currency:'CNY'}};
+  loadCardCapture(h,[dimension('130'),priceInput('19.90','RUB')]);h.context.captureProductFields();
+  assert.equal(h.draft.details.package_weight_g,'130');assert.equal(h.draft.dirty,true);assert.equal(h.draft.touched.has('package_weight_g'),true);
+  assert.equal(h.draft.prices.S1.currency,'RUB');assert.equal(h.draft.pending.has('prices'),true);
+  h.context.captureProductFields();assert.equal(h.draft.pending.has('prices'),true,'subsequent redraws must not clear real unsaved edits');
+});
+
+function loadCardConfirmation(h) {
+  h.draft.pending.clear();h.draft.dirty=false;
+  h.context.listingDraft=()=>({dirty:false});
+  h.context.listingFlow.videoDrafts=new Map();
+  h.context.listingFlow.busy=false;
+  h.context.state.guided.card_ready=true;
+  h.context.state.guided.review={sections:{grouping:{approved:false,problems:[]},fields:{approved:false,problems:[]}}};
+  h.context.benchButton=(label,action,extra,disabled)=>`<button ${disabled?'disabled':''}>${label}</button>`;
+  h.load(card,'function benchCardConfirmationState(', '\nasync function benchEnsureDocument(){');
+  const operationalHandler=card.slice(card.indexOf("document.addEventListener('input',event=>{if(event.target.id==='benchOfferPrefix')"));
+  h.load(operationalHandler,"document.addEventListener('click',async event=>{",'\nfunction benchEqualNumeric(');
+}
+
+test('card confirmation requires a successfully compiled current card even when section issues are empty',()=>{
+  const h=harness();loadCardConfirmation(h);h.context.state.guided.card_ready=false;
+  assert.equal(h.context.benchCardConfirmationState().ready,false);assert.match(h.context.benchCardConfirmationHtml(),/disabled/);assert.match(h.context.benchCardConfirmationHtml(),/填充并检查/);
+  h.context.state.guided.card_ready=true;assert.equal(h.context.benchCardConfirmationState().ready,true);
+});
+
+test('card confirmation checks dirty/pending edits and grouping/field issues before any API request',async()=>{
+  const h=harness();loadCardConfirmation(h);const calls=[];h.context.api=async(...args)=>{calls.push(args);return {}};
+  h.draft.pending.add('prices');await h.click('confirm-card');assert.equal(calls.length,0);
+  h.draft.pending.clear();h.context.state.guided.review.sections.fields.problems=['必填属性缺失'];await h.click('confirm-card');assert.equal(calls.length,0);
+  h.context.state.guided.review.sections.fields.problems=[];h.context.listingFlow.skuDrafts.set('P1',['different']);await h.click('confirm-card');assert.equal(calls.length,0);
+});
+
+test('an explicit card confirmation approves grouping first and fields second without publishing',async()=>{
+  const h=harness();loadCardConfirmation(h);const calls=[];
+  h.context.api=async(url,request)=>{const section=JSON.parse(request.body).section;calls.push({url,section});const review=plain(h.context.state.guided.review);review.sections[section].approved=true;return {ok:true,review}};
+  await h.click('confirm-card');
+  assert.deepEqual(calls.map(call=>call.section),['grouping','fields']);assert.equal(calls.every(call=>call.url==='/api/workbench/products/P1/guided/approve'),true);
+  assert.equal(h.context.state.guided.review.sections.grouping.approved,true);assert.equal(h.context.state.guided.review.sections.fields.approved,true);assert.equal(h.context.listingFlow.busy,false);
+});
+
+test('confirming a single SKU still has a grouping approval and skips a previously approved group',async()=>{
+  const h=harness();loadCardConfirmation(h);h.context.state.guided.review.sections.grouping.approved=true;const sections=[];
+  h.context.api=async(url,request)=>{sections.push(JSON.parse(request.body).section);return {ok:true}};
+  await h.click('confirm-card');assert.deepEqual(sections,['fields']);
+});
+
+test('declining manual card confirmation sends no approval or publication calls',async()=>{
+  const h=harness();loadCardConfirmation(h);h.context.confirm=()=>false;const calls=[];h.context.api=async(...args)=>calls.push(args);
+  await h.click('confirm-card');assert.equal(calls.length,0);assert.equal(h.context.listingFlow.busy,false);
+});
+
+test('new local edits while the first approval runs prevent automatic field approval',async()=>{
+  const h=harness(),waiting=deferred();loadCardConfirmation(h);const sections=[];
+  h.context.api=async(url,request)=>{sections.push(JSON.parse(request.body).section);return waiting.promise};
+  const pending=h.click('confirm-card');h.draft.details.package_weight_g='150';h.draft.dirty=true;
+  waiting.resolve({ok:true,review:{sections:{grouping:{approved:true,problems:[]},fields:{approved:false,problems:[]}}}});await pending;
+  assert.deepEqual(sections,['grouping']);assert.equal(h.context.state.guided.review.sections.fields.approved,false);assert.equal(h.draft.dirty,true);
+});
+
+test('a rejected confirmation cannot clear another operation\'s global busy flag',async()=>{
+  const h=harness();loadCardConfirmation(h);h.context.listingFlow.busy=true;
+  await h.click('confirm-card');assert.equal(h.context.listingFlow.busy,true);
 });

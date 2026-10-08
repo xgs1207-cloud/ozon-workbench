@@ -102,10 +102,10 @@ class ListingDocumentTests(unittest.TestCase):
         self.assertEqual(clean_missing_color_suffix("Игрушка — не указан", has_real_color=True), "Игрушка")
 
     def test_real_color_and_explicit_name_not_removed(self):
-        self.assertEqual(variant_title("Игрушка", {"color_ru": "красный"}), "Игрушка — красный")
-        self.assertEqual(variant_title("Товар — не указан", {"color_ru": "розовый"}), "Товар — розовый")
-        self.assertEqual(variant_title("Товар — 未指定", {"color_ru": "розовый"}), "Товар — розовый")
-        self.assertEqual(variant_title("Игрушка", {"name_ru": "Настоящее название"}), "Настоящее название")
+        self.assertEqual(variant_title("Игрушка", {"color_ru": "красный"}), "Игрушка")
+        self.assertEqual(variant_title("Товар — не указан", {"color_ru": "розовый"}), "Товар")
+        self.assertEqual(variant_title("Товар — 未指定", {"color_ru": "розовый"}), "Товар")
+        self.assertEqual(variant_title("Игрушка", {"name_ru": "Настоящее название"}), "Игрушка")
         self.assertEqual(variant_title("Игрушка", {"name_ru": "Игрушка — не указан"}), "Игрушка")
         self.assertEqual(variant_color({}, [{"attribute_id": 10096, "attribute_name": "商品颜色", "value": "Красный"}]), "Красный")
 

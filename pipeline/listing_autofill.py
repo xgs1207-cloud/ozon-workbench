@@ -55,12 +55,21 @@ _COLOUR_GROUPS = (
     ("粉", "粉色", "粉红色", "pink", "розовый"), ("紫", "紫色", "purple", "фиолетовый"),
     ("灰", "灰色", "gray", "grey", "серый"), ("橙", "橙色", "orange", "оранжевый"),
     ("透明", "transparent", "прозрачный"),
+    ("棕", "棕色", "褐色", "brown", "коричневый"),
+    ("米", "米色", "beige", "бежевый"),
 )
 _MATERIAL_GROUPS = (
     ("棉", "cotton", "хлопок"),
     ("硅胶", "silicone", "силикон"), ("不锈钢", "stainless steel", "нержавеющая сталь"),
     ("塑料", "plastic", "пластик"), ("聚酯纤维", "涤纶", "polyester", "полиэстер"),
+    ("聚氯乙烯", "PVC", "polyvinyl chloride", "ПВХ", "поливинилхлорид", "поливинилхлорид (ПВХ)"),
 )
+# These links explain names of an already evidenced material; they are never
+# evidence that a particular captured product contains that material.
+_MATERIAL_REFERENCES = {
+    "pvc": ("https://www.sibur.ru/rusvinyl/ru/products/",
+            "https://www.sibur.com/upload/iblock/bf0/dpiai82qyj9ul7y4iaxv68p1fvnr39md.pdf"),
+}
 
 
 def _present(record: Mapping[str, Any], names: tuple[str, ...]) -> Any:
@@ -280,7 +289,12 @@ def _one(rows: list[dict[str, Any]], semantic: str | None = None) -> dict[str, A
         value = _measurement(row, semantic) if semantic and semantic.endswith(("_mm", "_g")) else _quantity(row["value"]) if semantic == "package_quantity" else row["value"]
         if value is None:
             return None
-        identity = repr(value) if not isinstance(value, str) else value.casefold().strip()
+        identity = repr(value) if not isinstance(value, str) else _match_text(value)
+        if isinstance(value, str) and semantic in {"color", "color_name", "material", "brand"}:
+            # The same supplier fact in Chinese and Russian is not a conflict.
+            # Directional weakening (pure cotton -> cotton) has a different
+            # equivalent set, so a purity disagreement is not silently merged.
+            identity = repr(sorted(_equivalents(value, semantic)))
         unique.setdefault(identity, {**row, "value": value})
     return next(iter(unique.values())) if len(unique) == 1 else None
 
@@ -350,8 +364,13 @@ def _cached_form(directory: Path, cache_root: Path, shop_id: str | None) -> dict
     return form
 
 
+def _match_text(value: Any) -> str:
+    """Case/space normalization only, not a substring or fuzzy match."""
+    return " ".join(unicodedata.normalize("NFKC", str(value)).casefold().split())
+
+
 def _equivalents(value: Any, semantic: str | None) -> set[str]:
-    exact = str(value).strip().casefold()
+    exact = _match_text(value)
     groups = _COLOUR_GROUPS if semantic in {"color", "color_name"} else _MATERIAL_GROUPS if semantic == "material" else ()
     if semantic == "material" and exact.replace(" ", "") in {"纯棉", "100%棉"}:
         # A confirmed pure cotton fact may map to the weaker general cotton
@@ -360,9 +379,59 @@ def _equivalents(value: Any, semantic: str | None) -> set[str]:
     if semantic == "brand":
         groups = (("无品牌", "无", "no brand", "нет бренда"),)
     for group in groups:
-        if exact in {item.casefold() for item in group}:
-            return {item.casefold() for item in group}
+        if exact in {_match_text(item) for item in group}:
+            return {_match_text(item) for item in group}
     return {exact}
+
+
+def _dictionary_search_terms(value: Any, semantic: str | None) -> list[str]:
+    """Known translations are search inputs, never invented official IDs.
+
+    Russian aliases are tried first: the official search operation has no
+    language parameter, even when category metadata is bound to ZH_HANS.
+    Preserve qualifiers: generic plastic never expands to PVC or silicone, and
+    a material with an unknown composition is never reduced to a known one.
+    """
+    values = value if isinstance(value, (list, tuple)) else [value]
+    terms: list[str] = []
+    for item in values:
+        equivalent = _equivalents(item, semantic)
+        if semantic in {"color", "color_name"}:
+            groups = _COLOUR_GROUPS
+        elif semantic == "material":
+            groups = _MATERIAL_GROUPS
+        elif semantic == "brand":
+            groups = (("无品牌", "no brand", "Нет бренда"),)
+        else:
+            groups = ()
+        group = next((group for group in groups if any(_match_text(alias) in equivalent for alias in group)), ())
+        ordered = [alias for alias in group if re.search(r"[а-яё]", alias, re.I)]
+        ordered.extend([str(item).strip(), *group])
+        for alias in ordered:
+            text = " ".join(str(alias).split())
+            if len(text) >= 2 and all(_match_text(text) != _match_text(existing) for existing in terms):
+                terms.append(text)
+    return terms[:8]
+
+
+def _dictionary_queries(value: Any, semantic: str | None, *, selected_type: bool) -> list[str]:
+    if selected_type:
+        return [""]
+    terms = _dictionary_search_terms(value, semantic)
+    original = " ".join(str(value).split())
+    # The search API needs at least two characters. Expand a single-character
+    # colour to its known Chinese name; do not broaden an unknown material.
+    if len(original) < 2:
+        original = next((term for term in terms if re.search(r"[\u3400-\u9fff]", term)), "")
+    if semantic == "brand" and _match_text(original) in {"无", "无品牌"}:
+        original = "Нет бренда"
+    queries = [*[term for term in terms if re.search(r"[а-яё]", term, re.I)], original]
+    unique = []
+    for query in queries:
+        if query not in unique:
+            unique.append(query)
+    # Empty means one bounded official page, not fetching the full dictionary.
+    return unique[:3] or [""]
 
 
 def _receipt_options(cache_root: Path, form: Mapping[str, Any], field: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -382,10 +451,28 @@ def _receipt_options(cache_root: Path, form: Mapping[str, Any], field: Mapping[s
 
 def _dictionary_match(cache_root: Path, form: Mapping[str, Any], field: Mapping[str, Any], value: Any,
                       semantic: str | None, *, selected_type: bool = False) -> dict[str, Any] | None:
-    options = _receipt_options(cache_root, form, field)
-    matches = [option for option in options if option["dictionary_value_id"] == form["type_id"]] if selected_type else [
-        option for option in options if option["value"].strip().casefold() in _equivalents(value, semantic)]
+    matches = _dictionary_candidates(cache_root, form, field, value, semantic, selected_type=selected_type)
     return matches[0] if len(matches) == 1 else None
+
+
+def _dictionary_candidates(cache_root: Path, form: Mapping[str, Any], field: Mapping[str, Any], value: Any,
+                           semantic: str | None, *, selected_type: bool = False) -> list[dict[str, Any]]:
+    options = _receipt_options(cache_root, form, field)
+    return [option for option in options if option["dictionary_value_id"] == form["type_id"]] if selected_type else [
+        option for option in options if _match_text(option["value"]) in _equivalents(value, semantic)]
+
+
+def _match_metadata(row: Mapping[str, Any], field: Mapping[str, Any], form: Mapping[str, Any],
+                    candidates: list[dict[str, Any]], *, selected_type: bool = False) -> dict[str, Any]:
+    values = row["value"] if isinstance(row["value"], (list, tuple)) else [row["value"]]
+    exact = len(values) == len(candidates) and all(
+        _match_text(value) == _match_text(option["value"]) for value, option in zip(values, candidates))
+    result = {"match_method": "selected_type" if selected_type else "exact" if exact else "verified_synonym",
+              "source_value": row["value"], "official_values": candidates,
+              "dictionary_scope": form["scope"], "dictionary_id": field["dictionary_id"]}
+    if _field_semantic(field) == "material" and any("pvc" in _equivalents(value, "material") for value in values):
+        result["match_references"] = list(_MATERIAL_REFERENCES["pvc"])
+    return result
 
 
 def _field_semantic(field: Mapping[str, Any]) -> str | None:
@@ -490,32 +577,38 @@ def _build(directory: Path, cache_root: Path, *, shop_id: str | None, resolve_di
             raw_values = row["value"] if isinstance(row["value"], (list, tuple)) else [row["value"]]
             candidates = []
             for value in raw_values:
-                candidate = _dictionary_match(cache_root, form, field, value, semantic, selected_type=selected_type)
-                query = "" if selected_type else str(value).strip()
-                # Stable small aliases are exact-equivalence, not fuzzy matching.
-                if semantic == "color" and len(query) < 2:
-                    query = next((item for group in _COLOUR_GROUPS if query.casefold() in {v.casefold() for v in group}
-                                  for item in group if item.endswith("色")), query)
-                if semantic == "brand" and query in {"无", "无品牌"}:
-                    query = "Нет бренда"
-                query = query if len(query) >= 2 else ""
-                request_key = (int(key), query)
-                if (candidate is None and resolve_dictionaries and request_key not in queried
-                        and result["lookup_count"] < MAX_DICTIONARY_LOOKUPS):
-                    queried.add(request_key)
-                    result["lookup_count"] += 1
-                    try:
-                        category_form.dictionary_values(cache_root, form["category_id"], form["type_id"], int(key),
-                                                        shop_id=form["shop_id"], q=query, limit=50)
-                    except (ValueError, OSError, TimeoutError, RuntimeError) as error:
-                        result["unresolved"].append({"attribute_id": int(key), "sku_id": sku_id,
-                                                       "reason": "官方选项读取失败，请手动选择", "evidence": row["evidence"]})
-                    candidate = _dictionary_match(cache_root, form, field, value, semantic, selected_type=selected_type)
-                if candidate is None:
-                    result["unresolved"].append({"attribute_id": int(key), "sku_id": sku_id,
-                                                   "reason": "采集值尚无唯一匹配的当前类目官方选项，请核对选择", "evidence": row["evidence"]})
+                matches = _dictionary_candidates(cache_root, form, field, value, semantic, selected_type=selected_type)
+                read_failed = False
+                if not matches and resolve_dictionaries:
+                    for query in _dictionary_queries(value, semantic, selected_type=selected_type):
+                        request_key = (int(key), query)
+                        if request_key in queried or result["lookup_count"] >= MAX_DICTIONARY_LOOKUPS:
+                            continue
+                        queried.add(request_key)
+                        result["lookup_count"] += 1
+                        try:
+                            category_form.dictionary_values(cache_root, form["category_id"], form["type_id"], int(key),
+                                                            shop_id=form["shop_id"], q=query, limit=50)
+                        except (ValueError, OSError, TimeoutError, RuntimeError):
+                            read_failed = True
+                            break  # One failure diagnostic; never automatic broad retries.
+                        matches = _dictionary_candidates(cache_root, form, field, value, semantic, selected_type=selected_type)
+                        if matches:
+                            break  # Ambiguous equivalent official IDs must stay ambiguous.
+                if len(matches) != 1:
+                    code = "ambiguous" if len(matches) > 1 else "read_failed" if read_failed else (
+                        "lookup_budget_exhausted" if resolve_dictionaries and result["lookup_count"] >= MAX_DICTIONARY_LOOKUPS
+                        else "official_dictionary_unmatched")
+                    reason = {"ambiguous": "存在多个等义官方选项，请核对后选择，不会自动猜测",
+                              "read_failed": "官方选项读取失败，请手动搜索选择",
+                              "lookup_budget_exhausted": "本次少量官方查询预算已用完，请按建议词搜索后选择",
+                              "official_dictionary_unmatched": "采集值尚无唯一匹配的当前类目官方选项，请按建议词搜索后核对选择"}[code]
+                    result["unresolved"].append({"attribute_id": int(key), "field_name": field["name"], "sku_id": sku_id,
+                                                   "source_value": value, "reason_code": code, "reason": reason,
+                                                   "evidence": row["evidence"], "search_terms": _dictionary_search_terms(value, semantic),
+                                                   "candidates": matches[:8]})
                     return
-                candidates.append(candidate)
+                candidates.append(matches[0])
         else:
             candidates = _typed_candidate(row, field)
         if candidates is None:
@@ -532,6 +625,8 @@ def _build(directory: Path, cache_root: Path, *, shop_id: str | None, resolve_di
         meta_target = provenance["per_sku_attributes"].setdefault(sku_id, {}) if sku_id else provenance["attributes"]
         target[key] = validated[key]
         meta_target[key] = {"source": row["source"], "evidence": row["evidence"], "status": row["status"]}
+        if field.get("dictionary_id"):
+            meta_target[key].update(_match_metadata(row, field, form, validated[key], selected_type=selected_type))
 
     for field in form["fields"]:
         key = str(field["attribute_id"])

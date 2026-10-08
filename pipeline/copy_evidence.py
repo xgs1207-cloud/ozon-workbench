@@ -5,9 +5,10 @@ import re
 from decimal import Decimal
 from typing import Any, Mapping
 
-from rules.validate import official_copy_checks
+from rules.validate import (COLOR_MAPPINGS, keyword_copy_checks, keyword_phrase_present, normalize_keyword_phrase,
+                            official_copy_checks)
 
-COPY_EVIDENCE_VERSION = 2
+COPY_EVIDENCE_VERSION = 3
 
 
 def safe_evidence_problems(problems: list[Any]) -> list[str]:
@@ -171,10 +172,55 @@ def verified_copy_facts(analysis: Mapping[str, Any], source: Mapping[str, Any] |
     return result
 
 
+def _title_keyword_review(copy: Mapping[str, Any], facts: list[dict[str, Any]],
+                          keywords: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
+    """A factual attribute can coincide with a secondary query without stuffing.
+
+    Exact facts and controlled colour/material translations provide inspectable
+    support. Unmatched lexical coincidences are review notes, never automatic
+    fact promotion or a rigid ban on an otherwise valid title.
+    """
+    core = next((row["keyword"] for row in keywords if row.get("role") == "core"), "")
+    reviews, advisory = [], []
+    for row in keywords:
+        query = row["keyword"]
+        if (row.get("role") == "core" or keyword_phrase_present(core, query)
+                or not keyword_phrase_present(copy.get("title_ru"), query)):
+            continue
+        fact_ids = []
+        for fact in facts:
+            if fact.get("verified") is not True:
+                continue
+            value = str(fact.get("value") or "")
+            if re.search(r"(?:\bне\s|\bnot\s|不是|非|无)", value, re.IGNORECASE):
+                continue
+            exact = keyword_phrase_present(value, query)
+            identity = str(fact.get("id") or "")
+            colour = False
+            if "color" in identity or "colour" in identity or fact.get("kind") == "sku_descriptor":
+                colour = any(normalize_keyword_phrase(query) == normalize_keyword_phrase(russian)
+                             and ((re.search(r"[\u4e00-\u9fff]", alias) and alias in value)
+                                  or keyword_phrase_present(value, alias))
+                             for alias, russian in COLOR_MAPPINGS.items() if len(alias) >= 2)
+            material = ("material" in identity and any(re.search(pattern, query, re.IGNORECASE)
+                        and any(alias in value.casefold() for alias in aliases)
+                        for pattern, aliases in _MATERIAL_CLAIMS))
+            if exact or colour or material:
+                fact_ids.append(identity)
+        reviews.append({"query": query, "placement": "title", "fact_ids": fact_ids,
+                        "status": "supported_attribute_coincidence" if fact_ids else "review_secondary_coincidence"})
+        if not fact_ids:
+            advisory.append("标题含与副关键词相同的词组，请确认是商品真实属性或卖点，不要为覆盖副词而堆砌：" + str(query))
+    return reviews, advisory
+
+
 def candidate_evidence(copy: Mapping[str, Any], facts: list[dict[str, Any]], keywords: list[dict[str, Any]]) -> dict[str, Any]:
     """Validate before accepting or repairing a paid response; never drop claims."""
     if any(not isinstance(copy.get(field), str) for field in ("title_ru", "description_ru")):
         raise ValueError("title_ru 和 description_ru 必须是字符串")
+    keyword_problems = keyword_copy_checks(copy, keywords)
+    if keyword_problems:
+        raise ValueError("；".join(keyword_problems))
     combined = f"{copy['title_ru']}\n{copy['description_ru']}"
     by_id = {row["id"]: row for row in facts if row.get("verified") is True}
     numeric_facts = {identity: fact for identity, fact in by_id.items() if fact.get("allow_numeric", True)}
@@ -234,23 +280,27 @@ def candidate_evidence(copy: Mapping[str, Any], facts: list[dict[str, Any]], key
                 raise ValueError(f"候选含未证实的材质声明：{match.group(0)}，请删除或补充真实材质事实")
             if not any(match.group(0) in row["claim"] for row in evidence):
                 evidence.append({"claim": match.group(0), "fact_ids": matching})
-    allowed = {row["keyword"] for row in keywords}
+    allowed = {normalize_keyword_phrase(row["keyword"]) for row in keywords}
     for field in ("primary_keywords", "secondary_keywords"):
         terms = copy.get(field, [])
         if not isinstance(terms, list) or any(not isinstance(term, str) for term in terms):
             raise ValueError(f"{field} 必须是字符串数组；无已选词时使用 []")
-        if set(terms) - allowed:
+        if {normalize_keyword_phrase(term) for term in terms} - allowed:
             raise ValueError("候选使用了未选或排除的关键词；无已选关键词时关键词数组应为空")
     usage = []
     for row in keywords:
         placement = [field for field, text in (("title", copy["title_ru"]), ("description", copy["description_ru"]))
-                     if row["keyword"].casefold() in text.casefold()]
+                     if keyword_phrase_present(text, row["keyword"])]
         if placement or row["role"] == "core":
             usage.append({"query": row["keyword"], "role": row["role"], "placement": placement,
                           "surface_form": row["keyword"], "matched_lemmas": []})
-    checks = official_copy_checks(copy)
+    checks = official_copy_checks(copy, allow_description_emoji=True)
+    keyword_review, title_advisory = _title_keyword_review(copy, facts, keywords)
+    checks["advisory"] = sorted(set(checks["advisory"] + title_advisory))
     return {"claim_evidence": evidence, "keyword_usage": usage, "excluded_keywords": [],
             "audit": {"title_chars": len(copy["title_ru"]), "description_chars": len(copy["description_ru"]),
-                      "core_coverage": next((bool(row["placement"]) for row in usage if row["role"] == "core"), None),
+                      "copy_policy_version": COPY_EVIDENCE_VERSION,
+                      "title_keyword_review": keyword_review,
+                      "core_coverage": next(("title" in row["placement"] for row in usage if row["role"] == "core"), None),
                       "secondary_coverage": None, "fact_consistency": None, "readability": None,
                       "risk_flags": checks["advisory"] + ["材质、用途和俄语词形需要人工核对"], **checks}}

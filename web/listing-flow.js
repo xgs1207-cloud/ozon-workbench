@@ -122,12 +122,18 @@ function flowAnalysisHtml(g) {
 }
 function flowCandidatesHtml(g) {
     const c = g.workflow?.copy || {}, modes={search_first:'搜索匹配优先',conversion_first:'买家理解优先',differentiation_first:'真实差异优先'},prerequisite=flowCopyPrerequisite(g),generation=g.copy_generation_status||{},failed=generation.current===true&&generation.status==='invalid_response';
-    return `<section class="panel"><h2>选择一组俄文文案</h2><p class="flow-lead">三组候选使用相同的已确认事实，只改变表达重点。选定之前不会填入正式卡片。</p>
+    return `<section class="panel"><h2>选择一组俄文文案</h2><p class="flow-lead">三组候选使用相同的已确认事实，只改变卖点的表达重点。选定之前不会填入正式卡片。</p>${flowCopyPolicyHtml(g)}
     ${flowPrerequisiteHtml(prerequisite,'生成文案前还需完成一步')}
     ${c.status==='stale'?'<div class="hint warn">规格、事实、类目或关键词已经改变。这些候选已过期，请重新生成。</div>':''}
     ${failed?`<div class="hint warn"><strong>上次模型结果未通过校验</strong><p>已保存失败结果，普通重试只重新校验，不会再次调用模型。需要新候选时，请主动点击付费重新生成。</p>${generation.errors?.length?`<ul class="flow-summary-list">${generation.errors.slice(0,5).map(error=>`<li>${esc(error)}</li>`).join('')}</ul>`:''}</div>`:''}
     <div class="flow-actionrow">${flowButton(failed?'重新校验已保存结果（不调用模型）':'生成三组标题、简介和标签','candidates',Boolean(prerequisite)||listingFlow.busy)}${failed?flowButton('重新生成候选（会调用模型）','candidates-force',Boolean(prerequisite)||listingFlow.busy):''}</div>
     ${(c.candidates||[]).map(x=>`<article class="flow-candidate ${c.selected_id===x.id?'selected':''}"><h3>${esc(modes[x.mode]||x.label||x.mode)}</h3><p class="flow-candidate-title">${esc(x.title_ru||x.title)}</p><p>${esc(x.description_ru||x.description)}</p>${flowTags(x.hashtags)}${(x.audit?.risk_flags||[]).length?`<p class="bad">${esc(x.audit.risk_flags.join('；'))}</p>`:''}${flowButton(c.selected_id===x.id?'已选择本组':'采用本组','choose-copy',c.status==='stale'||listingFlow.busy,`data-candidate="${esc(x.id)}"`)}</article>`).join('')||'<div class="empty">确认商品摘要和真实 Ozon 类目后即可生成；可自填关键词，不必读取类目词库。</div>'}</section>`;
+}
+function flowCopyPolicyHtml(g){
+    const records=(g.selected_keywords?.keywords||[]).filter(row=>!['ad','reject','exclude','conflict'].includes(row.role));
+    const core=records.find(row=>row.role==='core')||records[0],phrase=String(core?.keyword||'').trim().replace(/\s+/g,' ');
+    const secondary=records.filter(row=>row!==core).map(row=>String(row.keyword||'').trim()).filter(Boolean);
+    return `<div class="flow-copy-policy"><p><strong>标题：</strong>${phrase?`以完整主关键词 <span lang="ru">${esc(phrase)}</span> 开头；词组内不换序、不拆分，只规范大小写和空格。`:'未填写主关键词时，按真实类目与商品信息生成。'}属性词与真实卖点由 AI 自然融合，不机械拼接。</p><p><strong>简介：</strong>短段落、清晰分行与适量 emoji；${secondary.length?`副关键词 ${secondary.map(word=>`<span lang="ru">${esc(word)}</span>`).join('、')} 只在有事实依据时自然融入。`:'可填写副关键词，按商品事实自然融入。'}可在下方编辑排版。</p><p class="field-help">这能改善搜索相关性与买家理解，不保证排名。价格、履约、库存、转化与评价等因素也会影响流量。</p></div>`;
 }
 function flowStudioSlots(g=state.guided){return [...(g?.image_plan?.main_images||[]),...(g?.image_plan?.detail_images||[])]}
 function flowStudioActive(g=state.guided){const slots=flowStudioSlots(g),saved=listingFlow.studioSlots.get(state.product);return saved==='new'?'new':slots.find(x=>x.slot===saved)?.slot||slots[0]?.slot||'new'}
@@ -298,6 +304,8 @@ renderProduct = function renderStepwiseProduct() {
     pane('keywords').insertAdjacentHTML('beforeend',`<details class="flow-optional-library"><summary>从已采集类目词库挑选（可选）</summary><section class="panel"><p class="flow-lead">仅在需要研究关键词时展开。搜索量帮助排序，不能证明商品具备对应功能。</p><label class="field">研究类目<select id="flowKeywordCategory"><option value="">选择已采集类目</option>${state.categories.map(x=>`<option value="${esc(x.key)}" ${(g.selected_keywords?.category_key||state.category)===x.key?'selected':''}>${esc(x.label)}</option>`).join('')}</select></label><div class="flow-actionrow">${flowButton('读取类目词库','load-words')}</div><div id="flowKeywordLibrary">${flowWordsHtml()}</div></section></details>`);
     pane('copy').innerHTML=flowCandidatesHtml(g);
     if(panes.copy){pane('copy').append(panes.copy);for(const button of panes.copy.querySelectorAll('[data-action="prepare"],[data-action="approve"]'))button.remove();const edit=panes.copy.querySelector('[data-action="save-copy"]');if(edit){edit.removeAttribute('data-action');edit.dataset.flowAction='save-copy'}
+        const saveNote=[...panes.copy.querySelectorAll('p')].find(node=>node.textContent.includes('这会调用付费文本模型'));
+        if(saveNote)saveNote.textContent='保存修改只做校验，不调用模型。修改后的标题、简介和标签需要重新确认。';
         if(g.copy?.title_ru){panes.copy.insertAdjacentHTML('beforeend',`<label class="field" style="margin-top:18px">主题标签（空格分隔）<textarea id="flowCopyTags">${esc(productDraft()?.edits.flowCopyTags??(g.copy.hashtags||[]).join(' '))}</textarea></label><div class="flow-actionrow">${flowButton('确认当前标题、简介和标签','confirm-copy',!w.copy?.selected||listingFlow.busy)}</div>`)}
     }
     pane('media').innerHTML=flowImageStudioHtml(g);

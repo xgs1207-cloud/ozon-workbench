@@ -55,6 +55,46 @@ function benchMissingHtml(){
     if(!draft)messages.push('请先确认官方类目并读取类目字段');
     return `<section class="bench-missing"><h3>仍需填写</h3>${messages.length?`<ul>${[...new Set(messages)].map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:'<p class="good">当前所需字段已填写，请保存并检查卡片。</p>'}${doc?.missing?.validation_errors?.length?`<p class="bad">${esc(doc.missing.validation_errors.join('；'))}</p>`:''}<p class="field-help">摘要用于填写参考。正式发布仍需校验真实属性、媒体与合规资料。</p></section>`;
 }
+function benchAttributeMatchesHtml(){
+    const basic=productDraft(),draft=listingDraft(),rows=basic?.unresolved||[];
+    if(basic?.autofillError)return `<p class="inline-error" role="alert">${esc(basic.autofillError)}</p>`;
+    if(!rows.length)return '';
+    if(rows.some(row=>row.attribute_id)&&draft&&basic.unresolvedScope!==draft.form.scope)return '';
+    const fields=new Map((draft?.form.fields||[]).map(field=>[String(field.attribute_id),field]));
+    return `<details class="bench-attribute-matches"><summary>未匹配的官方选项（${rows.length} 项）</summary><p class="field-help">只查找采集事实对应的官方选项。没有唯一等义值时保持空白，不把未知材质替换成相似材质。</p>${rows.map((row,index)=>{
+        const field=fields.get(String(row.attribute_id)),sku=(draft?.selectedSkus||[]).find(item=>(item.sku_id||item.id)===row.sku_id),label=row.field_name||field?.attribute_name||field?.name||'官方属性';
+        const value=Array.isArray(row.source_value)?row.source_value.join(' / '):row.source_value;
+        return `<div class="bench-attribute-match"><strong>${esc(label)}${row.sku_id?` · ${esc(sku?.name||sku?.sku_name||row.sku_id)}`:''}</strong>${value!=null?`<p>采集值：${esc(String(value))}</p>`:''}<p>${esc(row.reason||'请核对官方选项')}</p>${row.evidence?`<details><summary>查看事实依据</summary><p>${esc(typeof row.evidence==='string'?row.evidence:JSON.stringify(row.evidence))}</p></details>`:''}${field&&listingControl(field)==='dictionary'&&!(Number(field.complex_id)>0)?benchButton('查找官方选项','attribute-match-search',`data-match-index="${index}"`):''}</div>`;
+    }).join('')}</details>`;
+}
+function benchRefreshAttributeMatches(){const host=$('#benchAttributeMatches');if(host)host.innerHTML=benchAttributeMatchesHtml()}
+const benchApplyAutofill=applyListingAutofill;
+applyListingAutofill=function(result){const basic=productDraft();if(basic)basic.unresolvedScope=result.scope||null;return benchApplyAutofill(result)};
+const benchAutofillLoader=loadListingAutofill;
+loadListingAutofill=async function(...args){
+    const pending=benchAutofillLoader(...args),button=document.querySelector('[data-action="listing-autofill"]');
+    if(button&&productDraft()?.autofillLoading){button.disabled=true;button.textContent='正在匹配官方选项…'}
+    try{return await pending}finally{benchRefreshAttributeMatches();if(button?.isConnected){button.disabled=Boolean(productDraft()?.autofillLoading);button.textContent='匹配颜色、材质等官方选项'}}
+};
+document.addEventListener('click',async event=>{
+    const button=event.target.closest('[data-bench-action="attribute-match-search"]');if(!button)return;
+    const draft=listingDraft(),row=productDraft()?.unresolved?.[Number(button.dataset.matchIndex)],product=state.product;
+    if(!draft||!row)return;
+    button.disabled=true;
+    try{
+        if(productDraft()?.unresolvedScope!==draft.form.scope)throw Error('店铺或类目已改变，请重新读取匹配结果');
+        const scope=row.sku_id||'common';
+        if(scope!=='common'&&!draft.selectedSkus.some(sku=>(sku.sku_id||sku.id)===scope))throw Error('该规格已不在当前选择中，请重新读取匹配结果');
+        draft.scope=scope;draft.query='';draft.requiredOnly=false;
+        const id=String(row.attribute_id),search=String((row.search_terms||[])[0]||row.source_value||'').trim();
+        draft.dictionaries[id]={items:[],query:search,loadedQuery:'',lastValueId:0,hasNext:false,loading:false,error:''};
+        await loadDictionary(id);
+        if(product!==state.product||draft!==listingDraft())return;
+        const field=$(`[data-official-field="${CSS.escape(id)}"]`),details=field?.closest('details.official-advanced');
+        if(details)details.open=true;
+        if(field){field.scrollIntoView({block:'center',behavior:'smooth'});field.querySelector('[data-dict-query]')?.focus({preventScroll:true})}
+    }catch(error){notice(error.message,true)}finally{if(button.isConnected)button.disabled=false}
+});
 const benchSupportRenderer=renderProductSupport;
 renderProductSupport=function(){if(flowStep()!=='card'){benchSupportRenderer();return}const host=$('#productSupport');if(host)host.innerHTML=benchSummaryHtml()+benchMissingHtml()};
 function benchOperationalHtml(){
@@ -74,6 +114,13 @@ renderListingForm=function(){
         const name=field.querySelector('.official-field-title')?.textContent.trim();
         const input=field.querySelector('[data-listing-input]:not([data-collection])');
         if(name&&input?.tagName==='INPUT')input.placeholder=name;
+        const id=field.dataset.officialField,origin=draft?.scope==='common'?draft.provenance?.attributes?.[id]:draft?.provenance?.per_sku_attributes?.[draft.scope]?.[id];
+        if(origin?.match_method){
+            const details=field.querySelector('.schema-details'),note=document.createElement('p');note.className='field-description';
+            const official=(origin.official_values||[]).map(value=>typeof value==='string'?value:value.value).filter(Boolean).join(' / ');
+            note.textContent=`匹配依据：${origin.match_method==='verified_synonym'?'已核实等义翻译':origin.match_method==='selected_type'?'已确认官方类型':'采集值精确匹配'}${origin.source_value!=null?`；采集值 ${origin.source_value}`:''}${official?`；官方值 ${official}`:''}。`;
+            details?.append(note);
+        }
     }
     const excluded=new Set((doc?.official_excluded_attribute_ids||doc?.card?.official_excluded_attribute_ids||[4191,23171]).map(String));
     for(const field of template.content.querySelectorAll('[data-official-field]')){
@@ -141,7 +188,7 @@ renderProduct=function(){
         }else if(prefix?.querySelector('button'))prefix.querySelector('button').textContent='保存前缀并分配货号';
         if(official)card.append(official);
         if(group&&(state.skus?.active_count||0)>1)card.append(group);
-        card.insertAdjacentHTML('beforeend',`<section class="panel bench-card-check"><h3>检查卡片</h3><p class="field-help">摘要、已确认文案与官方属性使用同一份商品资料。保存修改后，自动填充已知内容并核对缺项。</p><div class="row"><button class="btn secondary" data-action="listing-autofill">补齐有依据的官方选项</button>${flowButton('填充并检查上架卡片','prepare-card',!state.guided.workflow?.copy?.confirmed||listingFlow.busy)}</div>${benchCardConfirmationHtml()}</section>`);
+        card.insertAdjacentHTML('beforeend',`<section class="panel bench-card-check"><h3>检查卡片</h3><p class="field-help">颜色和材质依据所选规格自动匹配当前类目的官方选项；已有手填值不会被覆盖。保存修改后，填充卡片并核对缺项。</p><div class="row"><button class="btn secondary" data-action="listing-autofill" ${productDraft()?.autofillLoading?'disabled':''}>${productDraft()?.autofillLoading?'正在匹配官方选项…':'匹配颜色、材质等官方选项'}</button>${flowButton('填充并检查上架卡片','prepare-card',!state.guided.workflow?.copy?.confirmed||listingFlow.busy)}</div><div id="benchAttributeMatches" aria-live="polite">${benchAttributeMatchesHtml()}</div>${benchCardConfirmationHtml()}</section>`);
         if(footer)card.append(footer);
         const error=listingBench.errors.get(state.product);if(error)card.insertAdjacentHTML('afterbegin',`<p class="flow-error" role="alert">读取商品资料失败：${esc(error)} ${benchButton('重新读取','reload-document')}</p>`);
         const operationError=flowOperationErrorHtml('card');if(operationError)card.insertAdjacentHTML('afterbegin',operationError);

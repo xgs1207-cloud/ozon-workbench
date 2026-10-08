@@ -300,6 +300,146 @@ class ListingAutofillTests(unittest.TestCase):
         self.assertEqual(result["lookup_count"], MAX_DICTIONARY_LOOKUPS)
         self.assertEqual(len(self.transport.calls), MAX_DICTIONARY_LOOKUPS)
 
+    def official_options(self, attribute_id, values):
+        field = next(row for row in self.form["fields"] if row["attribute_id"] == attribute_id)
+        write_json(category_form._receipt_target(self.cache, self.form, attribute_id), {
+            "scope": self.form["scope"], "dictionary_id": field["dictionary_id"],
+            "values": {str(option_id): {"value": value, "observed_at": time.time()}
+                       for option_id, value in values}})
+
+    def test_green_chinese_source_matches_verified_russian_option_per_selected_sku(self):
+        self.update(skus=[{"sku_id": "S1", "color_zh": "绿色", "color_ru": "Зелёный"},
+                          {"sku_id": "S2", "option_values": [{"name_cn": "颜色", "value_cn": "粉色"}]},
+                          {"sku_id": "S3", "color_zh": "蓝色"}])
+        write_json(self.product / "input/selected-skus.json", {"selected": ["S1", "S2"]})
+        self.official_options(10096, [(901, "Зеленый"), (902, "Розовый"), (903, "Синий")])
+        result = self.build()
+        self.assertEqual(set(result["per_sku_attributes"]), {"S1", "S2"})
+        self.assertEqual(result["per_sku_attributes"]["S1"]["10096"], [{"value": "Зеленый", "dictionary_value_id": 901}])
+        self.assertEqual(result["per_sku_attributes"]["S2"]["10096"], [{"value": "Розовый", "dictionary_value_id": 902}])
+        self.assertNotIn("10096", result["attributes"])
+        metadata = result["provenance"]["per_sku_attributes"]["S1"]["10096"]
+        self.assertEqual(metadata["source_value"], "Зелёный")
+        self.assertEqual(metadata["match_method"], "verified_synonym")
+        self.assertEqual(metadata["dictionary_scope"], self.form["scope"])
+        self.assertEqual(metadata["official_values"][0]["dictionary_value_id"], 901)
+        self.assertEqual(self.transport.calls, [])
+
+    def test_official_search_prefers_verified_russian_alias_and_stops_at_one_match(self):
+        self.update(raw={"材质": "硅胶"}, skus=[{"sku_id": "S1", "color_zh": "绿色"}])
+        self.receipts(8229)
+        def exact_russian_search(body):
+            options = {(10096, "зелёный"): [{"id": 901, "value": "Зеленый"}],
+                       (10, "силикон"): [{"id": 902, "value": "Силикон"}]}
+            return {"result": options.get((body["attribute_id"], body.get("value", "")), [])}
+        self.transport.fixtures[PATH_ATTRIBUTE_VALUES_SEARCH] = exact_russian_search
+        result = self.build(resolve_dictionaries=True)
+        self.assertEqual(result["lookup_count"], 2)
+        self.assertEqual(result["attributes"]["10"], [{"value": "Силикон", "dictionary_value_id": 902}])
+        self.assertEqual(result["per_sku_attributes"]["S1"]["10096"][0]["dictionary_value_id"], 901)
+        self.assertEqual([call["body"]["value"] for call in self.transport.calls], ["зелёный", "силикон"])
+        self.assertEqual(self.build(resolve_dictionaries=True)["lookup_count"], 0)
+
+    def test_material_pvc_maps_to_same_polymer_not_silicone_or_generic_plastic(self):
+        self.update(raw={"材质": "PVC"})
+        self.official_options(10, [(901, "Поливинилхлорид (ПВХ)"), (902, "Силикон"), (903, "Пластик")])
+        result = self.build()
+        self.assertEqual(result["attributes"]["10"], [{"value": "Поливинилхлорид (ПВХ)", "dictionary_value_id": 901}])
+        metadata = result["provenance"]["attributes"]["10"]
+        self.assertEqual(metadata["match_method"], "verified_synonym")
+        self.assertEqual(metadata["source_value"], "PVC")
+        self.assertIn("https://www.sibur.ru/rusvinyl/ru/products/", metadata["match_references"])
+        self.update(raw={"材质": "塑料"})
+        self.official_options(10, [(901, "Поливинилхлорид (ПВХ)"), (902, "Силикон")])
+        self.assertNotIn("10", self.build()["attributes"])
+
+    def test_ambiguous_official_synonyms_return_candidates_without_guessing(self):
+        self.update(raw={"颜色": "绿色"})
+        self.official_options(10096, [(901, "Зелёный"), (902, "Зеленый")])
+        result = self.build(resolve_dictionaries=True)
+        self.assertNotIn("10096", result["attributes"])
+        unmatched = next(row for row in result["unresolved"] if row.get("attribute_id") == 10096)
+        self.assertEqual(unmatched["reason_code"], "ambiguous")
+        self.assertEqual(unmatched["field_name"], "商品颜色")
+        self.assertEqual(unmatched["source_value"], "绿色")
+        self.assertEqual(len(unmatched["candidates"]), 2)
+        self.assertEqual(unmatched["search_terms"][0], "зелёный")
+        self.assertFalse(any(call["body"].get("attribute_id") == 10096 for call in self.transport.calls))
+
+    def test_unknown_material_is_not_inferred_from_title_or_similar_options(self):
+        self.update(raw={"材质": "TPR"}, title_zh="柔软硅胶解压玩具")
+        self.official_options(10, [(901, "Силикон"), (902, "Термопластичный полиуретан"), (903, "Пластик")])
+        result = self.build()
+        self.assertNotIn("10", result["attributes"])
+        unmatched = next(row for row in result["unresolved"] if row.get("attribute_id") == 10)
+        self.assertEqual(unmatched["reason_code"], "official_dictionary_unmatched")
+        self.assertEqual(unmatched["search_terms"], ["TPR"])
+        self.assertEqual(unmatched["candidates"], [])
+        self.update(raw={})
+        self.assertNotIn("10", self.build()["attributes"])
+
+    def test_manual_green_values_and_explicit_clears_survive_synonym_autofill(self):
+        self.update(skus=[{"sku_id": "S1", "color_zh": "绿色"}, {"sku_id": "S2", "color_zh": "绿色"}])
+        self.official_options(10096, [(901, "Зеленый")])
+        write_json(self.product / "input/human-confirmations.json", {
+            "sku_attributes": {"S1": {"10096": []}, "S2": {"10096": [{"dictionary_value_id": 901, "value": "Зеленый"}]}}})
+        result = self.build(resolve_dictionaries=True)
+        self.assertEqual(result["per_sku_attributes"], {})
+        self.assertFalse(any(call["body"].get("attribute_id") == 10096 for call in self.transport.calls))
+
+    def test_material_synonym_provenance_is_rederived_after_save(self):
+        self.update(raw={"材质": "PVC"})
+        self.official_options(10, [(901, "ПВХ")])
+        result = self.build()
+        saved = self.save(result["attributes"], {"attributes": result["provenance"]["attributes"]})
+        self.assertEqual(saved["provenance"]["attributes"]["10"]["source_value"], "PVC")
+        self.assertEqual(saved["provenance"]["attributes"]["10"]["official_values"], [{"value": "ПВХ", "dictionary_value_id": 901}])
+        self.assertEqual(self.build()["attributes"], {})
+
+    def test_russian_yo_spelling_search_falls_back_without_changing_official_label(self):
+        self.update(raw={"颜色": "绿色"})
+        self.receipts(8229)
+        def exact_search(body):
+            return {"result": [{"id": 901, "value": "Зеленый"}] if body.get("value") == "зеленый" else []}
+        self.transport.fixtures[PATH_ATTRIBUTE_VALUES_SEARCH] = exact_search
+        result = self.build(resolve_dictionaries=True)
+        self.assertEqual(result["attributes"]["10096"][0]["value"], "Зеленый")
+        self.assertEqual([call["body"]["value"] for call in self.transport.calls], ["зелёный", "зеленый"])
+        self.assertEqual(result["lookup_count"], 2)
+
+    def test_colour_shades_combinations_and_random_options_are_not_generalized(self):
+        self.official_options(10096, [(901, "Зеленый")])
+        for value in ("浅绿色", "绿色/蓝色", "随机色", "绿色环保"):
+            self.update(raw={"颜色": value})
+            result = self.build()
+            self.assertNotIn("10096", result["attributes"])
+            unmatched = next(row for row in result["unresolved"] if row.get("attribute_id") == 10096)
+            self.assertEqual(unmatched["source_value"], value)
+            self.assertEqual(unmatched["candidates"], [])
+
+    def test_official_lookup_failure_has_one_sanitized_diagnostic_per_fact(self):
+        self.update(raw={"材质": "硅胶"})
+        self.receipts(8229)
+        def failing_search(body):
+            raise RuntimeError("private access token must never appear in response")
+        self.transport.fixtures[PATH_ATTRIBUTE_VALUES_SEARCH] = failing_search
+        result = self.build(resolve_dictionaries=True)
+        failures = [row for row in result["unresolved"] if row.get("attribute_id") == 10]
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0]["reason_code"], "read_failed")
+        self.assertEqual(result["lookup_count"], 1)
+        self.assertNotIn("private access token", json.dumps(result))
+
+    def test_exhausted_lookup_budget_exposes_manual_search_terms(self):
+        self.update(skus=[{"sku_id": f"S{index}", "color_zh": f"特定颜色{index}"} for index in range(12)])
+        self.receipts(8229)
+        result = self.build(resolve_dictionaries=True)
+        self.assertEqual(result["lookup_count"], MAX_DICTIONARY_LOOKUPS)
+        last = next(row for row in result["unresolved"] if row.get("sku_id") == "S11")
+        self.assertEqual(last["reason_code"], "lookup_budget_exhausted")
+        self.assertEqual(last["search_terms"], ["特定颜色11"])
+        self.assertEqual(last["candidates"], [])
+
     def test_dimensions_match_explicit_official_unit_and_unknown_values_remain_blank(self):
         self.update(raw={"产品高度": "100mm", "型号": "/", "复合组": "不扁平提交"})
         result = self.build()

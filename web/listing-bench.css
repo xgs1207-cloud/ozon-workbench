@@ -87,3 +87,13 @@
 .publication-retry-choice{display:flex;gap:6px;align-items:start;font-size:11px;max-width:145px;margin-bottom:8px}
 .publication-retry-choice input{margin-top:3px;flex:none}
 .publication-history-empty{color:#637389;padding:24px!important}
+.flow-copy-policy{border-left:3px solid #1557e8;padding:3px 0 3px 15px;margin:0 0 22px;max-width:760px}
+.flow-copy-policy p{font-size:13px;line-height:1.85;margin:7px 0;color:#44556e;overflow-wrap:anywhere}
+.flow-copy-policy strong{color:#111820}.flow-copy-policy [lang=ru]{color:#111820}
+.product-page .flow-copy-policy .field-help{font-size:11px;color:#637389}
+.bench-attribute-matches{border-top:1px solid #dfe5ef;margin-top:18px;padding-top:14px;font-size:12px;line-height:1.8}
+.bench-attribute-matches>summary{cursor:pointer;font-weight:650;color:#44556e}
+.bench-attribute-match{padding:12px 0;border-bottom:1px solid #edf0f4}
+.bench-attribute-match:last-child{border-bottom:0}.bench-attribute-match strong{color:#111820}
+.bench-attribute-match p{margin:5px 0;overflow-wrap:anywhere;color:#637389}
+.bench-attribute-match details{margin-bottom:8px}.bench-attribute-match details summary{cursor:pointer;color:#637389}

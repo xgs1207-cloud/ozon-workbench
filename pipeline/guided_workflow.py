@@ -10,7 +10,7 @@ from typing import Any, Mapping, Sequence
 
 from contracts import validate_contract
 from models import AnalysisRequest, CopyRequest, ImagePlanRequest
-from rules.validate import validate_copy_bundle
+from rules.validate import validate_guided_copy_bundle
 
 from .listing_form import read_json, write_json, _require_editable
 from .product_edit_lock import product_file_transaction, serialized_product_edit
@@ -294,7 +294,7 @@ def _keywords(directory: Path) -> list[dict[str, Any]]:
 
 
 def _validate_bundle(bundle: Mapping[str, Any]) -> None:
-    errors = validate_copy_bundle(bundle)
+    errors = validate_guided_copy_bundle(bundle)
     if errors:
         raise ValueError("俄文文案未通过校验：" + "；".join(errors[:6]))
 
@@ -329,7 +329,9 @@ def generate_copy_candidates(directory: Path | str, provider: Any, *, force: boo
                                       extra={"verified_facts": verified_facts, "allow_category_only_copy": not keywords,
                                              "force_new_model_call": force, "input_fingerprint": fingerprint,
                                              "revalidate_only": revalidate_only,
-                                             "evidence_version": COPY_EVIDENCE_VERSION}))
+                                             "evidence_version": COPY_EVIDENCE_VERSION,
+                                             "copy_policy_version": COPY_EVIDENCE_VERSION,
+                                             "allow_description_emoji": True}))
     rows = batches.get("candidates") or []
     if len(rows) != 3 or {row.get("mode") for row in rows if isinstance(row, Mapping)} != set(MODES):
         raise ValueError("模型必须在同一批次返回三个不同侧重点的候选")
@@ -338,11 +340,17 @@ def generate_copy_candidates(directory: Path | str, provider: Any, *, force: boo
     for row in rows:
         mode, bundle = row["mode"], row["documents"]
         copy = dict(bundle.get("copy_bundle") or {})
+        copy["copy_policy_version"] = COPY_EVIDENCE_VERSION
+        if not copy.get("core_keyword"):
+            copy["core_keyword"] = next((row["keyword"] for row in keywords if row["role"] == "core"), "")
         _validate_bundle(copy)
         for key, contract in (("title_ru", "title-ru"), ("description_ru", "description-ru"), ("keywords_ru", "keywords-ru")):
-            errors = validate_contract(contract, bundle.get(key) or {})
+            document = {**(bundle.get(key) or {}), "copy_policy_version": COPY_EVIDENCE_VERSION}
+            bundle[key] = document
+            errors = validate_contract(contract, document)
             if errors:
                 raise ValueError("候选子文档不符合契约：" + "；".join(errors[:3]))
+        bundle["copy_bundle"] = copy
         evidence = _candidate_evidence(copy, verified_facts, keywords)
         candidates.append({"id": f"{generation_id}-{mode}", "mode": mode, "label": MODE_LABELS[mode],
                            "title": copy["title_ru"], "description": copy["description_ru"],
@@ -398,6 +406,7 @@ def choose_copy_candidate(directory: Path | str, candidate_id: str, *, title_ru:
     documents = deepcopy(candidate["documents"])
     documents["title_ru"]["title_ru"] = bundle["title_ru"]
     documents["description_ru"]["description_ru"] = bundle["description_ru"]
+    documents["description_ru"]["sections"] = bundle.get("description_sections") or {}
     paths = (COPY_FILE, STATE_FILE, "output/title-ru.json", "output/description-ru.json", "output/keywords-ru.json")
     with product_file_transaction(directory, paths):
         write_json(directory / COPY_FILE, payload)
@@ -416,6 +425,8 @@ def confirm_selected_copy(directory: Path | str, input_fingerprint: str | None =
     if not copy["selected"] or (input_fingerprint and input_fingerprint != copy["fingerprint"]):
         raise ValueError("请先选择并保存当前有效的文案候选")
     _validate_bundle(copy["payload"])
+    _candidate_evidence(copy["payload"], _verified_facts(current["analysis"]["payload"], _copy_source(directory)),
+                        _keywords(directory))
     state = read_json(directory / STATE_FILE)
     state["copy"].update(confirmed_sha256=_hash(copy["payload"]), confirmed_at=_now())
     write_json(directory / STATE_FILE, state)

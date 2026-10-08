@@ -271,16 +271,17 @@ class PayloadTests(UploadFixture):
         self.assertEqual({item["offer_id"] for item in request["items"]}, set(offers.values()))
         self.assertFalse(set(offers.values()) & {"S1", "S2"})
 
-    def test_placeholder_title_suffix_cleared_before_actual_variant_color_is_added(self):
+    def test_placeholder_title_suffix_cleared_without_mechanical_variant_color_suffix(self):
         from pipeline.listing_form import read_json, write_json
         path = self.product_dir / "output/copy-ru.json"
         copy = read_json(path)
         copy["title_ru"] = "Товар — не указан"
+        copy["core_keyword"] = "Товар"
         write_json(path, copy)
         payload = build_upload_payload(self.product_dir, shop_name="shop-a")
         self.assertEqual(payload["title"], "Товар")
         self.assertTrue(all("не указан" not in item["display_name_ru"] for item in payload["variants"]))
-        self.assertTrue(all(item["display_name_ru"].startswith("Товар — ") for item in payload["variants"]))
+        self.assertTrue(all(item["display_name_ru"] == "Товар" for item in payload["variants"]))
 
     def test_partial_known_product_dimension_still_blocks_smaller_shipping_measurement(self):
         from pipeline.listing_form import write_json

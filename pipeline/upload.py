@@ -428,7 +428,7 @@ def build_upload_payload(
                 "source_sku_id": sku_id,
                 "offer_id": offer_id or f"UNRESERVED-{product_id}-{index}",
                 "sku_name": str(sku.get("name_zh") or sku.get("spec_zh") or sku_id),
-                "display_name_ru": variant_title(title, sku, sku_attributes),
+                "display_name_ru": variant_title(title, sku, sku_attributes, core_keyword=copy_bundle.get("core_keyword")),
                 "price": price_text,
                 "currency_code": currency,
                 "color": color or "не указан",

@@ -43,13 +43,23 @@ def clean_missing_color_suffix(title: Any, *, has_real_color: bool = False) -> s
     return _MISSING_SUFFIX.sub("", text).strip()
 
 
-def variant_title(title: str, sku: Mapping[str, Any], attributes: Sequence[Mapping[str, Any]] = ()) -> str:
-    color = variant_color(sku, attributes)
-    explicit = sku.get("name_ru")
-    if explicit:
-        return clean_missing_color_suffix(explicit, has_real_color=bool(color))[:200]
-    base = clean_missing_color_suffix(title, has_real_color=bool(color))
-    return (f"{base} — {color}" if color else base)[:200]
+def variant_title(title: str, sku: Mapping[str, Any], attributes: Sequence[Mapping[str, Any]] = (), *,
+                  core_keyword: str | None = None, confirmed_title_ru: str | None = None) -> str:
+    """Publish approved copy unchanged, never a raw supplier name/color suffix."""
+    from rules.validate import keyword_phrase_present, validate_title_ru
+    base = clean_missing_color_suffix(title)
+    # Raw capture keys are not human confirmation. A trusted editor caller may
+    # explicitly supply an independently confirmed title, never a supplier flag.
+    if confirmed_title_ru is not None:
+        candidate = clean_missing_color_suffix(confirmed_title_ru)
+        if validate_title_ru(candidate, max_length=200):
+            raise ValueError("人工确认的逐规格标题不符合文案要求")
+        if core_keyword and not keyword_phrase_present(candidate, core_keyword, at_start=True):
+            raise ValueError("逐规格标题必须以主关键词完整短语开头")
+        return candidate
+    if core_keyword and base and not keyword_phrase_present(base, core_keyword, at_start=True):
+        raise ValueError("上架标题必须以主关键词完整短语开头")
+    return base
 
 
 def read_listing_document(directory: Path | str, *, shop: str | None = None,
@@ -114,7 +124,8 @@ def read_listing_document(directory: Path | str, *, shop: str | None = None,
         selected_rows.append({"source_sku_id": sku_id, "sku_id": sku_id,
                               "name": sku.get("name_zh") or sku.get("sku_name") or sku.get("name") or sku.get("spec_text") or sku_id,
                               "offer_id": offers["offers"].get(sku_id), "color": variant_color(sku, sku_attributes),
-                              "title_ru": variant_title(str(copy_payload.get("title_ru") or ""), sku, sku_attributes),
+                              "title_ru": variant_title(str(copy_payload.get("title_ru") or ""), sku, sku_attributes,
+                                                        core_keyword=copy_payload.get("core_keyword") if copy.get("selected") else None),
                               "manual_price": prices.get(sku_id), "purchase_price_cny": sku.get("purchase_price_cny"),
                               "option_values": [{"name": item.get("name_cn") or item.get("name"),
                                                  "value": item.get("value_cn", item.get("value"))}

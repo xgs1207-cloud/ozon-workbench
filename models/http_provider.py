@@ -786,11 +786,12 @@ class HttpModelProvider:
             fixes: list[str] = []
             if payload is None:
                 if looks_truncated(text):
-                    problems = [
-                        "输出被截断（超过单次回复上限），JSON 不完整："
-                        "请**精简内容**后重新输出完整 JSON —— 描述正文控制在 1200–2000 字符、"
-                        "每个 section 80–250 字符、bullets_ru 最多 5 条，但所有必填字段一个都不能少"
-                    ]
+                    guidance = ("保留三组完整候选，每组简介精简为少量有依据的短段落，"
+                                "description_sections 可为 {}，不要重复五段元数据，也不要截断主关键词"
+                                if task == "russian_copy_candidates" else
+                                "描述正文控制在 1200–2000 字符、每个 section 80–250 字符、"
+                                "bullets_ru 最多 5 条，但所有必填字段一个都不能少")
+                    problems = ["输出被截断（超过单次回复上限），JSON 不完整：请精简内容后重新输出完整 JSON —— " + guidance]
                 else:
                     problems = ["输出不是合法 JSON 对象（可能需要去掉解释文字或代码围栏）"]
             else:
@@ -966,10 +967,11 @@ class HttpModelProvider:
         The same bounded repair mechanism as other stages may retry invalid JSON;
         successful batches are cached by the workflow and never auto-selected.
         """
-        from rules.validate import copy_bundle_hint, validate_copy_bundle
+        from rules.validate import guided_copy_bundle_hint, validate_guided_copy_bundle
         from pipeline.copy_evidence import candidate_evidence
         modes = {"search_first", "conversion_first", "differentiation_first"}
         facts = request.extra.get("verified_facts") or []
+        allow_description_emoji = request.extra.get("allow_description_emoji", True) is True
 
         def validate(data: dict[str, Any]) -> list[str]:
             rows = data.get("candidates") or []
@@ -985,13 +987,13 @@ class HttpModelProvider:
                 if any(not isinstance(copy.get(key), str) for key in ("title_ru", "description_ru")):
                     errors.append(f"{row['mode']}: title_ru 和 description_ru 必须是字符串")
                     continue
-                if not isinstance(copy.get("description_sections"), Mapping):
+                if not isinstance(copy.get("description_sections", {}), Mapping):
                     errors.append(f"{row['mode']}: description_sections 必须是对象")
                     continue
                 if not isinstance(copy.get("hashtags"), list) or any(not isinstance(tag, str) for tag in copy["hashtags"]):
                     errors.append(f"{row['mode']}: hashtags 必须是字符串数组")
                     continue
-                shape_errors = validate_copy_bundle(copy)
+                shape_errors = validate_guided_copy_bundle(copy, allow_description_emoji=allow_description_emoji)
                 errors.extend(f"{row['mode']}: {error}" for error in shape_errors)
                 if not shape_errors:
                     try:
@@ -1005,14 +1007,23 @@ class HttpModelProvider:
             "仅输出 {\"candidates\":[{\"mode\":\"search_first\",\"copy_bundle\":{...}},"
             "{\"mode\":\"conversion_first\",\"copy_bundle\":{...}},"
             "{\"mode\":\"differentiation_first\",\"copy_bundle\":{...}}]}。"
-            "search_first 核心产品词靠前、自然匹配搜索；conversion_first 买家理解和真实用途优先；"
-            "differentiation_first 已证实的规格或特点优先，不编造与竞品的差异。"
+            "三个候选标题都从同一个完整主关键词开始，差别只在关键词后面的真实属性和卖点表达："
+            "search_first 提高类目、属性与查询的真实相关性；conversion_first 让买家清楚识别商品与真实用途；"
+            "differentiation_first 突出已证实的规格或特点，不编造与竞品的差异。"
             "三个侧重点必须都使用同一份已证实事实，只描述 source.selected_sku_ids 的规格。"
             "不要输出完整的 title_ru/description_ru/keywords_ru 子文档，只输出每组 copy_bundle。\n"
-            + copy_bundle_hint()
-            + "\n节省输出：每组简介正文 300–500 字符，五个 description_sections 每项 20–70 字符，"
-            "标题 25–120 字符，hashtags 3–8 个。核心词不得改变商品含义。"
-            "primary_keywords 仅能使用已选关键词，ad/reject/exclude 或事实冲突词不得使用。"
+            + guided_copy_bundle_hint(allow_description_emoji=allow_description_emoji)
+            + "\n简介长度由事实丰富程度决定，通常 300–900 字符，不强行凑字或五段；"
+            "标题简洁，通常不超过 120 字符，工作台技术上限 200 字符；hashtags 3–8 个。"
+            "primary_keywords 只记录已选主关键词，secondary_keywords 记录自然用到的副关键词或长尾词；"
+            "ad/reject/exclude 或事实冲突词不得使用。"
+            "按 Ozon Tech 公开的机器学习排序说明，搜索使用大量因素综合评估，示例包括文本相关性、"
+            "价格、购买概率及送达速度；实际曝光还取决于库存、履约等运营条件。"
+            "来源：https://habr.com/ru/companies/ozontech/articles/990518/（2026-01-31）。"
+            "文案只能优化真实查询相关性和买家理解，不能控制全部排序因素。"
+            "主关键词前置是本工作台采用的写作策略，不是官方承诺的排名加成；"
+            "emoji 仅是简介排版选择，不是推流因素。不要承诺流量或排名，不编造算法权重，"
+            "不为了所谓推流重复堆词。"
             "若没有已选关键词，依据已确认的真实 Ozon 商品类型与商品事实，自然表达俄文产品名称；"
             "primary_keywords 和 secondary_keywords 保持空数组，不编造采集词、搜索量或竞争数据。"
             "copy_bundle 另含 claim_evidence 数组，每项 {claim:文案中的原文,fact_ids:[verified_facts 中的 ID]}；"
@@ -1044,7 +1055,8 @@ class HttpModelProvider:
             documents = deepcopy(template)
             documents["copy_bundle"] = copy
             documents["title_ru"].update(title_ru=copy["title_ru"], short_title_ru=copy.get("short_title_ru") or copy["title_ru"][:80])
-            documents["description_ru"].update(description_ru=copy["description_ru"], sections=copy["description_sections"])
+            documents["description_ru"].update(description_ru=copy["description_ru"], sections=copy.get("description_sections") or {},
+                                                section_evidence=[])
             documents["keywords_ru"].update(primary_keywords=copy.get("primary_keywords") or [],
                                              secondary_keywords=copy.get("secondary_keywords") or [])
             copy["generated_by"] = f"{getattr(self.transport, 'name', self.name)}+http"

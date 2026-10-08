@@ -259,8 +259,21 @@ class FakeProvider:
                 hashtags.append(tag)
         hashtags = hashtags[:30]
 
-        primary = keywords[: min(8, len(keywords))]
-        secondary = keywords[8:28]
+        guided = request.extra.get("copy_policy_version") == 3
+        primary = keywords[:1] if guided else keywords[: min(8, len(keywords))]
+        secondary = keywords[1:28] if guided else keywords[8:28]
+        if guided:
+            # Deterministic offline fixture, not a production title template.
+            # Preserve the selected phrase and expose the current prose shape.
+            title = re.sub(r"\s+", " ", title).strip()
+            if keywords:
+                phrase = re.sub(r"\s+", " ", core).strip()
+                title = phrase[:1].upper() + phrase[1:] + title[len(phrase):]
+            description = "\n\n".join(("✨ " + sections["product_value"],
+                                       "• " + sections["core_advantages"],
+                                       "• " + sections["usage_scenarios"]))
+            if secondary:
+                description += "\n\n" + "; ".join(secondary) + "."
         keyword_basis = [
             {
                 "keyword": keyword,
@@ -318,6 +331,7 @@ class FakeProvider:
                 "core_keyword": core,
                 "primary_keywords": primary,
                 "secondary_keywords": secondary,
+                **({"copy_policy_version": 3} if guided else {}),
             },
         }
 

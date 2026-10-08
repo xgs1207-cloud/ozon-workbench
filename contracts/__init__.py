@@ -73,6 +73,21 @@ def load_contract(name: str) -> dict[str, Any]:
 def validate_contract(name: str, payload: Any, *, allow_extra: bool = False) -> list[str]:
     """返回问题列表（空列表 = 通过）。``allow_extra`` 只放宽 additionalProperties。"""
     schema = dict(load_contract(name))
+    if (name.removesuffix(".schema.json") in {"title-ru", "description-ru", "keywords-ru"}
+            and isinstance(payload, Mapping) and payload.get("copy_policy_version") == 3):
+        # Current workbench prose is not the archived five-section template.
+        # Keep upstream contracts untouched and retain evidence field checks.
+        schema["properties"] = dict(schema.get("properties") or {})
+        schema["properties"]["copy_policy_version"] = {"type": "integer", "const": 3}
+        if name.removesuffix(".schema.json") == "title-ru":
+            schema["properties"]["title_ru"] = {**schema["properties"]["title_ru"], "maxLength": 200}
+        if name.removesuffix(".schema.json") == "description-ru":
+            schema["properties"]["sections"] = {
+                "type": "object", "additionalProperties": False,
+                "properties": {key: {"type": "string"} for key in
+                               ("product_value", "usage_scenarios", "core_advantages", "usage_method", "notices")}}
+            evidence = schema["properties"].get("section_evidence") or {}
+            schema["properties"]["section_evidence"] = {**evidence, "minItems": 0}
     if (name.removesuffix(".schema.json") == "image-plan" and isinstance(payload, Mapping)
             and payload.get("max_main_images") is not None):
         # Explicit current guided-planner capacity, without turning the plan

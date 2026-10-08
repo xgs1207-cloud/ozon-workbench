@@ -232,12 +232,103 @@ def validate_copy_bundle(bundle: Mapping[str, Any]) -> list[str]:
     return problems
 
 
+def normalize_keyword_phrase(value: Any) -> str:
+    """Only case/whitespace normalization; never inflect, reorder or stem."""
+    return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
+
+
+def keyword_phrase_present(text: Any, phrase: Any, *, at_start: bool = False) -> bool:
+    body, query = normalize_keyword_phrase(text), normalize_keyword_phrase(phrase)
+    if not query:
+        return False
+    pattern = (r"^" if at_start else r"(?<!\w)") + re.escape(query) + r"(?!\w)"
+    return re.search(pattern, body) is not None
+
+
+def keyword_copy_checks(bundle: Mapping[str, Any], keywords: Sequence[Mapping[str, Any]]) -> list[str]:
+    """User-selected queries constrain placement, not the AI's title template."""
+    for field in ("primary_keywords", "secondary_keywords"):
+        terms = bundle.get(field, [])
+        if not isinstance(terms, list) or any(not isinstance(term, str) for term in terms):
+            return [f"{field} 必须是字符串数组；没有已选关键词时使用 []"]
+    rows = [row for row in keywords if row.get("role") not in {"ad", "reject", "exclude"}
+            and row.get("relevance") != "conflict" and normalize_keyword_phrase(row.get("keyword"))]
+    cores = [row for row in rows if row.get("role") == "core"]
+    if len(cores) > 1:
+        return ["标题只能使用一个主关键词，请将其余词设为副关键词"]
+    core = cores[0] if cores else rows[0] if rows else None
+    if core is None:
+        return []  # Explicit category-only copy has no fabricated query.
+    phrase = core["keyword"]
+    problems = []
+    if bundle.get("core_keyword") and normalize_keyword_phrase(bundle["core_keyword"]) != normalize_keyword_phrase(phrase):
+        problems.append("core_keyword 必须记录用户所选主关键词，不得替换为模型自拟词")
+    if not keyword_phrase_present(bundle.get("title_ru"), phrase, at_start=True):
+        problems.append("标题必须以主关键词完整短语开头；仅允许规范大小写和空格，不换序、不拆开、不插入属性词")
+    core_pattern = r"(?<!\w)" + re.escape(normalize_keyword_phrase(phrase)) + r"(?!\w)"
+    if len(re.findall(core_pattern, normalize_keyword_phrase(bundle.get("title_ru")))) > 1:
+        problems.append("标题不要重复堆砌主关键词")
+    # A secondary query may also be a genuine colour/material/feature.
+    # Lexical coincidence alone is not a reason to reject copy; factual proof
+    # and review are handled by candidate_evidence.
+    permitted_primary = {normalize_keyword_phrase(phrase)}
+    if any(normalize_keyword_phrase(term) not in permitted_primary for term in bundle.get("primary_keywords") or []):
+        problems.append("primary_keywords 只能记录主关键词；副关键词放入 secondary_keywords")
+    for term in bundle.get("secondary_keywords") or []:
+        if not keyword_phrase_present(bundle.get("description_ru"), term):
+            problems.append("简介使用的副关键词也要保留完整短语，仅规范大小写和空格：" + str(term))
+    return problems
+
+
+def guided_copy_bundle_hint(*, allow_description_emoji: bool = True) -> str:
+    """The current editor accepts readable prose, not five mandatory sections."""
+    decoration = ("简介使用少量恰当 emoji 作段落/卖点标记；标题不使用 emoji。"
+                  if allow_description_emoji else "标题和简介不使用 emoji，简介用空行与项目符号排版。")
+    return (
+        "每组 copy_bundle 包含：title_ru 字符串；description_ru 字符串；"
+        "description_sections 对象（可为空或只包含有事实依据的 product_value/usage_scenarios/"
+        "core_advantages/usage_method/notices，不必凑齐五段）；hashtags 字符串数组；"
+        "core_keyword；primary_keywords 数组（仅主关键词）；secondary_keywords 数组（已选副关键词）。\n"
+        "标题必须从唯一主关键词完整短语开始，只允许大小写与空格规范；"
+        "短语内部不改词形、不换序、不拆开、不插入属性词。主关键词后由 AI 自然融合已证实属性与卖点，"
+        "不采用固定拼接模板，三个候选都遵循相同前置规则。标题只主动融合主关键词，"
+        "副关键词主要在简介自然使用，不为了覆盖副词而堆砌进标题；"
+        "真实颜色、材质或卖点与副关键词恰好重合时允许保留，以已证实事实为依据。\n"
+        "简介面向俄语买家，短段落之间留空行，必要时用简短卖点列表；不要输出 Markdown 粗体或 HTML。"
+        "不为了字数补写无依据的用途、材质、安全、年龄或注意事项。" + decoration + "\n"
+        f"hashtags 最多 {MAX_HASHTAGS} 个，只用小写 # + 西里尔字母，不含空格、数字或拉丁字母。"
+        "禁止联系方式、外链、价格促销词和无法举证的绝对化承诺。"
+    )
+
+
+def validate_guided_copy_bundle(bundle: Mapping[str, Any], *, allow_description_emoji: bool = True) -> list[str]:
+    """Scoped editor policy; archived/CLI five-section contracts stay unchanged."""
+    problems = validate_title_ru(bundle.get("title_ru"), min_length=10, max_length=200)
+    if any(len(word) > 27 for word in str(bundle.get("title_ru") or "").split()):
+        problems.append("标题单词最多 27 字符；主关键词不可截断，请改选符合字段限制的完整短语")
+    problems.extend(validate_description_ru(bundle.get("description_ru")))
+    sections = bundle.get("description_sections", {})
+    if not isinstance(sections, Mapping):
+        problems.append("description_sections 必须是对象；不需要分段元数据时使用 {}")
+    elif any(key not in _DESCRIPTION_SECTIONS or not isinstance(value, str) for key, value in sections.items()):
+        problems.append("description_sections 仅支持已知分段名称和字符串内容")
+    problems.extend(validate_hashtags(bundle.get("hashtags") if bundle.get("hashtags") is not None else []))
+    problems.extend(official_copy_checks(bundle, allow_description_emoji=allow_description_emoji)["blocking"])
+    if _EMOJI_PATTERN.search(str(bundle.get("title_ru") or "")):
+        problems.append("标题不使用 emoji；可在简介中少量使用段落标记")
+    if not allow_description_emoji and _EMOJI_PATTERN.search(str(bundle.get("description_ru") or "")):
+        problems.append("当前简介样式关闭了 emoji，请使用空行与项目符号")
+    return problems
+
+
 # ------------------------------------------------- Ozon 官方硬规则（拒审高发区）
 
-#: Ozon 官方字段上限（硬约束）：名称（标题）255 字符，描述 6000 字符
+#: Historical compatibility exports for the archived copy validator. These are
+#: workbench guards, not newly verified universal Ozon limits. Current editor
+#: policy is 200 title characters; Seller API/card constraints are checked later.
 OFFICIAL_MAX_TITLE = 255
 OFFICIAL_MAX_DESCRIPTION = 6000
-#: 我们自己的推荐上限（超过移动端会被截断，但不违反 Ozon）——只提示，不阻断
+#: 工作台可读性推荐长度，只提示，不代表搜索排名或固定展示截断位置。
 RECOMMENDED_TITLE = 120
 #: 描述接近上限时的提醒阈值
 DESCRIPTION_NEAR_LIMIT = 5500
@@ -264,7 +355,7 @@ _CAPS_WORD_PATTERN = re.compile(r"\b[А-ЯЁA-Z]{4,}\b")
 _PUNCT_RUN_PATTERN = re.compile(r"[!?]{2,}|\.{4,}")
 
 
-def _official_text_checks(text: str, *, where: str) -> tuple[list[str], list[str]]:
+def _official_text_checks(text: str, *, where: str, allow_emoji: bool = False) -> tuple[list[str], list[str]]:
     """返回 (blocking, advisory)。两个字段的公共部分：联系方式、价格、大写、标点、emoji。"""
     blocking: list[str] = []
     advisory: list[str] = []
@@ -279,18 +370,21 @@ def _official_text_checks(text: str, *, where: str) -> tuple[list[str], list[str
     caps = _CAPS_WORD_PATTERN.findall(text)
     if caps:
         advisory.append(f"{where}有全大写单词（Ozon 不鼓励 CAPS LOCK）：{', '.join(sorted(set(caps))[:5])}")
-    if _EMOJI_PATTERN.search(text):
-        advisory.append(f"{where}含 emoji（Ozon 多数类目不接受）")
+    emoji_count = len(_EMOJI_PATTERN.findall(text))
+    if emoji_count and not allow_emoji:
+        advisory.append(f"{where}含 emoji；标题不使用表情，简介按所选排版样式处理")
+    elif emoji_count > 4:
+        advisory.append("简介 emoji 较多，建议仅保留少量段落标记以免影响可读性（排版建议，非排名因素）")
     if _PUNCT_RUN_PATTERN.search(text):
         advisory.append(f"{where}有连续标点（!!! / ?? / ....）")
     return blocking, advisory
 
 
-def official_copy_checks(bundle: Mapping[str, Any]) -> dict[str, list[str]]:
-    """对照 Ozon 官方硬规则给出 ``blocking``（必须改）与 ``advisory``（建议改）。
+def official_copy_checks(bundle: Mapping[str, Any], *, allow_description_emoji: bool | None = None) -> dict[str, list[str]]:
+    """Content checks plus historical compatibility guards, with severity.
 
-    区分严重度很重要：把"标题 130 字符"当阻断会误伤（Ozon 上限其实是 255），
-    而"标题里写电话"必须阻断（必拒审）。
+    Recommendation lengths and decorative description emoji are not search
+    ranking factors or newly verified universal platform prohibitions.
     """
     blocking: list[str] = []
     advisory: list[str] = []
@@ -298,19 +392,20 @@ def official_copy_checks(bundle: Mapping[str, Any]) -> dict[str, list[str]]:
     description = str(bundle.get("description_ru") or "")
 
     title_blocking, title_advisory = _official_text_checks(title, where="标题")
-    desc_blocking, desc_advisory = _official_text_checks(description, where="描述")
+    desc_emoji = bundle.get("copy_policy_version") == 3 if allow_description_emoji is None else allow_description_emoji
+    desc_blocking, desc_advisory = _official_text_checks(description, where="描述", allow_emoji=desc_emoji)
     blocking.extend(title_blocking)
     blocking.extend(desc_blocking)
     advisory.extend(title_advisory)
     advisory.extend(desc_advisory)
 
     if len(title) > OFFICIAL_MAX_TITLE:
-        blocking.append(f"标题长度 {len(title)} 超过 Ozon 上限 {OFFICIAL_MAX_TITLE}")
+        blocking.append(f"标题长度 {len(title)} 超过历史工作台兼容上限 {OFFICIAL_MAX_TITLE}")
     elif len(title) > RECOMMENDED_TITLE:
-        advisory.append(f"标题长度 {len(title)} 超过推荐 {RECOMMENDED_TITLE}（移动端会截断，Ozon 上限是 {OFFICIAL_MAX_TITLE}）")
+        advisory.append(f"标题长度 {len(title)} 超过推荐 {RECOMMENDED_TITLE}，建议精简以便买家快速理解")
 
     if len(description) > OFFICIAL_MAX_DESCRIPTION:
-        blocking.append(f"描述长度 {len(description)} 超过 Ozon 上限 {OFFICIAL_MAX_DESCRIPTION}")
+        blocking.append(f"描述长度 {len(description)} 超过工作台兼容上限 {OFFICIAL_MAX_DESCRIPTION}")
     elif len(description) > DESCRIPTION_NEAR_LIMIT:
         advisory.append(f"描述长度 {len(description)} 已接近上限 {OFFICIAL_MAX_DESCRIPTION}")
 

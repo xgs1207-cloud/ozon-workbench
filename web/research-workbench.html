@@ -291,5 +291,30 @@ startWorkbench();
 <script src="/assets/listing-rich-content.js?v=20261008-collector1"></script>
 <script src="/assets/image-preview.js?v=20261008-collector1"></script>
 <script src="/assets/employee-keywords.js?v=20261008-collector1"></script>
+<link rel="stylesheet" href="/assets/operations-center.css?v=20261008-operations1">
+<script src="/assets/operations-center.js?v=20261008-operations1"></script>
+<script>
+// One editing workbench, plus a separate read-only operations surface.
+const beforeOperationsRender=render;
+render=function(){
+  if(state.view!=='operations'){
+    window.OperationsCenter?.unmount?.();
+    document.body.classList.remove('operations-mode');
+    $('#main').classList.remove('operations-page');
+    return beforeOperationsRender();
+  }
+  document.body.classList.remove('product-mode');
+  document.body.classList.add('operations-mode');
+  $('#main').classList.remove('source-page','product-page');
+  $('#main').classList.add('operations-page');
+  activate();
+  $('#evidence').innerHTML='<p>按店铺和货号独立保存官方监测数据。数据有统计延迟，缺项不当作零。</p><p>首版只读：不会自动改卡、开广告或调整出价。广告需要单独授权 Performance API。</p><p>当前为共享工作台访问，尚无员工账号权限隔离。</p>';
+  window.OperationsCenter.mount($('#main'));
+};
+const operationsNav=document.createElement('button');
+operationsNav.dataset.view='operations';
+operationsNav.innerHTML='<span class="num">营</span> 商品运营中心';
+document.querySelector('.rail [data-view="keyword-library"]')?.after(operationsNav);
+</script>
 </body>
 </html>

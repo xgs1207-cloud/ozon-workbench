@@ -111,7 +111,7 @@ def _require_shop_admin(request: Request) -> None:
 async def _validation_error_without_credentials(request: Request, error: RequestValidationError) -> Response:
     # FastAPI normally echoes the failing input. A malformed credential must never
     # be copied into a response, including failures in another field in this form.
-    if request.url.path == "/api/workbench/stores/authorize":
+    if request.url.path in {"/api/workbench/stores/authorize", "/api/operations/advertising/authorize"}:
         return JSONResponse(status_code=422, content={"detail": [
             {"loc": item.get("loc"), "msg": item.get("msg"), "type": item.get("type")}
             for item in error.errors()
@@ -2407,6 +2407,31 @@ app.include_router(rich_content_router)
 
 from workbench_keyword_library_api import register_keyword_library_routes
 register_keyword_library_routes(app, runtime_root=lambda: MARKET_DB_PATH.parent)
+
+from workbench_operations_api import register_operations_routes
+
+
+def _operations_shop_rows():
+    from pipeline.stores import load_registry, shop_summary
+    return shop_summary(load_registry())
+
+
+register_operations_routes(app, runtime_root=lambda: MARKET_DB_PATH.parent,
+                          seller_transport=_seller_transport, shop_rows=_operations_shop_rows,
+                          credential_context=_shop_authorization_context,
+                          require_credentials=_require_shop_admin)
+
+
+@app.get("/assets/operations-center.js")
+def operations_script():
+    from fastapi.responses import FileResponse
+    return FileResponse(Path(__file__).resolve().parent / "web/operations-center.js", media_type="text/javascript")
+
+
+@app.get("/assets/operations-center.css")
+def operations_styles():
+    from fastapi.responses import FileResponse
+    return FileResponse(Path(__file__).resolve().parent / "web/operations-center.css", media_type="text/css")
 
 from workbench_collection_jobs_api import create_router as create_collection_jobs_router
 app.include_router(create_collection_jobs_router(lambda: PRODUCTS_ROOT, lambda: MARKET_DB_PATH.parent / "collector-jobs.sqlite3"))

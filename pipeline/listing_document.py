@@ -62,6 +62,7 @@ def read_listing_document(directory: Path | str, *, shop: str | None = None,
     from .listing_defaults import field_display_metadata
     from .sku_selection import active_skus
     from .selected_source import selected_source
+    from .summary_display import read_summary_display
 
     directory = Path(directory)
     source = read_json(directory / "input/source.json")
@@ -147,7 +148,8 @@ def read_listing_document(directory: Path | str, *, shop: str | None = None,
     return {"schema_version": "1.0.0", "product_id": directory.name, "shop": shop,
             "source_title": str(source.get("title_zh") or ""), "selected_skus": selected_rows,
             "summary": {"status": analysis.get("status", "missing"), "confirmed": bool(analysis.get("confirmed")),
-                        "input_fingerprint": analysis.get("fingerprint"), "payload": analysis.get("payload") or {}},
+                        "input_fingerprint": analysis.get("fingerprint"), "payload": analysis.get("payload") or {},
+                        "display_zh": read_summary_display(directory, payload=analysis.get("payload") or {})},
             "facts": facts, "image_suggestions": {"status": insights["status"], "payload": insights.get("payload"),
                                                     "advisory_only": True, "automatic_fact_updates": False,
                                                     "warning_zh": insights["warning_zh"]},

@@ -19,6 +19,32 @@ function benchSummaryHtml(){
     const rows=doc?.selected_skus||[],category=doc?.card?.category||state.guided?.category_selection||{};
     return `<section class="bench-summary"><h3>产品信息与卖点</h3><span class="tag ${summary.confirmed?'ok':'warn'}">${summary.confirmed?'已确认摘要':'摘要待确认'}</span><p class="bench-source-title">${esc(doc?.source_title||state.guided?.source?.title_zh||'')}</p>${category.category_path?`<p class="field-help">${esc(Array.isArray(category.category_path)?category.category_path.join(' / '):category.category_path)}</p>`:''}${rows.length?`<div class="bench-summary-specs">${rows.map(row=>`<p><b>${esc(row.name)}</b>${row.option_values?.length?`<br>${esc(row.option_values.map(x=>`${x.name||''} ${x.value||''}`).join(' / '))}`:''}</p>`).join('')}</div>`:''}${points.length?`<ul>${points.map(point=>`<li>${esc(typeof point==='string'?point:point.point_cn||point.text||point.claim||flowScalar(point))}</li>`).join('')}</ul>`:'<p class="field-help">摘要暂无已确认卖点。未知信息请留空，不根据图片比例猜测参数。</p>'}<dl class="bench-evidence">${Object.entries(facts).filter(([key,value])=>!['skus','source_refs','title_cn','selected_category','image_refs'].includes(key)&&value!=null&&value!==''&&flowScalar(value)!=='未确认').slice(0,12).map(([key,value])=>`<dt>${esc(flowFactLabels[key]||key)}</dt><dd>${esc(flowScalar(value))}</dd>`).join('')}</dl>${doc?.copy?.confirmed?`<details><summary>已确认俄文标题与标签</summary><p>${esc(doc.copy.title_ru)}</p>${flowTags(doc.copy.hashtags)}</details>`:''}</section>`;
 }
+const benchSummaryBase=benchSummaryHtml;
+benchSummaryHtml=function(){
+    const template=document.createElement('template');template.innerHTML=benchSummaryBase();
+    const section=template.content.querySelector('.bench-summary');
+    const list=section.querySelector('ul'),fallback=[...section.querySelectorAll('p.field-help')].find(p=>p.textContent.startsWith('摘要暂无'));
+    const placeholder=list||fallback;
+    if(placeholder){const content=document.createElement('div');content.className='bench-selling-points';content.innerHTML=flowOperatorPointsHtml(state.guided,'flow-summary-list','摘要暂无已确认卖点。未知信息请留空，不根据图片比例猜测参数。');placeholder.replaceWith(content)}
+    return template.innerHTML;
+};
+listingBench.summaryTranslations=new Map();
+document.addEventListener('click',async event=>{
+    const button=event.target.closest('[data-flow-action="summary-zh"]');if(!button)return;
+    const product=state.product,shop=benchShop(),pending=listingBench.summaryTranslations.get(product);
+    if(pending?.busy)return;
+    const display=benchDocument()?.summary?.display_zh;
+    const retry=display?.retry_requires_confirmation===true;
+    if(retry&&!confirm('上次中文转换未完成，请先核对模型调用记录。确认再次调用文本模型？'))return;
+    listingBench.summaryTranslations.set(product,{busy:true});button.disabled=true;button.textContent='正在转换中文…';
+    try{
+        await api(`/api/workbench/products/${encodeURIComponent(product)}/summary-display-zh`,json('POST',{input_fingerprint:button.dataset.summaryFingerprint||null,confirm_retry:retry}));
+        await benchLoadDocument(product,shop);listingBench.summaryTranslations.delete(product);
+        if(state.product===product&&state.view==='product'){captureProductFields();renderProduct()}
+        notice('卖点已转换为中文；原摘要和俄文上架文案未改变');
+    }catch(error){await benchLoadDocument(product,shop);listingBench.summaryTranslations.set(product,{error:error.message});notice(error.message,true);if(state.product===product&&state.view==='product')renderProduct()}
+    finally{if(button.isConnected)button.disabled=false}
+});
 function benchMissingHtml(){
     const draft=listingDraft(),basic=productDraft(),doc=benchDocument(),names=new Map((draft?.form?.fields||[]).map(x=>[String(x.attribute_id),x.attribute_name||x.name]));
     const fields=draft?listingMissing(draft):[],messages=[];
@@ -40,6 +66,10 @@ const benchOfficialRenderer=renderListingForm;
 renderListingForm=function(){
     const template=document.createElement('template');template.innerHTML=benchOfficialRenderer();
     const draft=listingDraft(),doc=benchDocument();
+    for(const label of template.content.querySelectorAll('.official-field .field-name')){
+        const text=[...label.childNodes].find(node=>node.nodeType===Node.TEXT_NODE&&node.textContent.trim());
+        if(text){const name=document.createElement('strong');name.className='official-field-title';name.textContent=text.textContent;text.replaceWith(name)}
+    }
     const excluded=new Set((doc?.official_excluded_attribute_ids||doc?.card?.official_excluded_attribute_ids||[4191,23171]).map(String));
     for(const field of template.content.querySelectorAll('[data-official-field]')){
         const id=field.dataset.officialField;

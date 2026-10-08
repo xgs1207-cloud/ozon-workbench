@@ -236,7 +236,8 @@ test('late canonical documents cannot replace a different shop/category scope', 
 
 test('operational save preserves new packaging and price inputs received during the request', async () => {
   const h = harness(), waiting = deferred();
-  h.load(card, "document.addEventListener('click',async event=>{", '\nfunction captureProductFields()');
+  const operationalHandler = card.slice(card.indexOf("document.addEventListener('input',event=>{if(event.target.id==='benchOfferPrefix')"));
+  h.load(operationalHandler, "document.addEventListener('click',async event=>{", '\nfunction captureProductFields()');
   h.context.listingDetailKeys = ['package_weight_g'];
   h.draft.details = {package_weight_g: '120'};
   h.draft.touched.add('package_weight_g');

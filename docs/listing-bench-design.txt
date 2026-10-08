@@ -37,3 +37,31 @@ Verification inventory:
   - Readback does not import again; API-readable is not proof of storefront playback.
   - Keyboard focus, 1280/1600 desktop overflow and page errors checked in browser.
   - No paid model calls or real Ozon submissions required by automated verification.
+
+Preview and language refinement, 2026-10-08
+  Keep the existing white/ink/blue/slate/line palette and desktop type stack.
+  Field names: 700-weight ink, with normal-weight quiet metadata and badges.
+  Operator summaries: Chinese, separate from approved Russian listing copy.
+  Preview: a viewport-sized dark backdrop, contained uncropped image, quiet
+  caption, and visible close button. No new browser tab, no generation call.
+  Layout: [image caption                     Close]
+          [         contained large image          ]
+  Review: retain the user's familiar form instead of introducing new chrome;
+  the only strong emphasis is field names and the image being inspected.
+
+Additional QA inventory:
+  - Reference preview link and image click enlarge inline, without selecting
+    its checkbox, changing prompt edits, opening a tab, or calling a model.
+  - Generated and original images, including the publish-preview image,
+    open the same inline viewer; source-product links remain external.
+  - Close button, Escape and backdrop dismiss; keyboard focus returns to
+    the opener and scrolling is restored. Clicking the image does not close.
+  - Failed image loading has a visible message and a usable close control.
+  - Reopening/re-rendering cannot leave an old preview or stale load state.
+  - Chinese operator points do not alter Russian copy or saved fact evidence;
+    legacy language and unknown translation do not invent new selling claims.
+  - Official attribute names (required and optional) are bold/dark, while
+    input values and provenance remain readable at their normal weight.
+  - 2K request setting remains unchanged; no paid generation in this task.
+  - Inspect media, card and opened preview at 1600 and 1280 desktop widths;
+    check viewport bounds, aspect ratio, console errors, and zero write calls.

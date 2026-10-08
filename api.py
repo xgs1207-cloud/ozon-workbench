@@ -2415,3 +2415,9 @@ def listing_media_script():
 def listing_bench_styles():
     from fastapi.responses import FileResponse
     return FileResponse(Path(__file__).resolve().parent / "web/listing-bench.css", media_type="text/css")
+
+
+@app.get("/assets/image-preview.js", include_in_schema=False)
+def listing_image_preview_script():
+    from fastapi.responses import FileResponse
+    return FileResponse(Path(__file__).resolve().parent / "web/image-preview.js", media_type="text/javascript")

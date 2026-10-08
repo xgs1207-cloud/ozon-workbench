@@ -85,6 +85,22 @@ function flowScalar(value) {
     if (typeof value === 'object') return Object.entries(value).filter(([k])=>!['source_refs','metadata','schema_version','image_refs'].includes(k)).map(([k,v])=>`${flowFactLabels[k]||k}：${flowScalar(v)}`).join('；')||'未确认';
     return String(value);
 }
+function flowOperatorPointsHtml(g,listClass='flow-summary-list',emptyText='还没有可确认的卖点。') {
+    const summary=g.workflow?.analysis||{},payload=summary.payload||{};
+    const doc=typeof benchDocument==='function'?benchDocument():null;
+    const display=doc?.summary?.display_zh||summary.display_zh;
+    const rawPoints=payload.selling_points||payload.key_selling_points||[];
+    const original=Array.isArray(rawPoints)?rawPoints:[];
+    const local=original.map(point=>{
+        const candidates=typeof point==='string'?[point]:point&&typeof point==='object'?[point.point_cn,point.text_zh,point.text_cn,point.title_zh,point.text,point.claim]:[];
+        return candidates.find(text=>typeof text==='string'&&/[\u3400-\u9fff]/.test(text)&&!/[\u0400-\u04ff]/.test(text))||'';
+    }).filter(Boolean);
+    const points=display?.status==='ready'?(display.selling_points||[]).map(point=>point.text):local;
+    const missing=original.length>points.length;
+    const operation=typeof listingBench!=='undefined'?listingBench.summaryTranslations?.get(state.product):null;
+    const translated=display?.is_translation;
+    return `${points.length?`<ul class="${listClass}">${points.map(text=>`<li>${esc(text)}</li>`).join('')}</ul>`:`<p class="field-help">${esc(missing?'历史卖点尚未转换为中文。':emptyText)}</p>`}${translated?'<p class="field-help">中文释义仅用于阅读，原摘要和俄文上架文案保持不变。</p>':''}${missing?`<p class="field-help">只转换卖点语言，不重新分析商品；首次转换会调用文本模型，之后使用缓存。</p>${flowButton(operation?.busy?'正在转换中文…':'卖点转为中文','summary-zh',operation?.busy===true,`data-summary-fingerprint="${esc(display?.input_fingerprint||'')}"`)}${operation?.error?`<p class="inline-error" role="alert">${esc(operation.error)}</p>`:''}`:''}`;
+}
 function flowAnalysisHtml(g) {
     const a = g.workflow?.analysis || {}, data = a.payload || {}, facts = data.facts || {};
     const labels = flowFactLabels;
@@ -95,7 +111,7 @@ function flowAnalysisHtml(g) {
     <p class="flow-lead">豆包只总结本次所选规格。未知信息保持空白，卖点不能超出采集资料。修改规格或真实事实后，需要重新核对。</p>
     ${stale?'<div class="hint warn">下面是旧版本，仅供查看。请按最新规格重新分析，不能用于生成文案。</div>':''}
     ${Object.keys(facts).length?`<dl class="flow-facts">${Object.entries(facts).filter(([k])=>!['source_refs','selected_category'].includes(k)).map(([k,v])=>`<dt>${esc(labels[k]||k)}</dt><dd>${esc(flowScalar(v))}</dd>`).join('')}</dl>`:'<div class="empty">先确认要卖的规格，系统会自动开始商品分析；失败时可在这里重试。</div>'}
-    <h3>可使用的卖点</h3>${points.length?`<ul class="flow-summary-list">${points.map(x=>`<li>${esc(typeof x==='string'?x:x.point_cn||x.text||x.claim||x.title||flowScalar(x))}</li>`).join('')}</ul>`:'<p class="muted">还没有可确认的卖点。</p>'}
+    <h3>可使用的卖点</h3>${flowOperatorPointsHtml(g)}
     ${unknowns.length?`<h3>待补充信息</h3><ul class="flow-summary-list">${unknowns.map(x=>`<li>${esc(typeof x==='string'?x:`${labels[x.field]||x.field||'未知字段'}：${x.reason||'采集资料未能确认'}`)}</li>`).join('')}</ul>`:''}
     ${preparation.length?`<div class="flow-error" role="alert"><b>需要先解决的信息冲突</b><ul class="flow-summary-list">${preparation.map(x=>`<li>${esc(typeof x==='string'?x:x.message||flowScalar(x))}</li>`).join('')}</ul></div>`:''}
     ${publication.length||deferred.length?`<details class="flow-optional-library"><summary>发布前待核对（${publication.length+deferred.length} 项，不影响先准备文案）</summary><p class="field-help">缺少的参数不编造；发布时仍需补齐实际必填项和合规资料。</p><ul class="flow-summary-list">${[...publication,...deferred].map(x=>`<li>${esc(typeof x==='string'?x:x.message||flowScalar(x))}</li>`).join('')}</ul></details>`:''}
@@ -136,8 +152,8 @@ function flowStudioInsightText(value){return typeof value==='string'?value:[valu
 function flowStudioInsights(g){const insights=g?.image_insights||{};return {...(insights.payload||insights),status:insights.status}}
 function flowStudioNewSettingsHtml(g){const selected=new Set(state.skus?.selected||[]),rows=(g.source?.skus||[]).filter(x=>selected.has(x.sku_id));return `<div class="studio-new-tools"><label class="field">这张图片对应的规格<select id="flowNewImageSku">${rows.map(x=>`<option value="${esc(x.sku_id)}">${esc(x.sku_name||x.name||x.name_cn||x.spec_text||x.sku_id)}</option>`).join('')}</select></label><label class="field">用途<select id="flowNewImageRole"><option value="detail">细节 / 卖点 / 场景图</option><option value="variant_main">商品主图</option></select></label></div>`}
 function flowStudioBriefHtml(g){
-    const a=g.workflow?.analysis||{},points=a.payload?.selling_points||g.analysis?.selling_points||[],insights=flowStudioInsights(g),observations=insights.status==='stale'?[]:insights.visible_observations||[],claims=insights.status==='stale'?[]:insights.unverified_seller_claims||[];
-    return `<section class="studio-brief"><div class="studio-brief-head"><h3>产品特征与卖点</h3>${flowButton(listingFlow.studioRequests.has(`${state.product}:insights`)?'正在识别图片…':'从勾选图片提取卖点','studio-insights',listingFlow.studioRequests.has(`${state.product}:insights`)||!state.skus?.active_count)}</div><div class="studio-brief-grid"><div><p>商品摘要${a.confirmed?'（已确认）':'（待核对）'}</p>${points.length?`<ul class="studio-observations">${points.slice(0,6).map(x=>`<li>${esc(typeof x==='string'?x:x.point_cn||x.text||x.claim||flowScalar(x))}</li>`).join('')}</ul>`:'<p>摘要尚无卖点。可直接选供应商图片提取，不影响手写提示词生图。</p>'}</div><div><p>图片可见特征${insights.status==='stale'?'（资料已变更，请重新识别）':''}</p>${observations.length?`<ul class="studio-observations">${observations.slice(0,6).map(x=>`<li>${esc(flowStudioInsightText(x))}</li>`).join('')}</ul>`:'<p>选择详情图或规格图，识别画面和图中文字。无法确认的材质、参数或认证不会自动写入商品事实。</p>'}</div></div>${claims.length?`<details class="studio-guidance"><summary>图中文字中的供应商声明（${claims.length} 项，待核对）</summary>${claims.slice(0,6).map(x=>`<p>${esc(flowStudioInsightText(x))}</p>`).join('')}</details>`:''}</section>`;
+    const a=g.workflow?.analysis||{},insights=flowStudioInsights(g),observations=insights.status==='stale'?[]:insights.visible_observations||[],claims=insights.status==='stale'?[]:insights.unverified_seller_claims||[];
+    return `<section class="studio-brief"><div class="studio-brief-head"><h3>产品特征与卖点</h3>${flowButton(listingFlow.studioRequests.has(`${state.product}:insights`)?'正在识别图片…':'从勾选图片提取卖点','studio-insights',listingFlow.studioRequests.has(`${state.product}:insights`)||!state.skus?.active_count)}</div><div class="studio-brief-grid"><div><p>商品摘要${a.confirmed?'（已确认）':'（待核对）'}</p>${flowOperatorPointsHtml(g,'studio-observations','摘要尚无卖点。可直接选供应商图片提取，不影响手写提示词生图。')}</div><div><p>图片可见特征${insights.status==='stale'?'（资料已变更，请重新识别）':''}</p>${observations.length?`<ul class="studio-observations">${observations.slice(0,6).map(x=>`<li>${esc(flowStudioInsightText(x))}</li>`).join('')}</ul>`:'<p>选择详情图或规格图，识别画面和图中文字。无法确认的材质、参数或认证不会自动写入商品事实。</p>'}</div></div>${claims.length?`<details class="studio-guidance"><summary>图中文字中的供应商声明（${claims.length} 项，待核对）</summary>${claims.slice(0,6).map(x=>`<p>${esc(flowStudioInsightText(x))}</p>`).join('')}</details>`:''}</section>`;
 }
 function flowStudioGuidance(g,spec){const insights=flowStudioInsights(g),points=insights.status==='stale'?[]:insights.selling_points||[];return spec.guidance_cn||points.map(x=>x.image_howto_zh||x.visual_method_cn||x.visual_demo_cn||x.visual_guidance_cn||x.visual_guidance||x.prompt_cn||x.prompt_zh).filter(Boolean).slice(0,3).join('\n')||'造型与颜色：保留所选规格的真实外观，用简洁背景突出商品。\n表面与细节：使用近景和侧光，让买家看清纹理与细部。\n使用方式：只有资料能确认时才展示，不添加未知功能、认证或参数。'}
 function flowStudioGuidanceHtml(g,spec){return `<div class="studio-guidance"><strong>中文参考提示词 · 如何体现卖点</strong><p>${esc(flowStudioGuidance(g,spec))}</p>${flowButton('填入提示词后编辑','studio-use-guidance',false,`data-slot="${esc(spec.slot)}"`)}</div>`}
@@ -312,6 +328,7 @@ function flowShowResult(result) {const host=$('#flowPublishResult');if(host)host
 document.addEventListener('click',async event=>{
     const button=event.target.closest('[data-flow-action]');if(!button)return;
     const action=button.dataset.flowAction;
+    if(action==='summary-zh')return; // Owned by the presentation-only card handler.
     if(action==='step'){if(!listingFlow.busy)flowSetStep(button.dataset.step);return}
     if(action==='dismiss-error'){listingFlow.errors.delete(state.product);renderProduct();return}
     if(action==='studio-slot'){listingFlow.studioSlots.set(state.product,button.dataset.slot);renderProduct();return}

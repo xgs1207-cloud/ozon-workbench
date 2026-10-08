@@ -21,6 +21,11 @@ class ReserveRequest(BaseModel):
     prefix: str | None = Field(default=None, min_length=1, max_length=28)
 
 
+class SummaryDisplayRequest(BaseModel):
+    input_fingerprint: str | None = Field(default=None, min_length=1, max_length=100)
+    confirm_retry: bool = False
+
+
 def _database():
     from pipeline.listing_offer_ids import registry_path
     return registry_path()
@@ -61,3 +66,11 @@ def reserve_offers(product_id: str, request: ReserveRequest):
     directory = directory_for(product_id)
     shop = _known_shop(api._store_for(directory, request.shop))
     return {"ok": True, "offer_ids": run_service(reserve_offer_ids, directory, shop, request.profile_id, request.prefix, db_path=_database())}
+
+
+@router.post("/products/{product_id}/summary-display-zh")
+def summary_display_zh(product_id: str, request: SummaryDisplayRequest):
+    """Only an operator display sidecar: no listing mutations, even after submit."""
+    from pipeline.summary_display import translate_summary_display
+    return {"ok": True, **run_service(translate_summary_display, directory_for(product_id, edit=False),
+                                      **request.model_dump())}

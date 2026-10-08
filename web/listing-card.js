@@ -78,6 +78,8 @@ renderListingForm=function(){
     const excluded=new Set((doc?.official_excluded_attribute_ids||doc?.card?.official_excluded_attribute_ids||[4191,23171]).map(String));
     for(const field of template.content.querySelectorAll('[data-official-field]')){
         const id=field.dataset.officialField;
+        // Rich content has one visual editor; never render a second JSON input.
+        if(typeof benchRichContentEnhance==='function' && (id==='11254' || /rich.content|富内容|丰富内容|рич.контент/i.test(field.querySelector('.official-field-title')?.textContent||''))){field.remove();continue}
         // Only hide an operational duplicate once its authoritative value exists.
         if(excluded.has(id)&&draft&&!draft.validationErrors?.length&&doc?.card?.field_display?.[id]?.display!=='attention'){const rows=draft.selectedSkus||[],filled=rows.length?rows.every(row=>(listingEffective(draft,row.sku_id||row.id)[id]||[]).length):Boolean(draft.attributes[id]?.length);if(field.dataset.required!=='true'||filled)field.remove()}
     }

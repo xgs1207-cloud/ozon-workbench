@@ -368,6 +368,15 @@ def build_upload_payload(
 
     variants: list[dict[str, Any]] = []
     by_sku = attributes.get("attributes_by_sku") if isinstance(attributes.get("attributes_by_sku"), Mapping) else {}
+    # The rich editor is the sole owner when configured; old hand-filled JSON
+    # remains untouched for products which have not used that editor.
+    from .rich_content import compile_attribute
+    rich_attribute = None
+    try:
+        rich_attribute = compile_attribute(directory)
+    except ValueError as error:
+        blockers.append(str(error))
+    rich_identity = rich_attribute.get("attribute_id") if rich_attribute else None
     for index, sku in enumerate(skus, start=1):
         sku_id = str(sku.get("sku_id") or f"S{index}")
         row = price_rows.get(sku_id) or {}
@@ -385,6 +394,7 @@ def build_upload_payload(
             }
             for item in (by_sku.get(sku_id) or [])
             if isinstance(item, Mapping)
+            and (rich_identity is None or item.get("attribute_id") != rich_identity)
         ]
         from .listing_document import variant_color, variant_title
         from .listing_offer_ids import offer_for_variant
@@ -479,12 +489,14 @@ def build_upload_payload(
             }
             for item in (attributes.get("common_attributes") or [])
             if isinstance(item, Mapping)
+            and (rich_identity is None or item.get("attribute_id") != rich_identity)
         ],
         "attributes_by_sku": {
             str(key): [
                 {"attribute_id": item.get("attribute_id"), "value": item.get("value")}
                 for item in (value or [])
                 if isinstance(item, Mapping)
+                and (rich_identity is None or item.get("attribute_id") != rich_identity)
             ]
             for key, value in (by_sku or {}).items()
         },
@@ -554,6 +566,11 @@ def build_upload_payload(
     }
     if plan.get("studio_mode") is True:
         payload["studio_mode"] = True
+    if rich_attribute and not rich_attribute.get("remove"):
+        payload["attributes"].append(rich_attribute)
+        for row in payload["api_request_template"]["request"]["items"]:
+            row["attributes"].append({"id": rich_attribute["attribute_id"],
+                                      "values": [{"value": rich_attribute["value"]}]})
     return payload
 
 

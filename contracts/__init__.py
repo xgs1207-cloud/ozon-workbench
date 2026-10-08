@@ -73,6 +73,21 @@ def load_contract(name: str) -> dict[str, Any]:
 def validate_contract(name: str, payload: Any, *, allow_extra: bool = False) -> list[str]:
     """返回问题列表（空列表 = 通过）。``allow_extra`` 只放宽 additionalProperties。"""
     schema = dict(load_contract(name))
+    if (name.removesuffix(".schema.json") == "image-plan" and isinstance(payload, Mapping)
+            and payload.get("max_main_images") is not None):
+        # Explicit current guided-planner capacity, without turning the plan
+        # into a freely edited studio draft or relaxing other legacy checks.
+        from pipeline.sku_selection import MAX_SELECTED
+        capacity = payload["max_main_images"]
+        if isinstance(capacity, bool) or not isinstance(capacity, int) or not 1 <= capacity <= MAX_SELECTED:
+            return [f"主图规划容量须在 1–{MAX_SELECTED} 个规格以内"]
+        schema["properties"] = dict(schema.get("properties") or {})
+        schema["properties"]["max_main_images"] = {"type": "integer", "minimum": 1, "maximum": MAX_SELECTED}
+        schema["properties"]["main_images"] = {**schema["properties"]["main_images"], "maxItems": capacity}
+        strategy = schema["properties"]["variant_image_strategy"]
+        schema["properties"]["variant_image_strategy"] = {**strategy, "properties": {
+            **strategy["properties"], "variant_main_count": {
+                **strategy["properties"]["variant_main_count"], "maximum": capacity}}}
     if (name.removesuffix(".schema.json") == "image-plan"
             and isinstance(payload, Mapping) and payload.get("studio_mode") is True):
         # Keep ignored upstream contracts and legacy whole-plan validation

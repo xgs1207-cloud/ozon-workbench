@@ -368,17 +368,26 @@ def build_image_plan(
     copy_bundle: Mapping[str, Any] | None = None,
     analysis: Mapping[str, Any] | None = None,
     generated_by: str = "fake",
+    studio_mode: bool = False,
+    max_main_images: int = MAX_MAIN_IMAGES,
 ) -> dict[str, Any]:
-    """构建完整的 image-plan（N 张 SKU 主图 + 恰好 8 张共享详情图）。"""
+    """Build the legacy plan or an explicitly requested current-studio blueprint.
+
+    Studio quantities are editable and unselected; these are template slots,
+    never an instruction to generate all of them or a publication quota.
+    """
     product_id = str(source.get("product_id") or product_dir.name)
     # 只为"要上架"的 SKU 规划主图：没选的规格不该花豆包生图的钱
-    from pipeline.sku_selection import active_skus
+    from pipeline.sku_selection import MAX_SELECTED, active_skus
 
     skus = active_skus(product_dir, source.get("skus") or [])
     if not skus:
         raise ValueError("图片规划至少需要 1 个已选 SKU（检查 input/selected-skus.json）")
-    if len(skus) > MAX_MAIN_IMAGES:
-        raise ValueError(f"已选 SKU 超过 {MAX_MAIN_IMAGES} 个，无法规划主图")
+    if isinstance(max_main_images, bool) or not isinstance(max_main_images, int) or not 1 <= max_main_images <= MAX_SELECTED:
+        raise ValueError(f"主图规划容量须在 1–{MAX_SELECTED} 个规格以内")
+    limit = MAX_SELECTED if studio_mode else max_main_images
+    if len(skus) > limit:
+        raise ValueError(f"已选 SKU 超过 {limit} 个，请分批选择后规划图片")
 
     collection_id = str(source.get("collection_id") or "")
     if not collection_id:
@@ -566,7 +575,7 @@ def build_image_plan(
         "brand_watermark_required": "none",
     }
 
-    return {
+    plan = {
         "schema_version": SCHEMA_VERSION,
         "product_id": product_id,
         "collection_id": collection_id,
@@ -627,6 +636,14 @@ def build_image_plan(
             "error": None,
         },
     }
+    if studio_mode:
+        plan.update(studio_mode=True, selected_slots=[])
+        plan["generator_contract"]["raw_1688_image_direct_upload_forbidden"] = False
+    elif max_main_images != MAX_MAIN_IMAGES:
+        # Capacity is independent of studio editing/cache semantics. The guided
+        # whole-set planner can describe a complete current Ozon import batch.
+        plan["max_main_images"] = max_main_images
+    return plan
 
 
 def render_plan_brief(plan: Mapping[str, Any]) -> str:

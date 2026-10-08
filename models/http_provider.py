@@ -1121,6 +1121,8 @@ class HttpModelProvider:
             copy_bundle=request.copy_bundle,
             analysis=request.analysis,
             source_refs=request.source_refs,
+            studio_mode=request.extra.get("studio_mode") is True,
+            max_main_images=request.extra.get("max_main_images", 10),
         )
         self.last_notes.append(
             "图片计划由规则装配器生成（槽位/合成方式/叠字规则来自技能约束）；"

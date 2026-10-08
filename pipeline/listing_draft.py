@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .context import PipelineGateError, StepContext, read_json, write_json
 from .product_edit_lock import product_edit_lock
@@ -28,6 +28,11 @@ def grouping_scope(directory: Path) -> str:
 
 def card_fingerprint(directory: Path) -> str:
     items = {name: read_json(directory / name) for name in CARD_INPUTS}
+    rich = read_json(directory / "input/rich-content.json")
+    if rich:
+        from .rich_content import content_version
+        items["input/rich-content.json"] = rich
+        items["rich_content_version"] = content_version(directory)
     return hashlib.sha256(json.dumps(items, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
@@ -42,11 +47,47 @@ def _modern_ready(directory: Path, *, plan: bool = False):
     return state
 
 
+def _validate_current_source(ctx: StepContext) -> dict[str, Any]:
+    """Identity checks for this bench, not CLI purchase-cost or count gates."""
+    from urllib.parse import urlsplit
+    from .sku_selection import MAX_SELECTED, active_skus, blocking_collection_issues
+    import re
+    source = ctx.require_json("input/source.json")
+    parsed = urlsplit(str(source.get("source_url") or ""))
+    if parsed.hostname != "detail.1688.com" or not re.fullmatch(r"/offer/\d+\.html", parsed.path):
+        raise PipelineGateError(ctx.step, "请使用已采集的真实 1688 商品来源链接")
+    rows = active_skus(ctx.product_dir, source.get("skus") or [])
+    if len(rows) > MAX_SELECTED:
+        raise PipelineGateError(ctx.step, f"Ozon 单次导入最多 {MAX_SELECTED} 个商品规格，请分批选择")
+    if not rows or any(not isinstance(row, Mapping) or not str(row.get("sku_id") or "").strip() for row in rows):
+        raise PipelineGateError(ctx.step, "请至少选择一个具有真实规格编号的商品规格")
+    identities = [str(row["sku_id"]) for row in rows]
+    if len(identities) != len(set(identities)):
+        raise PipelineGateError(ctx.step, "已选规格编号重复，请重新采集或核对规格")
+    ambiguous = [str(row["sku_id"]) for row in rows if blocking_collection_issues(row)]
+    if ambiguous:
+        raise PipelineGateError(ctx.step, "规格身份存在采集歧义，请核对或重新采集：" + "、".join(ambiguous[:6]))
+    warnings = []
+    for row in rows:
+        if not any(row.get(key) for key in ("purchase_price_cny", "cost_cny", "purchase_price", "price_cny")):
+            warnings.append(f"规格 {row['sku_id']} 未采集采购价；不影响填写人工上架售价")
+    result = {"checks": {"source_url_is_1688": True, "sku_count": len(rows), "sku_fields_ok": True},
+              "warnings": warnings, "api_calls": 0}
+    ctx.write_json("output/source-validation.json", result)
+    ctx.write_json("output/source-quality.json", {"blocking": [], "warnings": warnings,
+                                                   "stats": {"skus_active": len(rows)}})
+    return result
+
+
 def prepare_listing_card(directory: Path, *, shop: str) -> dict[str, Any]:
-    from .runner import DEFAULT_HANDLERS
+    from .catalog import handle_variant_rules, handle_field_completion
+    from .measurements import handle_measurements
     from .listing_form import product_form, persist_category_form
     from .status import complete_step
     import api
+
+    handlers = {"validate_source": _validate_current_source, "variant_rules": handle_variant_rules,
+                "measurements": handle_measurements, "field_completion": handle_field_completion}
 
     with product_edit_lock(directory):
         from .listing_form import _require_editable
@@ -67,7 +108,7 @@ def prepare_listing_card(directory: Path, *, shop: str) -> dict[str, Any]:
         executed, blockers = [], []
         for step in ("validate_source", "variant_rules", "measurements", "field_completion"):
             try:
-                result = DEFAULT_HANDLERS[step](StepContext(directory, step))
+                result = handlers[step](StepContext(directory, step))
                 if step == "variant_rules":
                     choice = read_json(directory / "input/listing-grouping-choice.json")
                     grouped = read_json(directory / "output/platform-grouping-result.json")

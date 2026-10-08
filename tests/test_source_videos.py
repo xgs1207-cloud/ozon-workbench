@@ -305,6 +305,20 @@ class ListingVideoValidationTests(_VideoFixture):
         self.assertEqual(result[0]["size_bytes"], len(MP4))
         self.assertNotIn("private-test-value", json.dumps(result))
         self.assertEqual({path: path.read_bytes() for path in before}, before)
+
+    def test_eleven_and_hundred_selected_skus_can_share_one_verified_source_video_without_network(self):
+        video_id = self.saved_video()
+        for count in (11, 100):
+            with self.subTest(count=count):
+                ids = [f"SKU{index}" for index in range(1, count + 1)]
+                (self.directory / "input/source.json").write_text(json.dumps({"source_url": SOURCE,
+                    "skus": [{"sku_id": sku_id} for sku_id in ids], "sku_selection_required": True}), encoding="utf-8")
+                (self.directory / "input/selected-skus.json").write_text(json.dumps({"selected": ids}), encoding="utf-8")
+                with patch.object(videos, "_open_video") as network:
+                    result = videos.validate_listing_videos(self.directory, self.selection(video_id))
+                    network.assert_not_called()
+                self.assertEqual(len(result), 1)
+                self.assertIsNone(result[0]["source_sku_id"])
     def test_missing_rights_unknown_video_sku_or_unselected_sku_are_rejected(self):
         video_id = self.saved_video()
         for rights in (False, None, "true", 1):

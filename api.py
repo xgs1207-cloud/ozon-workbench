@@ -956,7 +956,7 @@ class ManualSkuPrice(BaseModel):
 
 
 class ManualPricesRequest(BaseModel):
-    prices: list[ManualSkuPrice] = Field(min_length=1, max_length=10)
+    prices: list[ManualSkuPrice] = Field(min_length=1, max_length=100)
 
 
 class Dimensions(BaseModel):
@@ -1031,7 +1031,7 @@ def set_manual_prices(product_id: str, request: ManualPricesRequest) -> dict[str
 @app.get("/api/workbench/products/{product_id}/skus")
 def workbench_product_skus(product_id: str) -> dict[str, Any]:
     """看某个商品采集到的 SKU 与当前上架范围。"""
-    from pipeline.sku_selection import selection_state, source_skus
+    from pipeline.sku_selection import blocking_collection_issues, selection_state, source_skus
 
     directory = _require_product(product_id)
     state = selection_state(directory)
@@ -1048,6 +1048,7 @@ def workbench_product_skus(product_id: str) -> dict[str, Any]:
                 "image_url": item.get("image_url") or item.get("variant_image_url"),
                 "image_path": item.get("image_path"),
                 "collection_issues": item.get("collection_issues") or [],
+                "blocking_collection_issues": blocking_collection_issues(item),
                 "color_ru": item.get("color_ru"),
                 "capacity": item.get("capacity"),
                 "purchase_price_cny": item.get("purchase_price_cny"),
@@ -1810,7 +1811,6 @@ def workbench_keyword_products() -> dict[str, Any]:
 
 # ----------------------------------------------------------------- 操作台（网页）
 
-WEB_CONSOLE = Path(__file__).resolve().parent / "web" / "console.html"
 WEB_CONSOLE_V2 = Path(__file__).resolve().parent / "web" / "research-workbench.html"
 
 
@@ -1847,7 +1847,7 @@ def _store_for(directory: Path, requested: str | None) -> str:
 
 @app.get("/", include_in_schema=False)
 def workbench_console() -> Any:
-    """研究到上架的决策工作台；旧的专家台保留在 /advanced。"""
+    """唯一的研究到上架工作台，保留 product_id 等现有深链。"""
     from fastapi.responses import HTMLResponse
 
     if not WEB_CONSOLE_V2.is_file():
@@ -1857,7 +1857,9 @@ def workbench_console() -> Any:
 
 @app.get("/advanced", include_in_schema=False)
 def advanced_console() -> Any:
-    return HTMLResponse(WEB_CONSOLE.read_text(encoding="utf-8"))
+    # Do not execute or load the retired all-in-one console. An explicit tombstone
+    # also keeps old bookmarks from silently opening a second editing surface.
+    raise HTTPException(status_code=410, detail="高级操作台已移除，请使用当前工作台")
 
 
 @app.get("/api/workbench/stores")
@@ -2399,6 +2401,21 @@ app.include_router(media_workspace_router)
 
 from workbench_publication_api import router as publication_router
 app.include_router(publication_router)
+
+from workbench_rich_content_api import router as rich_content_router
+app.include_router(rich_content_router)
+
+
+@app.get("/assets/listing-rich-content.js", include_in_schema=False)
+def listing_rich_content_script():
+    from fastapi.responses import FileResponse
+    return FileResponse(Path(__file__).resolve().parent / "web/listing-rich-content.js", media_type="text/javascript")
+
+
+@app.get("/assets/listing-rich-content.css", include_in_schema=False)
+def listing_rich_content_styles():
+    from fastapi.responses import FileResponse
+    return FileResponse(Path(__file__).resolve().parent / "web/listing-rich-content.css", media_type="text/css")
 
 
 @app.get("/assets/listing-flow.js", include_in_schema=False)

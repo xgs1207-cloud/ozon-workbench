@@ -7,7 +7,7 @@ import re
 from typing import Any, Mapping
 from urllib.parse import urlsplit, urlunsplit
 
-from .sku_selection import active_skus, selection_state
+from .sku_selection import MAX_SELECTED, active_skus, selection_state
 
 
 def _model_safe(value: Any) -> Any:
@@ -37,8 +37,8 @@ def selected_source(directory: Path | str, source: Mapping[str, Any], *, require
     directory = Path(directory)
     state = selection_state(directory)
     rows = active_skus(directory, source.get("skus") or [])
-    if require_selection and (not state["has_selection"] or state["unknown_in_selection"] or not 1 <= len(rows) <= 10):
-        raise ValueError("请先确认 1–10 个有效的上架规格，再分析商品")
+    if require_selection and (not state["has_selection"] or state["unknown_in_selection"] or not 1 <= len(rows) <= MAX_SELECTED):
+        raise ValueError(f"请先确认 1–{MAX_SELECTED} 个有效的上架规格，再分析商品；更多规格请分批选择")
     # A raw snapshot/extra body can contain all variants; do not pass that second
     # unfiltered copy to the model after filtering the primary skus array.
     projected = {key: deepcopy(value) for key, value in source.items()

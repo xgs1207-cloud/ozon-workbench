@@ -1,0 +1,51 @@
+Rich content and single workbench, 2026-10-08
+
+Brief: retain the supplied Ozon desktop form, hide auto-default controls,
+retire the separate advanced console, and edit rich content beside its preview.
+Palette: white #ffffff, field fill #edf1f6, ink #111820, secondary #637389,
+action #1557e8, separator #dfe5ef. Use existing YaHei/system type stack.
+Labels 13px bold, prose 14px, section heading 20px. Desktop 1280/1600 only.
+Layout: one card field opens a large editor dialog. Left: ordered block list
+and media picker; middle: readable buyer preview; right: AI conversation.
+  [Add image / image+text / text]        [Cancel] [Apply to draft]
+  Block controls and imported/generated media | Preview | AI prompt+candidate
+Keep source images and already-generated image slots intact. No inert icons.
+Review: user explicitly requested gray rounded forms; preserve those rather
+than introducing a different dashboard. Emphasize working content and clear
+apply/cancel boundaries, not workflow diagnostic panels.
+
+QA inventory:
+- Default-hidden fields persist in saved attributes and payloads; invalid,
+  conflicting or missing-required values remain visible and actionable.
+- Advanced console link and HTML execution surface are removed; root/deep
+  links still work. Legacy CLI cannot gate the current guided bench.
+- Rich content supports image/text/image+text blocks, reorder, delete, preview,
+  local import, generated/original image selection and saved-draft reload.
+- AI uses verified selected-product facts and relevant chosen keywords; a
+  Chinese modification prompt yields a reviewable Russian content candidate.
+- AI candidate does not overwrite unsaved manual edits or auto-publish.
+- Imported/generated rich media reaches object storage and the same final
+  Ozon attribute JSON; no buyer links, arbitrary HTML or unsafe URL fetching.
+- Cancel preserves saved content; changed context invalidates only dependent
+  approvals. Server revision protection rejects stale writes.
+- At 1280/1600, inspect open dialog, dense blocks, image picker, conversation,
+  keyboard focus/Escape/scrolling and error states; no page overflow.
+- Off-path: invalid upload/URL, failed AI, stale product context, missing
+  official dictionary default and legacy saved rich JSON.
+- Automated verification never calls paid AI or writes live Ozon inventory.
+
+Verification completed:
+- Browser-inspected desktop dialog at 1600x980 and 1280x900; all three panes
+  remain reachable without horizontal page overflow. Escape and cancel keep
+  the saved draft. Buyer text preview uses the same editable ordered blocks.
+- Normal-control tests: import original image, choose captured/generated
+  images, move/delete blocks, Chinese prompt -> Russian keyword candidate ->
+  explicit application -> save/reopen. Offline AI failure retains manual text.
+- Final isolated browser flow: generated image chosen for rich content,
+  save -> prepare card -> confirm fields -> publish media to offline COS.
+  Attribute 11254 JSON matches the saved rich blocks and published hash URLs.
+  The actual app integration test also checks final Seller API serialization.
+- Valid brand/model/adult defaults have no controls; there is exactly one
+  rich-content editor, and the retired advanced console returns HTTP 410.
+- Screenshots use color-pattern fixture images, not a paid generated product
+  image. No production AI calls or live Ozon/stock mutations are part of QA.

@@ -56,9 +56,12 @@ class ConsoleApiTests(unittest.TestCase):
                        'data-view="sessions"', 'data-view="product"', "火山方舟"):
             self.assertIn(marker, response.text, marker)
         self.assertIn("/api/workbench/products/", response.text)
+        self.assertNotIn('href="/advanced"', response.text)
+        self.assertEqual(self.client.get("/?product_id=P000007").status_code, 200)
         advanced = self.client.get("/advanced")
-        self.assertEqual(advanced.status_code, 200)
-        self.assertIn("上品工序台", advanced.text)
+        self.assertEqual(advanced.status_code, 410)
+        self.assertIn("高级操作台已移除", advanced.json()["detail"])
+        self.assertNotIn("上品工序台", advanced.text)
 
     def test_steps_endpoint_uses_single_source(self):
         from pipeline.steps import PIPELINE_STEPS

@@ -21,7 +21,7 @@ import uuid
 from contracts import validate_contract
 from .listing_form import read_json, write_json, _require_editable
 from .product_edit_lock import product_edit_lock, product_file_transaction
-from .sku_selection import selection_state
+from .sku_selection import MAX_SELECTED, selection_state
 from .guided_review import REAL_IMAGE_GENERATORS, slot_fingerprint
 
 JOBS_FILE = "output/image-jobs.json"
@@ -66,7 +66,7 @@ def _studio_blueprint(directory: Path) -> dict[str, Any]:
     # The neutral structural seed is never used as buyer-facing text or prompt.
     return build_image_plan(product_dir=directory, source=read_json(directory / "input/source.json"),
                             source_refs=["input/source.json", "input/selected-skus.json"],
-                            copy_bundle={"core_keyword": "Товар"}, generated_by="manual_studio")
+                            copy_bundle={"core_keyword": "Товар"}, generated_by="manual_studio", studio_mode=True)
 
 
 def _empty_studio(directory: Path) -> dict[str, Any]:
@@ -93,8 +93,8 @@ def _safe_file(root: Path, relative: Any, prefix: str | None = None) -> Path:
 def _selected(directory: Path) -> list[str]:
     state = selection_state(directory)
     if (not state.get("has_selection") or state.get("unknown_in_selection")
-            or not 1 <= state.get("active_count", 0) <= 10):
-        raise ValueError("请先确认 1–10 个有效的上架规格，再生成图片")
+            or not 1 <= state.get("active_count", 0) <= MAX_SELECTED):
+        raise ValueError(f"请先确认 1–{MAX_SELECTED} 个有效的上架规格，再生成图片；更多规格请分批选择")
     return list(state["selected"])
 
 

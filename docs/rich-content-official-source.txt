@@ -1,0 +1,20 @@
+Ozon rich-content schema verification, 2026-10-08
+
+Primary source: https://cdn2.ozone.ru/s3/artifact/schema.json
+Retrieved over HTTPS with certificate verification. The checked official
+schema includes RichContentV02 (version 0.2), raTextBlock title/text objects
+with content arrays, and raShowcase billboard img src/srcMobile dimensions.
+
+Downloaded bytes SHA-256:
+5789134953f112563c153ff2f91c9baf7da65168a83b4af36bacf69711d2f099
+
+Local snapshot: contracts/ozon-rich-content.schema.json
+The local snapshot adds a final newline; JSON content is unchanged. Emitted
+widgets are checked against the snapshot; arbitrary JSON/HTML/remote URLs
+are not an alternative rich editor input. Selected official category form
+must expose the real rich-content attribute (normally 11254).
+
+Images are immutable local PNG/JPEG/WebP snapshots. Explicit media
+publication produces content-versioned COS URLs. The exact final Seller API
+attribute JSON is recompiled from these saved blocks and media bindings.
+Anonymous image GET/hash verification is part of existing publish preflight.

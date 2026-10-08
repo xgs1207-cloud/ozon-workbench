@@ -157,12 +157,16 @@ def publish_media(product_id: str, request: StoreRequest):
         if not review["sections"]["images"]["approved"]:
             raise HTTPException(409, "先确认所选上架图片，再发布图片地址")
         try:
-            result = _storage_from_env().publish_product(directory)
+            storage = _storage_from_env()
+            result = storage.publish_product(directory)
         except Exception as error:
             raise HTTPException(422, "图片存储发布失败，请检查 COS 配置和权限") from error
+        # Keep actionable stale/invalid-rich errors separate from COS failures.
+        from pipeline.rich_content import publish_content
+        rich_result = run_service(publish_content, directory, storage=storage)
     if result.get("missing") or not result.get("https_ok"):
         raise HTTPException(422, "图片尚未全部发布为可用 HTTPS 地址")
-    return {"ok": True, "publication": result, "api_writes_performed": False}
+    return {"ok": True, "publication": result, "rich_content_publication": rich_result, "api_writes_performed": False}
 
 
 class VideoPublicationChoice(BaseModel):

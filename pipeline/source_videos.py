@@ -370,13 +370,13 @@ def validate_listing_videos(directory: Path | str, selection: Any, *,
         raise ValueError("未找到有效的商品采集资料") from None
     if not isinstance(source, dict) or not isinstance(source.get("skus"), list):
         raise ValueError("商品规格资料无效")
-    from pipeline.sku_selection import active_skus, selection_state
+    from pipeline.sku_selection import MAX_SELECTED, active_skus, selection_state
     state = selection_state(root)
     if state.get("unknown_in_selection"):
         raise ValueError("上架规格选择包含未知规格，请先重新确认规格")
     active_ids = {str(row.get("sku_id")) for row in active_skus(root, source["skus"]) if row.get("sku_id")}
-    if not 1 <= len(active_ids) <= 10:
-        raise ValueError("请先选择1–10个上架规格，再关联视频")
+    if not 1 <= len(active_ids) <= MAX_SELECTED:
+        raise ValueError(f"请先选择1–{MAX_SELECTED}个上架规格，再关联视频；更多规格请分批选择")
     source_offer = re.search(r"/offer/(\d+)\.html", str(source.get("source_url") or ""))
     source_offer_id = source_offer.group(1) if source_offer else None
     manifest = _load_manifest(root)

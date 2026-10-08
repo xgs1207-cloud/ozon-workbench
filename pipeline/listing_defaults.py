@@ -76,30 +76,52 @@ def ensure_defaults_state(directory: Path | str) -> dict[str, Any]:
 def field_display_metadata(form: Mapping[str, Any], *, directory: Path | str | None = None,
                            attributes: Mapping[str, Any] | None = None,
                            per_sku_attributes: Mapping[str, Any] | None = None) -> dict[str, dict[str, Any]]:
-    """UI policy by real field ID; leave the official schema entirely unchanged."""
+    """Hide valid user defaults, not manual facts or unresolved official values.
+
+    This is display metadata only. The browser repeats the value/provenance
+    check against its current unsaved draft; the official schema and submitted
+    attributes are not pruned by this policy.
+    """
     result = {}
     facts = _source_facts(Path(directory)) if directory is not None else {}
+    state = read_json(Path(directory) / DEFAULT_STATE_FILE) if directory is not None else {}
+    model = state.get("model_name") if directory is not None and state.get("product_id") == Path(directory).name else None
+    expected = {
+        "brand": sorted(_NO_BRAND), "origin": sorted(_CHINA),
+        "adult": ["false", "否", "无", "нет", "no", "0"],
+        "factory_pack_count": ["1"], "model": [model] if model else [],
+    }
+
+    def records(value):
+        if value in (None, ""):
+            return []
+        return [row if isinstance(row, Mapping) else {"value": row}
+                for row in (value if isinstance(value, list) else [value])]
+
     for field in form.get("fields") or []:
         semantic = field_default_semantic(field)
         if not semantic:
             continue
-        display = "hidden" if semantic == "brand" else "advanced" if semantic in _BLANK else "standard"
-        if semantic == "brand":
-            key = str(field["attribute_id"])
-            def records(value):
-                if value in (None, ""):
-                    return []
-                return [row if isinstance(row, Mapping) else {"value": row}
-                        for row in (value if isinstance(value, list) else [value])]
-            saved_values = [*records((attributes or {}).get(key)),
-                            *(row for values in (per_sku_attributes or {}).values() for row in records(values.get(key)))]
-            if _conflicts("brand", facts) or any(
-                str(row.get("value") or "").strip().casefold() not in _NO_BRAND
-                for row in saved_values if isinstance(row, Mapping) and row.get("value") not in (None, "")
+        key = str(field["attribute_id"])
+        display = "standard" if semantic == "hashtags" else "hidden"
+        saved_values = [*records((attributes or {}).get(key)),
+                        *(row for values in (per_sku_attributes or {}).values()
+                          if isinstance(values, Mapping) for row in records(values.get(key)))]
+        if semantic != "hashtags":
+            matches = {str(value).strip().casefold() for value in expected.get(semantic, [])}
+            # Non-default values and invalid dictionary placeholders are always
+            # actionable. Missing required values are exposed by the browser.
+            if _conflicts(semantic, facts) or any(
+                (str(row.get("value", "")).strip().casefold() not in matches
+                 or bool(field.get("dictionary_id") and not row.get("dictionary_value_id")))
+                for row in saved_values
             ):
                 display = "attention"
         result[str(field["attribute_id"])] = {
-            "semantic": semantic, "display": display, "hide_when_default": semantic == "brand",
+            "semantic": semantic, "display": display,
+            "hide_when_default": semantic not in _BLANK and semantic != "hashtags",
+            "hide_when_blank": semantic in _BLANK,
+            "default_match_values": expected.get(semantic, []),
             "default_policy": "leave_blank" if semantic in _BLANK else "ai_generated" if semantic == "hashtags" else "user_requested_default",
             "required": bool(field.get("required")),
         }

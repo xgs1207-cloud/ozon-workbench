@@ -47,7 +47,7 @@ class FullCaptureTests(unittest.TestCase):
         clear_selection(directory)
         self.assertEqual(active_skus(directory, source["skus"]), [])
 
-    def test_incomplete_catalog_rows_preserved_but_cannot_be_selected(self):
+    def test_purchase_cost_warning_is_selectable_but_ambiguous_identity_stays_blocked(self):
         payload = catalog(3)
         payload["skus"][1]["purchase_price"] = None
         payload["skus"][2]["sku_id"] = "10000"
@@ -58,8 +58,11 @@ class FullCaptureTests(unittest.TestCase):
         self.assertIsNone(source["skus"][1]["purchase_price_cny"])
         self.assertEqual(source["skus"][2]["source_sku_id"], "10000")
         self.assertEqual(source["skus"][2]["sku_id"], "CAPTURE-ROW-3")
-        with self.assertRaises(ValueError):
-            set_selection(directory, include=["10001"])
+        set_selection(directory, include=["10001"])
+        self.assertEqual(selection_state(directory)["selected"], ["10001"])
+        with self.assertRaisesRegex(ValueError, "原始规格标识"):
+            set_selection(directory, include=["CAPTURE-ROW-3"])
+        self.assertEqual(selection_state(directory)["selected"], ["10001"])
         set_selection(directory, include=["10000"])
 
     def test_legacy_limit_and_catalog_safety_cap_are_not_silent_truncation(self):
@@ -102,8 +105,12 @@ class FullCaptureTests(unittest.TestCase):
             self.assertEqual(state["skus"][55]["sku_name"], "颜色55")
             self.assertFalse(any(row["listed"] for row in state["skus"]))
             before = (self.root / pid / "input/source.json").read_bytes()
-            rejected = client.post(f"/api/workbench/products/{pid}/skus", json={"all": True})
-            self.assertEqual(rejected.status_code, 422)
+            all_selected = client.post(f"/api/workbench/products/{pid}/skus", json={"all": True})
+            self.assertEqual(all_selected.status_code, 200, all_selected.text)
+            self.assertEqual(all_selected.json()["state"]["active_count"], 56)
+            eleven = client.post(f"/api/workbench/products/{pid}/skus", json={"include": [str(10000 + index) for index in range(11)]})
+            self.assertEqual(eleven.status_code, 200, eleven.text)
+            self.assertEqual(eleven.json()["state"]["active_count"], 11)
             selected = client.post(f"/api/workbench/products/{pid}/skus", json={"include": ["10000", "10055"]})
             self.assertEqual(selected.status_code, 200, selected.text)
             self.assertEqual(selected.json()["state"]["active_count"], 2)
@@ -111,6 +118,21 @@ class FullCaptureTests(unittest.TestCase):
             version = client.post("/api/collector/products?allow_new_version=true", json=catalog())
             self.assertEqual(version.status_code, 200, version.text)
             self.assertEqual(version.json()["duplicate_of"], pid)
+
+    def test_http_catalog_101_variants_requires_explicit_batch_selection(self):
+        import api as api_module
+        from fastapi.testclient import TestClient
+        with patch.object(api_module, "PRODUCTS_ROOT", self.root):
+            client = TestClient(api_module.app)
+            result = client.post("/api/collector/products", json=catalog(101))
+            self.assertEqual(result.status_code, 200, result.text)
+            pid = result.json()["product_id"]
+            rejected = client.post(f"/api/workbench/products/{pid}/skus", json={"all": True})
+            self.assertEqual(rejected.status_code, 422)
+            self.assertIn("分批", rejected.json()["detail"])
+            selected = client.post(f"/api/workbench/products/{pid}/skus", json={"include": [str(10000 + index) for index in range(100)]})
+            self.assertEqual(selected.status_code, 200, selected.text)
+            self.assertEqual(selected.json()["state"]["active_count"], 100)
 
     def test_empty_selection_file_is_fail_closed(self):
         saved = ingest_capture(self.root, catalog(2))

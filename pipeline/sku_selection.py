@@ -7,7 +7,8 @@
 - 定价与尺寸重量：只为选中的 SKU 计算/校验（避免"没选的 SKU 缺价格"把整单卡住）；
 - 类目属性：只按选中的 SKU 值分组（否则会提交没上架规格的属性值）；
 - 图片规划：只为选中的 SKU 生成主图（**省豆包生图成本**）；
-- 批次快照与运行前校验：按选中的 SKU 数量做 1–10 的校验。
+- 当前工作台：单次最多选择 100 个 SKU，对应 Ozon 单次导入的商品上限。
+  独立旧 CLI 流水线的 10 个 SKU 运行限制不由此模块扩展。
 
 **默认行为**：旧采集无选择文件时 = 全部；新的全规格采集必须在后台确认，不默认上架。
 """
@@ -24,11 +25,23 @@ from typing import Any, Mapping, Sequence
 SELECTION_FILE = "input/selected-skus.json"
 SOURCE_FILE = "input/source.json"
 SCHEMA_VERSION = "1.0.0"
-MAX_SELECTED = 10
+# Official Seller API /v3/product/import: up to 100 item records per request.
+# Verified from the bundled 2026-10-03 official specification, 2026-10-08.
+MAX_SELECTED = 100
 
 
 class SkuSelectionError(ValueError):
     """选择结果不合法（未知 SKU、全部排除、数量超限等）。"""
+
+
+def blocking_collection_issues(sku: Mapping[str, Any]) -> list[str]:
+    """Purchase cost is an operator warning, not an Ozon identity requirement.
+
+    Keep the raw capture issues intact. Only this exact legacy warning is
+    non-blocking; ambiguous IDs and unrecognized capture issues still stop use.
+    """
+    return [str(issue) for issue in sku.get("collection_issues") or []
+            if issue != "缺少有效采购价"]
 
 
 def now_iso() -> str:
@@ -138,10 +151,10 @@ def set_selection(
     if not selected:
         raise SkuSelectionError("至少要保留 1 个上架 SKU")
     if len(selected) > MAX_SELECTED:
-        raise SkuSelectionError(f"上架 SKU 最多 {MAX_SELECTED} 个，当前 {len(selected)} 个")
+        raise SkuSelectionError(f"Ozon 单次导入最多 {MAX_SELECTED} 个商品规格，当前 {len(selected)} 个；请分批选择上架规格")
     chosen_rows = [row for index, row in enumerate(rows, start=1) if sku_key(row, index) in set(selected)]
-    issues = [f"{row.get('sku_id')}：{'、'.join(row['collection_issues'])}"
-              for row in chosen_rows if row.get("collection_issues")]
+    issues = [f"{row.get('sku_id')}：{'、'.join(blocking_collection_issues(row))}"
+              for row in chosen_rows if blocking_collection_issues(row)]
     if issues:
         raise SkuSelectionError("所选规格仍需核对：" + "；".join(issues[:5]))
 

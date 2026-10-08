@@ -35,7 +35,7 @@ DEPENDENCIES = {
     "fields": ("input/category-selection.json", "input/human-confirmations.json",
                "input/manual-prices.json", "output/pricing-result.json",
                "output/ozon-attributes-final.json", "output/platform-grouping-result.json",
-               "input/workbench-sku-overrides.json", "input/listing-media.json"),
+               "input/workbench-sku-overrides.json", "input/listing-media.json", "input/rich-content.json"),
 }
 
 
@@ -123,11 +123,17 @@ def digest(directory: Path | str, section: str) -> str | None:
             return None
         if not path.is_file():
             # Human confirmation is optional when nothing was missing.
-            if relative not in {"input/human-confirmations.json", "input/workbench-sku-overrides.json", "input/listing-media.json"}:
+            if relative not in {"input/human-confirmations.json", "input/workbench-sku-overrides.json", "input/listing-media.json", "input/rich-content.json"}:
                 return None
             continue
         digest_value.update(relative.encode("utf-8"))
         digest_value.update(path.read_bytes())
+    if section == "fields" and (directory / "input/rich-content.json").is_file():
+        from .rich_content import content_version
+        try:
+            digest_value.update(str(content_version(directory)).encode())
+        except ValueError:
+            return None
     return digest_value.hexdigest()
 
 
@@ -329,14 +335,17 @@ def status(directory: Path | str) -> dict[str, Any]:
     if modern:
         from .guided_workflow import workflow_status
         facts_ok = bool(workflow_status(directory)["analysis"].get("confirmed"))
-    from .sku_selection import selection_state
+    from .sku_selection import MAX_SELECTED, selection_state
 
     sku_state = selection_state(directory)
-    sku_ok = sku_state["has_selection"] and 1 <= sku_state["active_count"] <= 10 and not sku_state["unknown_in_selection"]
+    # Modern guided listing follows the Seller API's 100-item import boundary;
+    # do not let the archived CLI's ten-variant policy gate the current bench.
+    sku_limit = MAX_SELECTED if modern else 10
+    sku_ok = sku_state["has_selection"] and 1 <= sku_state["active_count"] <= sku_limit and not sku_state["unknown_in_selection"]
     prices_ok = manual_prices_complete(directory)
     blockers = []
     if not sku_ok:
-        blockers.append("尚未确认要上架的 SKU")
+        blockers.append(f"Ozon 单次导入最多 {sku_limit} 个商品规格，请分批选择" if sku_state["active_count"] > sku_limit else "尚未确认要上架的 SKU")
     if not facts_ok:
         blockers.append("商品事实仍有待人工补证或 AI 分析尚未完成")
     if not prices_ok:

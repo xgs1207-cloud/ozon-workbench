@@ -399,11 +399,11 @@ class RightApiImageGenerator:
         manifest = _read_json(_relative_file(root, "input/source-manifest.json"))
         _verify_sealed(root, manifest, "input/source.json")
         source = _read_json(root / "input" / "source.json")
-        from pipeline.sku_selection import selection_state
+        from pipeline.sku_selection import MAX_SELECTED, selection_state
         state = selection_state(root)
         selected = set(state.get("selected") or [])
-        if state.get("unknown_in_selection") or not 1 <= len(selected) <= 10:
-            raise ModelError("请先确认1–10个有效上架规格，再生图")
+        if state.get("unknown_in_selection") or not 1 <= len(selected) <= MAX_SELECTED:
+            raise ModelError(f"请先确认1–{MAX_SELECTED}个有效上架规格，再生图；更多规格请分批选择")
         prepared, targets = [], set()
         for slot in self._planned_slots(root):
             slot_sku = str(slot.get("source_sku_id") or "")

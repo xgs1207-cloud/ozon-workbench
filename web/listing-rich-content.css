@@ -1,0 +1,63 @@
+.bench-rich-field .field>strong{font-size:13px;color:#111820;font-weight:700}
+.rich-field-control{display:flex;align-items:center;justify-content:space-between;gap:20px;width:100%;border:0;border-radius:12px;background:#edf1f6;color:#637389;padding:18px 16px;text-align:left;font:inherit;cursor:pointer}
+.rich-field-control>span:last-child{color:#1557e8;font-size:13px;font-weight:700}
+.rich-editor-dialog{width:min(1560px,calc(100vw - 36px));max-width:none;height:min(920px,calc(100vh - 40px));max-height:none;padding:0;border:1px solid #dfe5ef;border-radius:14px;background:#fff;color:#111820;box-shadow:0 16px 50px rgba(17,24,32,.18);overflow:hidden;box-sizing:border-box}
+.rich-editor-dialog::backdrop{background:rgba(17,24,32,.38)}
+.rich-editor-dialog[open]{display:flex;flex-direction:column}
+.rich-editor-dialog *{box-sizing:border-box}
+.rich-editor-header{display:flex;align-items:center;justify-content:space-between;flex:none;gap:20px;padding:18px 24px;border-bottom:1px solid #dfe5ef}
+.rich-editor-header h2{font-size:20px;margin:0;color:#111820}
+.rich-header-actions,.rich-block-actions,.rich-media-tools{display:flex;gap:8px;align-items:center}
+.rich-button{border:1px solid #dfe5ef;border-radius:8px;background:#fff;color:#111820;font:inherit;font-size:13px;padding:8px 12px;cursor:pointer;white-space:nowrap}
+.rich-button.primary{background:#1557e8;border-color:#1557e8;color:#fff;font-weight:700}
+.rich-button:hover:not(:disabled){border-color:#1557e8}
+.rich-button:disabled{opacity:.5;cursor:default}
+.rich-editor-dialog button:focus-visible,.rich-editor-dialog input:focus-visible,.rich-editor-dialog textarea:focus-visible,.rich-editor-dialog select:focus-visible,.rich-editor-dialog summary:focus-visible{outline:2px solid #1557e8;outline-offset:2px}
+.rich-editor-layout{display:grid;grid-template-columns:minmax(300px,1.05fr) minmax(260px,1fr) minmax(280px,.92fr);flex:1;min-height:0;overflow:hidden}
+.rich-edit-column,.rich-preview-column,.rich-ai-column{min-width:0;overflow:auto;overscroll-behavior:contain;padding:20px;border-right:1px solid #dfe5ef}
+.rich-ai-column{border-right:0;background:#fafbfd}
+.rich-preview-column h3,.rich-ai-column>h3{font-size:15px;margin:0 0 16px;font-weight:700}
+.rich-toolbar{display:flex;gap:10px;align-items:flex-end;margin-bottom:18px}
+.rich-toolbar>label{display:flex;flex-direction:column;gap:6px;flex:1;font-size:13px;font-weight:700}
+.rich-toolbar select,.rich-media-filter,.rich-content-input,.rich-ai-prompt{width:100%;background:#edf1f6;border:1px solid transparent;border-radius:9px;color:#111820;font:inherit;font-size:13px;padding:11px 12px;min-width:0}
+.rich-toolbar .rich-button{padding:11px 18px}
+.rich-block{padding:14px 12px;border:1px solid #dfe5ef;border-radius:10px;margin-bottom:14px;background:#fff}
+.rich-block.active{border-color:#7ba0ed}
+.rich-block-heading{display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:12px}
+.rich-block-heading strong{font-size:13px;white-space:nowrap}
+.rich-block-actions{gap:4px}
+.rich-block-actions .rich-button{padding:5px 7px;font-size:12px}
+.rich-input-label{display:block;font-size:12px;font-weight:700;margin-bottom:12px;color:#637389}
+.rich-content-input,.rich-ai-prompt{display:block;margin-top:7px;line-height:1.6;resize:vertical;font-weight:400}
+.rich-image-choice{display:flex;align-items:center;gap:12px;width:100%;background:#edf1f6;border:0;white-space:normal;text-align:left;margin-bottom:12px}
+.rich-image-choice img{width:70px;height:70px;object-fit:contain;border-radius:5px;background:#fff}
+.rich-help,.rich-empty{font-size:12px;line-height:1.6;color:#637389;margin:8px 0 14px}
+.rich-media-picker{border-top:1px solid #dfe5ef;padding-top:16px}
+.rich-media-picker>summary{font-size:13px;font-weight:700;cursor:pointer;margin-bottom:14px}
+.rich-media-count{font-size:12px;font-weight:400;color:#637389;margin-left:5px}
+.rich-media-filter{padding:8px 9px;flex:1}
+.rich-media-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}
+.rich-media-choice{padding:0;border:1px solid #dfe5ef;border-radius:8px;overflow:hidden;white-space:normal;text-align:left;min-width:0}
+.rich-media-choice img{display:block;width:100%;height:95px;object-fit:contain;background:#edf1f6}
+.rich-media-choice span{display:block;padding:6px;font-size:11px;line-height:1.4;overflow-wrap:anywhere;color:#637389}
+.rich-media-grid>.rich-empty{grid-column:1/-1}
+.rich-preview-block{padding-bottom:22px;overflow-wrap:anywhere}
+.rich-preview-block img{display:block;width:100%;height:auto;max-height:450px;object-fit:contain;background:#edf1f6;border-radius:6px}
+.rich-preview-block h3{margin:14px 0 8px;font-size:16px;line-height:1.5;color:#111820}
+.rich-preview-block p{white-space:pre-wrap;font-size:13px;line-height:1.75;color:#111820;margin:8px 0}
+.rich-preview-image .rich-empty{background:#edf1f6;min-height:140px;padding:40px 20px;text-align:center}
+.rich-chat-messages{display:flex;flex-direction:column;gap:14px;margin:16px 0;max-height:400px;overflow:auto;overscroll-behavior:contain}
+.rich-chat-turn{border-left:3px solid #dfe5ef;padding-left:10px;font-size:12px}
+.rich-chat-turn.user{border-color:#1557e8}
+.rich-chat-turn>strong{font-size:12px}
+.rich-chat-turn p{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.6;margin:5px 0}
+.rich-candidate{padding:12px;border:1px solid #dfe5ef;border-radius:9px;background:#fff}
+.rich-candidate>strong{font-size:13px}
+.rich-candidate-preview{max-height:260px;overflow:auto;padding:10px 0;overscroll-behavior:contain}
+.rich-candidate-preview .rich-preview-block h3{font-size:14px}
+.rich-candidate-preview .rich-preview-block p{font-size:12px}
+.rich-candidate-preview .rich-preview-block img{max-height:160px}
+.rich-editor-error{flex:none;padding:10px 24px;margin:0;background:#fff1f3;color:#a91f32;font-size:13px;line-height:1.6}
+.rich-editor-error[hidden]{display:none}
+.rich-editor-footer{display:flex;justify-content:space-between;align-items:center;gap:20px;padding:12px 24px;border-top:1px solid #dfe5ef;flex:none;color:#637389;font-size:12px}
+.rich-legacy-warning{margin:0 0 16px;padding:10px;background:#fff6e8;border-radius:8px;color:#865b18;font-size:12px;line-height:1.6}

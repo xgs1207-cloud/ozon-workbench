@@ -200,18 +200,55 @@ class ListingDefaultTests(unittest.TestCase):
         meta = field_display_metadata(self.form)
         self.assertEqual(self.form, before)
         self.assertEqual(meta["85"]["display"], "hidden")
-        self.assertEqual(meta["203"]["display"], "advanced")
-        self.assertEqual(meta["9048"]["display"], "standard")
+        self.assertEqual(meta["203"]["display"], "hidden")
+        self.assertEqual(meta["9048"]["display"], "hidden")
+        self.assertEqual(meta["23171"]["display"], "standard")
+        self.assertFalse(meta["23171"]["hide_when_default"])
+        self.assertTrue(meta["203"]["hide_when_blank"])
+        self.assertTrue(meta["9048"]["hide_when_default"])
 
     def test_live_schema_boolean_marking_alias_stays_blank(self):
         form = {"fields": [{"attribute_id": 23536, "name": "需要标记代码", "required": False, "control": "boolean"}]}
         meta = field_display_metadata(form)
         self.assertEqual(meta["23536"]["default_policy"], "leave_blank")
-        self.assertEqual(meta["23536"]["display"], "advanced")
+        self.assertEqual(meta["23536"]["display"], "hidden")
 
     def test_legacy_scalar_brand_display_metadata_is_supported(self):
         self.assertEqual(field_display_metadata(self.form, attributes={"85": "真实品牌"})["85"]["display"], "attention")
-        self.assertEqual(field_display_metadata(self.form, attributes={"85": "无品牌"})["85"]["display"], "hidden")
+        # A legacy dictionary placeholder is repairable, not a confirmed no-brand value.
+        self.assertEqual(field_display_metadata(self.form, attributes={"85": "无品牌"})["85"]["display"], "attention")
+
+    def test_valid_saved_defaults_all_have_hidden_policy_and_keep_payload_values(self):
+        result = persist_user_defaults(self.product, self.cache, shop_id="shop-a")
+        loaded = product_form(self.product, self.cache, shop_id="shop-a")
+        for key in ("85", "9048", "200", "201", "202"):
+            self.assertEqual(loaded["field_display"][key]["display"], "hidden", key)
+            self.assertTrue(loaded["field_display"][key]["hide_when_default"])
+            self.assertEqual(result["attributes"][key], loaded["attributes"][key])
+        self.assertEqual(loaded["attributes"]["201"][0]["value"], False)
+        self.assertEqual(loaded["field_display"]["9048"]["default_match_values"], [result["attributes"]["9048"][0]["value"]])
+        compiled = read_json(self.product / "output/ozon-attributes-final.json")
+        self.assertTrue({85, 9048, 200, 201, 202}.issubset({row["attribute_id"] for row in compiled["attributes"]}))
+
+    def test_nondefault_saved_values_stay_actionable_for_every_default_semantic(self):
+        ensure_defaults_state(self.product)
+        meta = field_display_metadata(self.form, directory=self.product,
+                                     attributes={"9048": [{"value": "MY-MODEL"}], "200": [{"value": "Россия", "dictionary_value_id": 602}],
+                                                 "201": [{"value": True}], "202": [{"value": 2}], "205": [{"value": "一年"}]})
+        for key in ("9048", "200", "201", "202", "205"):
+            self.assertEqual(meta[key]["display"], "attention", key)
+
+    def test_sku_override_and_source_conflict_expose_default_control(self):
+        self.update({"原产国": "俄罗斯", "签名18+": True, "原厂包装数量": 2})
+        meta = field_display_metadata(self.form, directory=self.product,
+                                     per_sku_attributes={"S2": {"85": [{"value": "真实品牌", "dictionary_value_id": 502}]}})
+        for key in ("85", "200", "201", "202"):
+            self.assertEqual(meta[key]["display"], "attention", key)
+
+    def test_missing_dictionary_id_is_never_hidden_as_valid_default(self):
+        meta = field_display_metadata(self.form, attributes={"85": [{"value": "Нет бренда"}], "200": [{"value": "中国"}]})
+        self.assertEqual(meta["85"]["display"], "attention")
+        self.assertEqual(meta["200"]["display"], "attention")
 
     def test_wrong_shop_does_not_create_defaults_state(self):
         with self.assertRaisesRegex(ValueError, "店铺"):

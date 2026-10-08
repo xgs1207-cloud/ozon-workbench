@@ -337,6 +337,8 @@ class FakeProvider:
             copy_bundle=request.copy_bundle,
             analysis=request.analysis,
             generated_by=self.name,
+            studio_mode=request.extra.get("studio_mode") is True,
+            max_main_images=request.extra.get("max_main_images", 10),
         )
 
     def generate_image(self, request: ImageRequest) -> dict[str, Any]:

@@ -103,6 +103,32 @@ class ImagePlanContractTests(unittest.TestCase):
         self.assertTrue(all(item["shared_across_variants"] is False for item in plan["main_images"]))
         self.assertTrue(all(item["shared_across_variants"] is True for item in plan["detail_images"]))
 
+    def test_explicit_current_studio_can_plan_100_without_changing_legacy_10_contract(self):
+        from pipeline.listing_form import read_json, write_json
+        source = read_json(self.product_dir / "input/source.json")
+        source["skus"] = [{"sku_id": f"S{index}", "sku_name": f"规格{index}", "purchase_price_cny": None}
+                          for index in range(1, 101)]
+        write_json(self.product_dir / "input/source.json", source)
+        with self.assertRaisesRegex(ValueError, "超过 10"):
+            self._plan()
+        plan = self._plan(studio_mode=True)
+        self.assertEqual(len(plan["main_images"]), 100)
+        self.assertEqual(plan["selected_slots"], [])
+        self.assertTrue(plan["studio_mode"])
+        self.assertEqual(validate_contract("image-plan", plan), [])
+        guided = self._plan(max_main_images=100)
+        self.assertNotIn("studio_mode", guided)
+        self.assertNotIn("selected_slots", guided)
+        self.assertEqual(len(guided["main_images"]), 100)
+        self.assertEqual(validate_contract("image-plan", guided), [])
+        guided.pop("max_main_images")
+        self.assertTrue(validate_contract("image-plan", guided), "unmarked legacy contract must still enforce ten")
+
+    def test_planner_capacity_does_not_accept_noninteger_or_over_batch_limits(self):
+        for limit in (True, 0, 101, "100"):
+            with self.subTest(limit=limit), self.assertRaisesRegex(ValueError, "容量"):
+                self._plan(max_main_images=limit)
+
     def test_single_sku_skips_comparison_slot(self):
         summary = ingest_capture(self.products, capture_payload(skus=1), allow_new_version=True)
         directory = self.products / summary["product_id"]

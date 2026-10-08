@@ -84,6 +84,25 @@ class ImageJobTests(unittest.TestCase):
         self.assertTrue(review["sections"]["images"]["approved"])
         self.assertTrue(review["sections"]["image_plan"]["approved"])
 
+    def test_eleven_and_hundred_selected_skus_can_enqueue_one_image_without_paid_calls(self):
+        root = Path(self.temp.name)
+        image = write_solid_png(root / "many-original.png", 900, 1200).read_bytes()
+        for count in (11, 100):
+            with self.subTest(count=count):
+                with patch("collector.ingest._download_remote_image", return_value=(image, ".png")):
+                    captured = ingest_capture(root / f"many-products-{count}", {
+                        "source_url": f"https://detail.1688.com/offer/987654{count}.html", "collection_mode": "all_skus",
+                        "title_zh": "多规格测试商品", "main_images": ["https://cbu01.alicdn.com/img/many.jpg"],
+                        "skus": [{"sku_id": f"S{index}", "name": f"规格{index}", "purchase_price_cny": None}
+                                 for index in range(1, count + 1)]})
+                directory = root / f"many-products-{count}" / captured["product_id"]
+                set_selection(directory, include=[f"S{index}" for index in range(1, count + 1)])
+                slot = image_jobs.add_image_slot(directory, prompt="保留产品外观，展示真实细节", reference_ids=["main-001"], role="detail")["slot"]
+                generator = OfflineGenerator()
+                job = image_jobs.enqueue_image(directory, slot, generator=generator, dispatch=False)
+                self.assertEqual(job["status"], "queued")
+                self.assertEqual(generator.calls, [])
+
     def test_independent_concurrent_slots_merge_and_leave_lock_available(self):
         first, second = self.slot(), self.slot()
         entered, resume = threading.Event(), threading.Event()

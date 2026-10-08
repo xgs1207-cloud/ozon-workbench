@@ -311,6 +311,19 @@ class GeneratorTests(unittest.TestCase):
         self.assertNotIn("https://", json.dumps(result))
         self.assertNotIn("dummy-secret", json.dumps(result))
 
+    def test_eleven_and_hundred_selected_skus_allow_single_slot_with_offline_transport(self):
+        for count in (11, 100):
+            with self.subTest(count=count):
+                self.source["skus"] = self.source["skus"][:2] + [{"sku_id": f"S{index}"} for index in range(3, count + 1)]
+                self.write("input/source.json", self.source)
+                self.write("input/selected-skus.json", {"selected": [f"S{index}" for index in range(1, count + 1)]})
+                self.seal()
+                generator, connections = self.setup_generator(slot_filter=["main-S1"])
+                result = self.generate(generator)
+                self.assertEqual(len(result["generated"]), 1)
+                self.assertEqual(len(connections.calls), 2, "only one mock generation and one mock download")
+                self.assertEqual(len(json.loads(connections.calls[0]["body"])["images"]), 2)
+
     def test_no_reference_is_explicit_only(self):
         generator, connections = self.setup_generator(slot_filter=["main-S1"], use_reference=False, normalize=False)
         self.generate(generator)

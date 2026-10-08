@@ -182,6 +182,24 @@ class GuidedWorkflowTests(unittest.TestCase):
         self.assertTrue(workflow_status(self.directory)["analysis"]["confirmed"])
         self.assertEqual(workflow_status(self.directory)["copy"]["status"], "stale")
 
+    def test_guided_plan_accepts_eleven_skus_without_switching_to_studio_cache_semantics(self):
+        source = read_json(self.directory / "input/source.json")
+        source["skus"] = [{**source["skus"][0], "sku_id": f"S{index}", "sku_name": f"规格{index}"}
+                          for index in range(1, 12)]
+        source["extra"]["all_skus"] = deepcopy(source["skus"])
+        write_json(self.directory / "input/source.json", source)
+        set_selection(self.directory, include=[f"S{index}" for index in range(1, 12)])
+        self.copy()
+        planned = plan_selected_images(self.directory, self.provider)
+        self.assertEqual(planned["plan"]["status"], "ready")
+        self.assertEqual(len(planned["plan"]["payload"]["main_images"]), 11)
+        self.assertNotIn("studio_mode", planned["plan"]["payload"])
+        self.assertTrue(plan_selected_images(self.directory, self.provider)["cache_hit"])
+        self.assertEqual(len(self.provider.plan_requests), 1)
+        set_selection(self.directory, include=["S2"])
+        with self.assertRaisesRegex(ValueError, "变更"):
+            refresh_plan_metadata(self.directory)
+
     def test_pipeline_reuses_current_chosen_copy_and_never_projects_legacy_design(self):
         result = self.copy()
         saved = (self.directory / COPY_FILE).read_bytes()

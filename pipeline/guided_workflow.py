@@ -439,9 +439,11 @@ def plan_selected_images(directory: Path | str, provider: Any, *, force: bool = 
         return {**current, "cache_hit": True, "input_fingerprint": fingerprint}
     captured_source = _copy_source(directory)
     _assert_unchanged(directory, fingerprint, plan_fingerprint)
+    from .sku_selection import MAX_SELECTED
     plan = provider.plan_images(ImagePlanRequest(product_id=directory.name, product_dir=directory,
                                                  source=captured_source, source_refs=_refs(directory),
-                                                 analysis=current["analysis"]["payload"], copy_bundle=current["copy"]["payload"]))
+                                                 analysis=current["analysis"]["payload"], copy_bundle=current["copy"]["payload"],
+                                                 extra={"max_main_images": MAX_SELECTED}))
     errors = validate_contract("image-plan", plan)
     ids = current["selected_sku_ids"]
     main = plan.get("main_images") or []

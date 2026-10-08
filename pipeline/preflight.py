@@ -98,6 +98,12 @@ def preflight(
     from .oss_cos import image_publication_binding
     binding = image_publication_binding(product, urls_payload)
     problems.extend(binding["problems"])
+    from .rich_content import publication_binding
+    try:
+        rich_binding = publication_binding(product)
+    except ValueError as error:
+        rich_binding = {"urls": [], "expected_content": {}}
+        problems.append(str(error))
 
     payload = build_upload_payload(
         product_dir=product,
@@ -143,6 +149,13 @@ def preflight(
         for check in url_checks:
             if not check["ok"]:
                 problems.append(f"图片取不到（匿名 GET 失败）：{check['url']}｜{check.get('error') or check.get('status')}")
+    if verify_urls and rich_binding["urls"]:
+        rich_checks = check_image_urls(rich_binding["urls"], urlopen=urlopen,
+            limit=len(rich_binding["urls"]), expected_content=rich_binding["expected_content"])
+        url_checks.extend(rich_checks)
+        for check in rich_checks:
+            if not check["ok"]:
+                problems.append("富内容公开图片无法访问或内容不一致：" + str(check["url"]))
 
     return {
         "ok": not problems and not payload_blockers,
